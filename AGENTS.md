@@ -50,6 +50,12 @@ Boots degraded with zero secrets — every new feature must keep that property
   Placeholder values live in GitHub Actions secrets; real values in
   `~/.config/athlet-o/secrets.env` locally and AWS Secrets Manager
   (`dd/remote-dev/agent-secrets`) for the cluster.
+- **Secrets sourcing** goes through `src/secrets.rs`: env first, fiducia
+  config KV (`secrets/athleto/<ENV_NAME>`) as the cross-provider overlay for
+  gaps. New secret env vars must be added to `secrets::MANAGED_KEYS` (an
+  explicit allowlist — never widen it to arbitrary names) and to the README
+  table + CI workflow. AWS SM stays production secrets-of-record until the
+  encrypted `fiducia-secrets` API exists; see docs/secrets-management.md.
 - Webhooks must stay idempotent: every handler records
   `(provider, event_id)` in `payment_events` first and bails on replay.
   Ledger postings use idempotency keys (`athleto:order:…`,
