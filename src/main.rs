@@ -140,10 +140,13 @@ fn router(state: SharedState) -> Router {
         // Orders.
         .route("/checkout", post(orders::checkout))
         .route("/orders", get(orders::orders_page))
+        .route("/orders/{id}", get(orders::order_detail_page))
+        .route("/orders/{id}/reorder", post(orders::reorder))
         .route("/quick-order", get(orders::quick_order_page).post(orders::quick_order_submit))
         // B2B ERP API.
         .route("/api/v1/products", get(api::products))
         .route("/api/v1/orders", get(api::orders_list).post(api::orders_create))
+        .route("/api/v1/orders/{id}/fulfillment", post(api::order_fulfill))
         .route("/healthz", get(healthz))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
