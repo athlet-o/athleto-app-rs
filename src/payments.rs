@@ -1570,6 +1570,121 @@ mod tests {
         assert_eq!(dollars(5), "0.05");
         assert_eq!(dollars(599), "5.99");
         assert_eq!(dollars(123400), "1234.00");
+        // Refunds render with one sign, in the right place.
+        assert_eq!(dollars(-599), "-5.99");
+        assert_eq!(dollars(-5), "-0.05");
+    }
+
+    #[test]
+    fn decimal_to_cents_handles_provider_amount_shapes() {
+        // The shapes PayPal actually sends.
+        assert_eq!(decimal_to_cents("12.34"), Some(1234));
+        assert_eq!(decimal_to_cents("5"), Some(500));
+        assert_eq!(decimal_to_cents("12.3"), Some(1230));
+        assert_eq!(decimal_to_cents("0.05"), Some(5));
+        assert_eq!(decimal_to_cents(" 7.00 "), Some(700));
+        assert_eq!(decimal_to_cents("-5.99"), Some(-599));
+        // Refused rather than mis-booked.
+        assert_eq!(decimal_to_cents("12.345"), None);
+        assert_eq!(decimal_to_cents("abc"), None);
+        assert_eq!(decimal_to_cents("12.x"), None);
+    }
+
+    #[test]
+    fn paypal_approval_link_finds_approve_or_payer_action() {
+        let with_approve = serde_json::json!({
+            "links": [
+                {"rel": "self", "href": "https://api.paypal.com/self"},
+                {"rel": "approve", "href": "https://paypal.com/approve"},
+            ]
+        });
+        assert_eq!(
+            paypal_approval_link(&with_approve).as_deref(),
+            Some("https://paypal.com/approve")
+        );
+
+        let with_payer_action = serde_json::json!({
+            "links": [{"rel": "payer-action", "href": "https://paypal.com/act"}]
+        });
+        assert_eq!(
+            paypal_approval_link(&with_payer_action).as_deref(),
+            Some("https://paypal.com/act")
+        );
+
+        assert_eq!(paypal_approval_link(&serde_json::json!({"links": []})), None);
+        assert_eq!(paypal_approval_link(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn item_display_name_prefers_brand_subname() {
+        let branded = db::OrderItemRow {
+            order_id: Uuid::nil(),
+            name: "AthletO".into(),
+            subname: Some("recover".into()),
+            format: db::ProductFormat::Cup,
+            qty: 2,
+            unit_price_cents: 449,
+        };
+        assert_eq!(item_display_name(&branded), "AthletO recover (ready cup)");
+
+        let plain = db::OrderItemRow { subname: None, ..branded };
+        assert_eq!(item_display_name(&plain), "AthletO (ready cup)");
+    }
+
+    #[test]
+    fn return_urls_carry_provider_and_order() {
+        let order = Uuid::nil();
+        assert_eq!(
+            success_url("https://biz.athleto.store", "square", order),
+            format!("https://biz.athleto.store/pay/success?provider=square&order={order}")
+        );
+        assert_eq!(
+            cancel_url("https://app.athleto.store", order),
+            format!("https://app.athleto.store/pay/cancel?order={order}")
+        );
+    }
+
+    #[test]
+    fn stripe_signature_rejects_malformed_headers() {
+        let secret = "whsec_test_secret";
+        let body = b"{}";
+        // No timestamp, empty header, garbage.
+        assert!(!stripe_signature_valid(secret, "v1=deadbeef", body));
+        assert!(!stripe_signature_valid(secret, "", body));
+        assert!(!stripe_signature_valid(secret, "t=,v1=", body));
+        // Wrong-length signature can't pass the constant-time compare.
+        assert!(!stripe_signature_valid(secret, "t=17,v1=abcd", body));
+    }
+
+    #[test]
+    fn stripe_signature_accepts_any_matching_v1_among_several() {
+        // Stripe sends multiple v1 entries during secret rotation.
+        let secret = "whsec_rotating";
+        let body = br#"{"id":"evt_2"}"#;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(b"1700000001.");
+        mac.update(body);
+        let good = hex::encode(mac.finalize().into_bytes());
+        let bad = "0".repeat(good.len());
+        let header = format!("t=1700000001,v1={bad},v1={good}");
+        assert!(stripe_signature_valid(secret, &header, body));
+    }
+
+    #[test]
+    fn square_signature_rejects_wrong_key_and_url() {
+        let key = "sq_sig_key";
+        let url = "https://app.athleto.store/webhooks/square";
+        let body = br#"{"event_id":"abc"}"#;
+        let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).unwrap();
+        mac.update(url.as_bytes());
+        mac.update(body);
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        // Signed for one URL must not verify for another (Square hashes the
+        // notification URL into the signature).
+        assert!(!square_signature_valid(key, "https://biz.athleto.store/webhooks/square", &signature, body));
+        assert!(!square_signature_valid("other_key", url, &signature, body));
+        assert!(!square_signature_valid(key, url, "", body));
     }
 
     #[test]
