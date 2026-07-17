@@ -858,6 +858,46 @@ impl Shipment {
     }
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UserShipmentRow {
+    pub order_id: Uuid,
+    pub status: ShipmentStatus,
+    pub carrier: Option<String>,
+    pub tracking_number: Option<String>,
+    pub ship_date: Option<chrono::NaiveDate>,
+    pub eta_earliest: Option<chrono::NaiveDate>,
+    pub eta_latest: Option<chrono::NaiveDate>,
+    pub delivered_at: Option<DateTime<Utc>>,
+}
+
+impl UserShipmentRow {
+    pub fn shipment(&self) -> Shipment {
+        Shipment {
+            id: Uuid::nil(),
+            status: self.status,
+            carrier: self.carrier.clone(),
+            tracking_number: self.tracking_number.clone(),
+            ship_date: self.ship_date,
+            eta_earliest: self.eta_earliest,
+            eta_latest: self.eta_latest,
+            delivered_at: self.delivered_at,
+        }
+    }
+}
+
+/// All shipments across a user's orders, for the order-list tracking column.
+pub async fn shipments_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<UserShipmentRow>> {
+    sqlx::query_as::<_, UserShipmentRow>(
+        "SELECT s.order_id, s.status, s.carrier, s.tracking_number, s.ship_date, \
+                s.eta_earliest, s.eta_latest, s.delivered_at \
+         FROM shipments s JOIN orders o ON o.id = s.order_id \
+         WHERE o.user_id = $1 ORDER BY s.created_at",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn shipments_for_order(pool: &PgPool, order_id: Uuid) -> sqlx::Result<Vec<Shipment>> {
     sqlx::query_as::<_, Shipment>(
         "SELECT id, status, carrier, tracking_number, ship_date, eta_earliest, eta_latest, delivered_at \
