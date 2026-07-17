@@ -184,18 +184,6 @@ pub async fn account_page(
         _ => Vec::new(),
     };
 
-    // Balance and credits from the Quaestor observer ledger (best-effort:
-    // the panel simply doesn't render when the ledger is unconfigured,
-    // unreachable, or doesn't know this customer yet).
-    let billing_panel = match auth_user.email.as_deref() {
-        Some(email) if state.config.billing.is_some() => {
-            crate::billing::billing_summary(&state, email)
-                .await
-                .map(|summary| billing_section(&summary))
-        }
-        _ => None,
-    };
-
     account_markup(
         &state,
         &auth_user,
@@ -204,24 +192,9 @@ pub async fn account_page(
         &recent,
         &api_keys,
         &params,
-        billing_panel,
+        None,
     )
     .into_response()
-}
-
-/// "Billing & credits" panel fed by the Quaestor ledger's billing-state.
-fn billing_section(summary: &crate::billing::BillingSummary) -> Markup {
-    let credits = summary.credit_memos_minor + summary.unallocated_cash_minor;
-    html! {
-        div .notice {
-            strong { "Billing & credits. " }
-            "Outstanding balance: " strong { (pages::format_price(summary.outstanding_balance_minor)) }
-            " \u{00b7} Credits on account: " strong { (pages::format_price(credits)) }
-            @if let Some(last) = &summary.last_payment {
-                " \u{00b7} Last payment: " (pages::format_price(last.amount_minor)) " via " (last.via)
-            }
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -10,7 +10,8 @@
 //! * **Postgres advisory locks** give cross-replica mutual exclusion for a
 //!   *short critical section* without a table: `pg_try_advisory_lock` picks the
 //!   one replica that runs a periodic job this tick, then unlocks. This is the
-//!   built-in, dependency-free leader mechanism.
+//!   built-in, dependency-free leader mechanism. (Session-scoped, so it runs on
+//!   the SeaORM connection exactly like every other query.)
 //! * **fiducia.cloud leases** are the same idea at the infrastructure layer:
 //!   a seconds-long, fenced, crash-safe lease, useful when leadership must be
 //!   coordinated across clusters (not just replicas in one Postgres). When
@@ -23,9 +24,16 @@
 //! never an advisory lock (session-scoped, breaks through poolers) and never a
 //! fiducia lease (liveness-coupled, wrong layer). See docs/cart-holds.md.
 
-use sqlx::PgPool;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Value};
 
 use crate::Config;
+
+fn stmt<I>(sql: &str, values: I) -> Statement
+where
+    I: IntoIterator<Item = Value>,
+{
+    Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
+}
 
 /// Stable 64-bit key for a named advisory lock. FNV-1a over the job name keeps
 /// it deterministic across replicas and releases.
@@ -42,18 +50,21 @@ fn advisory_key(name: &str) -> i64 {
 /// (async) so the advisory lock or fiducia lease is returned promptly.
 pub enum Leadership {
     /// Won via `pg_try_advisory_lock`; released with `pg_advisory_unlock`.
-    Advisory { pool: PgPool, key: i64 },
+    Advisory { conn: DatabaseConnection, key: i64 },
     /// Won via a fiducia lease; released with POST /v1/locks/release.
-    Fiducia { client: FiduciaClient, holder: String, fencing_token: u64 },
+    Fiducia {
+        client: FiduciaClient,
+        holder: String,
+        fencing_token: u64,
+    },
 }
 
 impl Leadership {
     pub async fn release(self) {
         match self {
-            Leadership::Advisory { pool, key } => {
-                if let Err(err) = sqlx::query("SELECT pg_advisory_unlock($1)")
-                    .bind(key)
-                    .execute(&pool)
+            Leadership::Advisory { conn, key } => {
+                if let Err(err) = conn
+                    .execute(stmt("SELECT pg_advisory_unlock($1)", [key.into()]))
                     .await
                 {
                     tracing::warn!(error = %err, "pg_advisory_unlock failed");
@@ -72,7 +83,7 @@ impl Leadership {
 /// hold leadership (run the job, then `release`), `None` if another replica
 /// holds it (skip this tick).
 pub async fn try_lead(
-    pool: &PgPool,
+    conn: &DatabaseConnection,
     config: &Config,
     job: &str,
     lease_secs: u64,
@@ -95,16 +106,22 @@ pub async fn try_lead(
     }
 
     let key = advisory_key(job);
-    match sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-        .bind(key)
-        .fetch_one(pool)
-        .await
-    {
-        Ok(true) => Some(Leadership::Advisory {
-            pool: pool.clone(),
-            key,
-        }),
-        Ok(false) => None, // another replica holds it
+    let row = conn
+        .query_one(stmt("SELECT pg_try_advisory_lock($1) AS got", [key.into()]))
+        .await;
+    match row {
+        Ok(Some(row)) => match row.try_get::<bool>("", "got") {
+            Ok(true) => Some(Leadership::Advisory {
+                conn: conn.clone(),
+                key,
+            }),
+            Ok(false) => None, // another replica holds it
+            Err(err) => {
+                tracing::warn!(error = %err, "advisory lock result unreadable; skipping tick");
+                None
+            }
+        },
+        Ok(None) => None,
         Err(err) => {
             tracing::warn!(error = %err, "pg_try_advisory_lock failed; skipping tick");
             None

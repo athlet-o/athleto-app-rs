@@ -7,6 +7,7 @@ pub mod api;
 pub mod assets;
 pub mod auth;
 pub mod cart;
+pub mod coordinate;
 pub mod db;
 pub mod entities;
 pub mod orders;
@@ -39,6 +40,13 @@ pub struct Config {
     /// SMS second factors need the Supabase phone-MFA add-on plus a
     /// configured SMS provider; the UI stays hidden until this is set.
     pub sms_mfa_enabled: bool,
+    /// fiducia.cloud lock service, used only for singleton-job leadership
+    /// leases (never for cart holds). Both must be set to activate; otherwise
+    /// leadership falls back to a Postgres advisory lock.
+    pub fiducia_url: Option<String>,
+    pub fiducia_api_key: Option<String>,
+    /// Identifies this replica in fiducia lease holder strings.
+    pub replica_id: String,
 }
 
 impl Default for Config {
@@ -49,6 +57,9 @@ impl Default for Config {
             public_base_url: "https://app.athleto.store".to_string(),
             allowed_hosts: None,
             sms_mfa_enabled: false,
+            fiducia_url: None,
+            fiducia_api_key: None,
+            replica_id: "local".to_string(),
         }
     }
 }
@@ -173,10 +184,14 @@ pub fn router(state: SharedState) -> Router {
         // Orders.
         .route("/checkout", post(orders::checkout))
         .route("/orders", get(orders::orders_page))
+        .route("/orders/{id}", get(orders::order_detail_page))
+        .route("/orders/{id}/reorder", post(orders::reorder))
         .route("/quick-order", get(orders::quick_order_page).post(orders::quick_order_submit))
-        // B2B ERP API.
+        // B2B ERP API. The fulfillment hook is the outbound "856 ASN" step:
+        // ops or an EDI provider records carrier + tracking there.
         .route("/api/v1/products", get(api::products))
         .route("/api/v1/orders", get(api::orders_list).post(api::orders_create))
+        .route("/api/v1/orders/{id}/fulfillment", post(api::order_fulfill))
         // Vendored assets (htmx + extensions), served same-origin for the CSP.
         .route(assets::HTMX_JS_PATH, get(assets::htmx_js))
         .route(assets::HTMX_WS_JS_PATH, get(assets::htmx_ws_js))

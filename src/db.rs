@@ -422,15 +422,7 @@ pub async fn recent_login_events(
 // ---------------------------------------------------------------------------
 // Orders.
 
-<<<<<<< HEAD
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Deserialize,
-    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
-)]
-#[sqlx(type_name = "order_kind", rename_all = "snake_case")]
-=======
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, serde::Deserialize)]
->>>>>>> origin/main
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "order_kind")]
 #[serde(rename_all = "snake_case")]
 pub enum OrderKind {
@@ -455,15 +447,7 @@ impl OrderKind {
     }
 }
 
-<<<<<<< HEAD
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Deserialize,
-    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
-)]
-#[sqlx(type_name = "order_frequency", rename_all = "lowercase")]
-=======
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, serde::Deserialize)]
->>>>>>> origin/main
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "order_frequency")]
 #[serde(rename_all = "lowercase")]
 pub enum OrderFrequency {
@@ -553,17 +537,16 @@ impl OrderChannel {
             Self::Edi => "edi",
         }
     }
-
-    pub fn is_b2b(self) -> bool {
-        !matches!(self, Self::D2cWeb)
-    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "ship_method", rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "ship_method")]
 pub enum ShipMethod {
+    #[sea_orm(string_value = "standard")]
     Standard,
+    #[sea_orm(string_value = "expedited")]
     Expedited,
+    #[sea_orm(string_value = "freight")]
     Freight,
 }
 
@@ -613,113 +596,6 @@ impl ShipMethod {
     }
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type,
-    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
-)]
-#[sqlx(type_name = "payment_provider", rename_all = "lowercase")]
-#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_provider")]
-pub enum PaymentProvider {
-    #[sea_orm(string_value = "stripe")]
-    Stripe,
-    #[sea_orm(string_value = "paypal")]
-    Paypal,
-    #[sea_orm(string_value = "square")]
-    Square,
-    /// B2B open account: ships against a PO, settled via a hosted Net-30
-    /// Stripe invoice (card / ACH / bank transfer).
-    #[sea_orm(string_value = "invoice")]
-    Invoice,
-}
-
-impl PaymentProvider {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stripe => "stripe",
-            Self::Paypal => "paypal",
-            Self::Square => "square",
-            Self::Invoice => "invoice",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stripe => "Card / bank (Stripe)",
-            Self::Paypal => "PayPal",
-            Self::Square => "Square",
-            Self::Invoice => "Invoice (Net 30)",
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type,
-    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
-)]
-#[sqlx(type_name = "payment_status", rename_all = "lowercase")]
-#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_status")]
-pub enum PaymentStatus {
-    #[sea_orm(string_value = "pending")]
-    Pending,
-    /// Payment initiated but not settled (e.g. ACH debit clearing).
-    #[sea_orm(string_value = "processing")]
-    Processing,
-    #[sea_orm(string_value = "paid")]
-    Paid,
-    /// Net-30 invoice sent; AR is open in the ledger.
-    #[sea_orm(string_value = "invoiced")]
-    Invoiced,
-    #[sea_orm(string_value = "failed")]
-    Failed,
-    #[sea_orm(string_value = "refunded")]
-    Refunded,
-}
-
-impl PaymentStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "payment pending",
-            Self::Processing => "payment processing",
-            Self::Paid => "paid",
-            Self::Invoiced => "invoiced net 30",
-            Self::Failed => "payment failed",
-            Self::Refunded => "refunded",
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type,
-    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
-)]
-#[sqlx(type_name = "payment_kind", rename_all = "snake_case")]
-#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_kind")]
-pub enum PaymentKind {
-    #[sea_orm(string_value = "charge")]
-    Charge,
-    #[sea_orm(string_value = "subscription_cycle")]
-    SubscriptionCycle,
-    #[sea_orm(string_value = "refund")]
-    Refund,
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type,
-    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
-)]
-#[sqlx(type_name = "subscription_status", rename_all = "snake_case")]
-#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "subscription_status")]
-pub enum SubscriptionStatus {
-    #[sea_orm(string_value = "pending")]
-    Pending,
-    #[sea_orm(string_value = "active")]
-    Active,
-    #[sea_orm(string_value = "past_due")]
-    PastDue,
-    #[sea_orm(string_value = "cancelled")]
-    Cancelled,
-}
-
 #[derive(Debug, Clone)]
 pub struct OrderRow {
     pub id: Uuid,
@@ -735,17 +611,27 @@ pub struct OrderRow {
     pub total_cents: i64,
     pub next_run_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-    pub payment_provider: Option<PaymentProvider>,
-    pub payment_status: PaymentStatus,
-    pub payment_ref: Option<String>,
-    pub paid_at: Option<DateTime<Utc>>,
 }
 
-const ORDER_COLUMNS: &str = "id, kind, frequency, status, channel, ship_method, po_number, \
-     subtotal_cents, shipping_cents, tax_cents, total_cents, next_run_at, created_at, \
-     payment_provider, payment_status, payment_ref, paid_at";
-
 impl OrderRow {
+    fn from_model(order: order::Model) -> Self {
+        Self {
+            id: order.id,
+            kind: order.kind,
+            frequency: order.frequency,
+            status: order.status,
+            channel: order.channel,
+            ship_method: order.ship_method,
+            po_number: order.po_number,
+            subtotal_cents: order.subtotal_cents,
+            shipping_cents: order.shipping_cents,
+            tax_cents: order.tax_cents,
+            total_cents: order.total_cents,
+            next_run_at: order.next_run_at,
+            created_at: order.created_at,
+        }
+    }
+
     /// Estimated delivery window (earliest, latest) as calendar dates,
     /// counting business days forward from the order date.
     pub fn delivery_window(&self) -> (chrono::NaiveDate, chrono::NaiveDate) {
@@ -790,54 +676,6 @@ pub struct NewOrderLine {
     pub unit_price_cents: i32,
 }
 
-<<<<<<< HEAD
-pub async fn list_orders(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<OrderRow>> {
-    sqlx::query_as::<_, OrderRow>(&format!(
-        "SELECT {ORDER_COLUMNS} FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50"
-    ))
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-}
-
-/// One order scoped to its owner (None if not found or not theirs).
-pub async fn get_order(pool: &PgPool, user_id: Uuid, order_id: Uuid) -> sqlx::Result<Option<OrderRow>> {
-    sqlx::query_as::<_, OrderRow>(&format!(
-        "SELECT {ORDER_COLUMNS} FROM orders WHERE id = $1 AND user_id = $2"
-    ))
-    .bind(order_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn order_items(pool: &PgPool, order_id: Uuid) -> sqlx::Result<Vec<OrderItemRow>> {
-    sqlx::query_as::<_, OrderItemRow>(
-        "SELECT oi.order_id, p.name, p.subname, p.format, oi.qty, oi.unit_price_cents \
-         FROM order_items oi JOIN products p ON p.id = oi.product_id \
-         WHERE oi.order_id = $1 ORDER BY oi.id",
-    )
-    .bind(order_id)
-    .fetch_all(pool)
-    .await
-}
-
-/// Lines from a past order, for the reorder-into-cart action.
-pub async fn order_reorder_lines(
-    pool: &PgPool,
-    user_id: Uuid,
-    order_id: Uuid,
-) -> sqlx::Result<Vec<(i64, i32)>> {
-    sqlx::query_as(
-        "SELECT oi.product_id, oi.qty FROM order_items oi \
-         JOIN orders o ON o.id = oi.order_id \
-         WHERE oi.order_id = $1 AND o.user_id = $2",
-    )
-    .bind(order_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-=======
 pub async fn list_orders(conn: &DatabaseConnection, user_id: Uuid) -> Result<Vec<OrderRow>, DbErr> {
     Ok(order::Entity::find()
         .filter(order::Column::UserId.eq(user_id))
@@ -846,19 +684,60 @@ pub async fn list_orders(conn: &DatabaseConnection, user_id: Uuid) -> Result<Vec
         .all(conn)
         .await?
         .into_iter()
-        .map(|order| OrderRow {
-            id: order.id,
-            kind: order.kind,
-            frequency: order.frequency,
-            status: order.status,
-            channel: order.channel,
-            po_number: order.po_number,
-            total_cents: order.total_cents,
-            next_run_at: order.next_run_at,
-            created_at: order.created_at,
-        })
+        .map(OrderRow::from_model)
         .collect())
->>>>>>> origin/main
+}
+
+/// One order scoped to its owner (None if not found or not theirs).
+pub async fn get_order(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+    order_id: Uuid,
+) -> Result<Option<OrderRow>, DbErr> {
+    Ok(order::Entity::find()
+        .filter(order::Column::Id.eq(order_id))
+        .filter(order::Column::UserId.eq(user_id))
+        .one(conn)
+        .await?
+        .map(OrderRow::from_model))
+}
+
+pub async fn order_items(
+    conn: &DatabaseConnection,
+    order_id: Uuid,
+) -> Result<Vec<OrderItemRow>, DbErr> {
+    OrderItemRow::find_by_statement(stmt(
+        "SELECT oi.order_id, p.name, p.subname, p.format::text AS format, oi.qty, oi.unit_price_cents \
+         FROM order_items oi JOIN products p ON p.id = oi.product_id \
+         WHERE oi.order_id = $1 ORDER BY oi.id",
+        [order_id.into()],
+    ))
+    .all(conn)
+    .await
+}
+
+/// Lines from a past order, for the reorder-into-cart action.
+pub async fn order_reorder_lines(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+    order_id: Uuid,
+) -> Result<Vec<(i64, i32)>, DbErr> {
+    let rows = conn
+        .query_all(stmt(
+            "SELECT oi.product_id, oi.qty FROM order_items oi \
+             JOIN orders o ON o.id = oi.order_id \
+             WHERE oi.order_id = $1 AND o.user_id = $2",
+            [order_id.into(), user_id.into()],
+        ))
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<i64>("", "product_id")?,
+                row.try_get::<i32>("", "qty")?,
+            ))
+        })
+        .collect()
 }
 
 pub async fn order_items_for_user(
@@ -878,178 +757,12 @@ pub async fn order_items_for_user(
     .await
 }
 
-<<<<<<< HEAD
-// ---------------------------------------------------------------------------
-// Shipments / fulfillment (carrier + tracking). Populated by ops or an EDI
-// 856 mapping; surfaced on the order-detail/receipt page.
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "shipment_status", rename_all = "lowercase")]
-pub enum ShipmentStatus {
-    Packing,
-    Shipped,
-    Delivered,
-}
-
-impl ShipmentStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Packing => "packing",
-            Self::Shipped => "shipped",
-            Self::Delivered => "delivered",
-        }
-    }
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "packing" => Some(Self::Packing),
-            "shipped" => Some(Self::Shipped),
-            "delivered" => Some(Self::Delivered),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct Shipment {
-    pub id: Uuid,
-    pub status: ShipmentStatus,
-    pub carrier: Option<String>,
-    pub tracking_number: Option<String>,
-    pub ship_date: Option<chrono::NaiveDate>,
-    pub eta_earliest: Option<chrono::NaiveDate>,
-    pub eta_latest: Option<chrono::NaiveDate>,
-    pub delivered_at: Option<DateTime<Utc>>,
-}
-
-impl Shipment {
-    /// Carrier tracking URL for the major carriers, else None.
-    pub fn tracking_url(&self) -> Option<String> {
-        let number = self.tracking_number.as_deref()?;
-        let carrier = self.carrier.as_deref().unwrap_or("").to_lowercase();
-        let url = if carrier.contains("ups") {
-            format!("https://www.ups.com/track?tracknum={number}")
-        } else if carrier.contains("fedex") {
-            format!("https://www.fedex.com/fedextrack/?trknbr={number}")
-        } else if carrier.contains("usps") {
-            format!("https://tools.usps.com/go/TrackConfirmAction?tLabels={number}")
-        } else if carrier.contains("dhl") {
-            format!("https://www.dhl.com/us-en/home/tracking.html?tracking-id={number}")
-        } else {
-            return None;
-        };
-        Some(url)
-    }
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct UserShipmentRow {
-    pub order_id: Uuid,
-    pub status: ShipmentStatus,
-    pub carrier: Option<String>,
-    pub tracking_number: Option<String>,
-    pub ship_date: Option<chrono::NaiveDate>,
-    pub eta_earliest: Option<chrono::NaiveDate>,
-    pub eta_latest: Option<chrono::NaiveDate>,
-    pub delivered_at: Option<DateTime<Utc>>,
-}
-
-impl UserShipmentRow {
-    pub fn shipment(&self) -> Shipment {
-        Shipment {
-            id: Uuid::nil(),
-            status: self.status,
-            carrier: self.carrier.clone(),
-            tracking_number: self.tracking_number.clone(),
-            ship_date: self.ship_date,
-            eta_earliest: self.eta_earliest,
-            eta_latest: self.eta_latest,
-            delivered_at: self.delivered_at,
-        }
-    }
-}
-
-/// All shipments across a user's orders, for the order-list tracking column.
-pub async fn shipments_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<UserShipmentRow>> {
-    sqlx::query_as::<_, UserShipmentRow>(
-        "SELECT s.order_id, s.status, s.carrier, s.tracking_number, s.ship_date, \
-                s.eta_earliest, s.eta_latest, s.delivered_at \
-         FROM shipments s JOIN orders o ON o.id = s.order_id \
-         WHERE o.user_id = $1 ORDER BY s.created_at",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn shipments_for_order(pool: &PgPool, order_id: Uuid) -> sqlx::Result<Vec<Shipment>> {
-    sqlx::query_as::<_, Shipment>(
-        "SELECT id, status, carrier, tracking_number, ship_date, eta_earliest, eta_latest, delivered_at \
-         FROM shipments WHERE order_id = $1 ORDER BY created_at",
-    )
-    .bind(order_id)
-    .fetch_all(pool)
-    .await
-}
-
-/// Record a fulfillment (ops / EDI 856): create a shipment with carrier +
-/// tracking and advance the order to fulfilled. Ownership is checked so an
-/// API key can only fulfill its own orders. Returns None if the order isn't
-/// the user's.
-pub async fn record_fulfillment(
-    pool: &PgPool,
-    user_id: Uuid,
-    order_id: Uuid,
-    carrier: &str,
-    tracking_number: &str,
-    ship_date: chrono::NaiveDate,
-) -> sqlx::Result<Option<Uuid>> {
-    let mut tx = pool.begin().await?;
-    let owned: Option<(ShipMethod,)> =
-        sqlx::query_as("SELECT ship_method FROM orders WHERE id = $1 AND user_id = $2 FOR UPDATE")
-            .bind(order_id)
-            .bind(user_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some((ship_method,)) = owned else {
-        tx.rollback().await?;
-        return Ok(None);
-    };
-    let (min, max) = ship_method.eta_business_days();
-    let (id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO shipments \
-         (order_id, status, carrier, tracking_number, ship_date, eta_earliest, eta_latest) \
-         VALUES ($1, 'shipped', $2, $3, $4, $5, $6) RETURNING id",
-    )
-    .bind(order_id)
-    .bind(carrier)
-    .bind(tracking_number)
-    .bind(ship_date)
-    .bind(add_business_days(ship_date, min))
-    .bind(add_business_days(ship_date, max))
-    .fetch_one(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE orders SET status = 'fulfilled' WHERE id = $1")
-        .bind(order_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(Some(id))
-}
-
-pub async fn product_prices(pool: &PgPool) -> sqlx::Result<Vec<(i64, String, i32)>> {
-    let rows: Vec<(i64, String, i32)> =
-        sqlx::query_as("SELECT id, slug, price_cents FROM products ORDER BY id")
-            .fetch_all(pool)
-            .await?;
-    Ok(rows)
-=======
 pub async fn product_prices(conn: &DatabaseConnection) -> Result<Vec<(i64, String, i32)>, DbErr> {
     Ok(list_products(conn)
         .await?
         .into_iter()
         .map(|product| (product.id, product.slug, product.price_cents))
         .collect())
->>>>>>> origin/main
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,142 +964,6 @@ pub async fn sweep_expired_holds(conn: &DatabaseConnection) -> Result<u64, DbErr
     Ok(result.rows_affected())
 }
 
-/// Materialize every recurring order whose `next_run_at` is due. Each order is
-/// processed in its own transaction guarded by a transaction-scoped advisory
-/// lock on the order id, so two runners (or a runner and a bypassed leader
-/// guard) can never fire the same subscription twice. Returns how many child
-/// orders were created.
-pub async fn run_due_recurring_orders(pool: &PgPool) -> sqlx::Result<u64> {
-    let due: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM orders \
-         WHERE kind = 'recurring' AND status <> 'cancelled' \
-         AND next_run_at IS NOT NULL AND next_run_at <= now() \
-         ORDER BY next_run_at LIMIT 100",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let mut created = 0u64;
-    for (subscription_id,) in due {
-        // hashtextextended gives a stable bigint key for the advisory lock.
-        let mut tx = pool.begin().await?;
-        let got: bool = sqlx::query_scalar(
-            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))",
-        )
-        .bind(subscription_id.to_string())
-        .fetch_one(&mut *tx)
-        .await?;
-        if !got {
-            tx.rollback().await?; // another runner owns this subscription
-            continue;
-        }
-
-        // Re-read under the lock; skip if no longer due (a racing runner that
-        // held the lock just before us already advanced it).
-        let sub: Option<(Option<OrderFrequency>, OrderChannel, ShipMethod, DateTime<Utc>)> =
-            sqlx::query_as(
-                "SELECT frequency, channel, ship_method, next_run_at FROM orders \
-                 WHERE id = $1 AND kind = 'recurring' AND status <> 'cancelled' \
-                 AND next_run_at IS NOT NULL AND next_run_at <= now()",
-            )
-            .bind(subscription_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some((frequency, channel, ship_method, _next)) = sub else {
-            tx.rollback().await?;
-            continue;
-        };
-
-        let user_id: (Uuid,) = sqlx::query_as("SELECT user_id FROM orders WHERE id = $1")
-            .bind(subscription_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let lines: Vec<(i64, i32, i32)> = sqlx::query_as(
-            "SELECT product_id, qty, unit_price_cents FROM order_items WHERE order_id = $1",
-        )
-        .bind(subscription_id)
-        .fetch_all(&mut *tx)
-        .await?;
-
-        // Decrement stock for tracked products; if any line is short, skip the
-        // child this cycle but still advance the cursor so the subscription
-        // isn't wedged (a real system would backorder).
-        let mut short = false;
-        for (product_id, qty, _) in &lines {
-            let on_hand: Option<(i32,)> =
-                sqlx::query_as("SELECT on_hand FROM inventory WHERE product_id = $1 FOR UPDATE")
-                    .bind(product_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            if let Some((on_hand,)) = on_hand {
-                if on_hand < *qty {
-                    short = true;
-                    break;
-                }
-            }
-        }
-
-        if !short {
-            for (product_id, qty, _) in &lines {
-                sqlx::query(
-                    "UPDATE inventory SET on_hand = on_hand - $2, updated_at = now() \
-                     WHERE product_id = $1",
-                )
-                .bind(product_id)
-                .bind(qty)
-                .execute(&mut *tx)
-                .await?;
-            }
-            let subtotal: i64 = lines
-                .iter()
-                .map(|(_, qty, price)| i64::from(*price) * i64::from(*qty))
-                .sum();
-            let shipping = ship_method.shipping_cents();
-            let (child_id,): (Uuid,) = sqlx::query_as(
-                "INSERT INTO orders \
-                 (user_id, kind, channel, ship_method, subtotal_cents, shipping_cents, \
-                  tax_cents, total_cents, recurs_from) \
-                 VALUES ($1, 'one_time', $2, $3, $4, $5, 0, $6, $7) RETURNING id",
-            )
-            .bind(user_id.0)
-            .bind(channel)
-            .bind(ship_method)
-            .bind(subtotal)
-            .bind(shipping)
-            .bind(subtotal + shipping)
-            .bind(subscription_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            for (product_id, qty, price) in &lines {
-                sqlx::query(
-                    "INSERT INTO order_items (order_id, product_id, qty, unit_price_cents) \
-                     VALUES ($1, $2, $3, $4)",
-                )
-                .bind(child_id)
-                .bind(product_id)
-                .bind(qty)
-                .bind(price)
-                .execute(&mut *tx)
-                .await?;
-            }
-            created += 1;
-        } else {
-            tracing::warn!(%subscription_id, "recurring order short on stock; skipping this cycle");
-        }
-
-        let interval = frequency.map(|f| f.interval_days()).unwrap_or(30);
-        sqlx::query(
-            "UPDATE orders SET next_run_at = next_run_at + make_interval(days => $2) WHERE id = $1",
-        )
-        .bind(subscription_id)
-        .bind(interval as i32)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-    }
-    Ok(created)
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct InsufficientLine {
     pub product_id: i64,
@@ -1473,7 +1050,7 @@ pub async fn place_order(
         .map(|line| i64::from(line.unit_price_cents) * i64::from(line.qty))
         .sum();
     let shipping = ship_method.shipping_cents();
-    let tax = 0; // Sales tax is calculated at fulfillment by jurisdiction.
+    let tax: i64 = 0; // Sales tax is calculated at fulfillment by jurisdiction.
     let total = subtotal + shipping + tax;
     let next_run_at = match (kind, frequency) {
         (OrderKind::Recurring, Some(freq)) => {
@@ -1481,38 +1058,24 @@ pub async fn place_order(
         }
         _ => None,
     };
-<<<<<<< HEAD
-    let (order_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO orders \
-         (user_id, kind, frequency, channel, ship_method, po_number, \
-          subtotal_cents, shipping_cents, tax_cents, total_cents, next_run_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
-    )
-    .bind(user_id)
-    .bind(kind)
-    .bind(frequency)
-    .bind(channel)
-    .bind(ship_method)
-    .bind(po_number)
-    .bind(subtotal)
-    .bind(shipping)
-    .bind(tax)
-    .bind(total)
-    .bind(next_run_at)
-    .fetch_one(&mut *tx)
-    .await?;
-=======
     let order_row = tx
         .query_one(stmt(
-            "INSERT INTO orders (user_id, kind, frequency, channel, po_number, total_cents, next_run_at) \
-             VALUES ($1, $2::order_kind, $3::order_frequency, $4::order_channel, $5, $6, $7) \
+            "INSERT INTO orders \
+             (user_id, kind, frequency, channel, ship_method, po_number, \
+              subtotal_cents, shipping_cents, tax_cents, total_cents, next_run_at) \
+             VALUES ($1, $2::order_kind, $3::order_frequency, $4::order_channel, \
+                     $5::ship_method, $6, $7, $8, $9, $10, $11) \
              RETURNING id",
             [
                 user_id.into(),
                 kind.into(),
                 frequency.into(),
                 channel.into(),
+                ship_method.into(),
                 po_number.map(str::to_string).into(),
+                subtotal.into(),
+                shipping.into(),
+                tax.into(),
                 total.into(),
                 next_run_at.into(),
             ],
@@ -1520,7 +1083,6 @@ pub async fn place_order(
         .await?
         .ok_or_else(|| DbErr::RecordNotFound("order insert returned no row".to_string()))?;
     let order_id: Uuid = order_row.try_get("", "id")?;
->>>>>>> origin/main
 
     for line in &sorted {
         tx.execute(stmt(
@@ -1553,277 +1115,342 @@ pub async fn place_order(
 }
 
 // ---------------------------------------------------------------------------
-// Payments: provider handles on orders, settled payments, provider-billed
-// subscriptions, and the webhook idempotency ledger (see 0006_payments.sql).
-// All of this goes through SeaORM (`crate::entities`) — the data-access
-// convention for new code; the sqlx queries above are legacy to be ported.
+// Shipments / fulfillment (carrier + tracking). Populated by ops or an EDI
+// 856 mapping; surfaced on the order-detail/receipt page. Raw SQL like the
+// other new-table paths; entities can grow here once the schema settles.
 
-use sea_orm::sea_query::OnConflict;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::NotSet, ActiveValue::Set, ColumnTrait, DatabaseConnection,
-    DbErr, EntityTrait, QueryFilter, TryInsertResult,
-};
-
-use crate::entities::{order, payment, payment_event, payment_subscription};
-
-fn now_tz() -> chrono::DateTime<chrono::FixedOffset> {
-    Utc::now().fixed_offset()
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "shipment_status")]
+pub enum ShipmentStatus {
+    #[sea_orm(string_value = "packing")]
+    Packing,
+    #[sea_orm(string_value = "shipped")]
+    Shipped,
+    #[sea_orm(string_value = "delivered")]
+    Delivered,
 }
 
-/// Attach the provider checkout handle to an order right after the hosted
-/// session / approval link / invoice is created.
-pub async fn set_order_payment(
-    db: &DatabaseConnection,
-    order_id: Uuid,
-    provider: PaymentProvider,
-    payment_ref: &str,
-    status: PaymentStatus,
-) -> Result<(), DbErr> {
-    let Some(row) = order::Entity::find_by_id(order_id).one(db).await? else {
-        return Ok(());
-    };
-    let mut active: order::ActiveModel = row.into();
-    active.payment_provider = Set(Some(provider));
-    active.payment_ref = Set(Some(payment_ref.to_string()));
-    active.payment_status = Set(status);
-    active.update(db).await?;
-    Ok(())
-}
-
-/// Advance an order's payment status. `paid_at` is stamped once, on the
-/// first transition into `Paid`.
-pub async fn set_order_payment_status(
-    db: &DatabaseConnection,
-    order_id: Uuid,
-    status: PaymentStatus,
-) -> Result<(), DbErr> {
-    let Some(row) = order::Entity::find_by_id(order_id).one(db).await? else {
-        return Ok(());
-    };
-    let stamp_paid = status == PaymentStatus::Paid && row.paid_at.is_none();
-    let mut active: order::ActiveModel = row.into();
-    active.payment_status = Set(status);
-    if stamp_paid {
-        active.paid_at = Set(Some(now_tz()));
+impl ShipmentStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Packing => "packing",
+            Self::Shipped => "shipped",
+            Self::Delivered => "delivered",
+        }
     }
-    active.update(db).await?;
-    Ok(())
 }
 
-/// Minimal order facts for webhook / return-URL handlers, which act on
-/// behalf of the provider rather than a logged-in user.
-#[derive(Debug, Clone)]
-pub struct OrderPaymentFacts {
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct Shipment {
     pub id: Uuid,
-    pub user_id: Uuid,
-    pub total_cents: i64,
-    pub kind: OrderKind,
-    pub frequency: Option<OrderFrequency>,
-    pub payment_provider: Option<PaymentProvider>,
-    pub payment_status: PaymentStatus,
-    pub payment_ref: Option<String>,
+    pub status: ShipmentStatus,
+    pub carrier: Option<String>,
+    pub tracking_number: Option<String>,
+    pub ship_date: Option<chrono::NaiveDate>,
+    pub eta_earliest: Option<chrono::NaiveDate>,
+    pub eta_latest: Option<chrono::NaiveDate>,
+    pub delivered_at: Option<DateTime<Utc>>,
 }
 
-impl From<order::Model> for OrderPaymentFacts {
-    fn from(row: order::Model) -> Self {
-        Self {
-            id: row.id,
-            user_id: row.user_id,
-            total_cents: row.total_cents,
-            kind: row.kind,
-            frequency: row.frequency,
-            payment_provider: row.payment_provider,
-            payment_status: row.payment_status,
-            payment_ref: row.payment_ref,
+impl Shipment {
+    /// Carrier tracking URL for the major carriers, else None.
+    pub fn tracking_url(&self) -> Option<String> {
+        let number = self.tracking_number.as_deref()?;
+        let carrier = self.carrier.as_deref().unwrap_or("").to_lowercase();
+        let url = if carrier.contains("ups") {
+            format!("https://www.ups.com/track?tracknum={number}")
+        } else if carrier.contains("fedex") {
+            format!("https://www.fedex.com/fedextrack/?trknbr={number}")
+        } else if carrier.contains("usps") {
+            format!("https://tools.usps.com/go/TrackConfirmAction?tLabels={number}")
+        } else if carrier.contains("dhl") {
+            format!("https://www.dhl.com/us-en/home/tracking.html?tracking-id={number}")
+        } else {
+            return None;
+        };
+        Some(url)
+    }
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct UserShipmentRow {
+    pub order_id: Uuid,
+    pub id: Uuid,
+    pub status: ShipmentStatus,
+    pub carrier: Option<String>,
+    pub tracking_number: Option<String>,
+    pub ship_date: Option<chrono::NaiveDate>,
+    pub eta_earliest: Option<chrono::NaiveDate>,
+    pub eta_latest: Option<chrono::NaiveDate>,
+    pub delivered_at: Option<DateTime<Utc>>,
+}
+
+impl UserShipmentRow {
+    pub fn shipment(&self) -> Shipment {
+        Shipment {
+            id: self.id,
+            status: self.status,
+            carrier: self.carrier.clone(),
+            tracking_number: self.tracking_number.clone(),
+            ship_date: self.ship_date,
+            eta_earliest: self.eta_earliest,
+            eta_latest: self.eta_latest,
+            delivered_at: self.delivered_at,
         }
     }
 }
 
-pub async fn order_payment_facts(
-    db: &DatabaseConnection,
+const SHIPMENT_COLUMNS: &str = "s.id, s.status::text AS status, s.carrier, s.tracking_number, \
+     s.ship_date, s.eta_earliest, s.eta_latest, s.delivered_at";
+
+pub async fn shipments_for_order(
+    conn: &DatabaseConnection,
     order_id: Uuid,
-) -> Result<Option<OrderPaymentFacts>, DbErr> {
-    Ok(order::Entity::find_by_id(order_id)
-        .one(db)
-        .await?
-        .map(OrderPaymentFacts::from))
-}
-
-/// Find the shop order a provider-side reference points at (e.g. Square's
-/// checkout order id stored at link creation).
-pub async fn find_order_by_payment_ref(
-    db: &DatabaseConnection,
-    provider: PaymentProvider,
-    payment_ref: &str,
-) -> Result<Option<Uuid>, DbErr> {
-    Ok(order::Entity::find()
-        .filter(order::Column::PaymentProvider.eq(provider))
-        .filter(order::Column::PaymentRef.eq(payment_ref))
-        .one(db)
-        .await?
-        .map(|row| row.id))
-}
-
-/// Record a settled (or failed/refunded) money movement. Returns `true` when
-/// the row is new; a repeat of the same (provider, provider_ref) only
-/// refreshes the status, so callers can skip double-posting to the ledger.
-/// (Cross-process races are already serialized by `payment_events` dedup.)
-#[allow(clippy::too_many_arguments)]
-pub async fn record_payment(
-    db: &DatabaseConnection,
-    order_id: Option<Uuid>,
-    user_id: Uuid,
-    provider: PaymentProvider,
-    kind: PaymentKind,
-    provider_ref: &str,
-    amount_cents: i64,
-    status: PaymentStatus,
-) -> Result<bool, DbErr> {
-    let existing = payment::Entity::find()
-        .filter(payment::Column::Provider.eq(provider))
-        .filter(payment::Column::ProviderRef.eq(provider_ref))
-        .one(db)
-        .await?;
-    match existing {
-        Some(row) => {
-            let mut active: payment::ActiveModel = row.into();
-            active.status = Set(status);
-            active.updated_at = Set(now_tz());
-            active.update(db).await?;
-            Ok(false)
-        }
-        None => {
-            payment::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                order_id: Set(order_id),
-                user_id: Set(user_id),
-                provider: Set(provider),
-                kind: Set(kind),
-                provider_ref: Set(provider_ref.to_string()),
-                amount_cents: Set(amount_cents),
-                currency: Set("USD".to_string()),
-                status: Set(status),
-                created_at: NotSet,
-                updated_at: NotSet,
-            }
-            .insert(db)
-            .await?;
-            Ok(true)
-        }
-    }
-}
-
-pub async fn upsert_subscription(
-    db: &DatabaseConnection,
-    user_id: Uuid,
-    order_id: Option<Uuid>,
-    provider: PaymentProvider,
-    provider_ref: &str,
-    status: SubscriptionStatus,
-    frequency: OrderFrequency,
-) -> Result<(), DbErr> {
-    let existing = payment_subscription::Entity::find()
-        .filter(payment_subscription::Column::Provider.eq(provider))
-        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
-        .one(db)
-        .await?;
-    match existing {
-        Some(row) => {
-            let mut active: payment_subscription::ActiveModel = row.into();
-            active.status = Set(status);
-            active.updated_at = Set(now_tz());
-            active.update(db).await?;
-        }
-        None => {
-            payment_subscription::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                user_id: Set(user_id),
-                order_id: Set(order_id),
-                provider: Set(provider),
-                provider_ref: Set(provider_ref.to_string()),
-                status: Set(status),
-                frequency: Set(frequency),
-                created_at: NotSet,
-                updated_at: NotSet,
-            }
-            .insert(db)
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-pub async fn set_subscription_status(
-    db: &DatabaseConnection,
-    provider: PaymentProvider,
-    provider_ref: &str,
-    status: SubscriptionStatus,
-) -> Result<(), DbErr> {
-    let existing = payment_subscription::Entity::find()
-        .filter(payment_subscription::Column::Provider.eq(provider))
-        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
-        .one(db)
-        .await?;
-    if let Some(row) = existing {
-        let mut active: payment_subscription::ActiveModel = row.into();
-        active.status = Set(status);
-        active.updated_at = Set(now_tz());
-        active.update(db).await?;
-    }
-    Ok(())
-}
-
-/// Who owns a provider-billed subscription (for crediting cycle payments).
-pub async fn subscription_owner(
-    db: &DatabaseConnection,
-    provider: PaymentProvider,
-    provider_ref: &str,
-) -> Result<Option<(Uuid, Option<Uuid>)>, DbErr> {
-    Ok(payment_subscription::Entity::find()
-        .filter(payment_subscription::Column::Provider.eq(provider))
-        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
-        .one(db)
-        .await?
-        .map(|row| (row.user_id, row.order_id)))
-}
-
-/// Webhook idempotency: returns `true` the first time an event id is seen.
-/// Handlers bail out on `false` so provider retries can't double-apply.
-pub async fn record_payment_event(
-    db: &DatabaseConnection,
-    provider: PaymentProvider,
-    event_id: &str,
-    payload: &serde_json::Value,
-) -> Result<bool, DbErr> {
-    let outcome = payment_event::Entity::insert(payment_event::ActiveModel {
-        provider: Set(provider),
-        event_id: Set(event_id.to_string()),
-        payload: Set(payload.clone()),
-        received_at: NotSet,
-    })
-    .on_conflict(
-        OnConflict::columns([
-            payment_event::Column::Provider,
-            payment_event::Column::EventId,
-        ])
-        .do_nothing()
-        .to_owned(),
-    )
-    .do_nothing()
-    .exec(db)
-    .await?;
-    Ok(matches!(outcome, TryInsertResult::Inserted(_)))
-}
-
-/// Most recent login email for a user — the observer ledger identifies
-/// customers by email. (login_events is a legacy sqlx table.)
-pub async fn latest_email_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<String>> {
-    sqlx::query_scalar(
-        "SELECT email FROM login_events WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
+) -> Result<Vec<Shipment>, DbErr> {
+    Shipment::find_by_statement(stmt(
+        &format!(
+            "SELECT {SHIPMENT_COLUMNS} FROM shipments s WHERE s.order_id = $1 ORDER BY s.created_at"
+        ),
+        [order_id.into()],
+    ))
+    .all(conn)
     .await
+}
+
+/// All shipments across a user's orders, for the order-list tracking column.
+pub async fn shipments_for_user(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+) -> Result<Vec<UserShipmentRow>, DbErr> {
+    UserShipmentRow::find_by_statement(stmt(
+        &format!(
+            "SELECT s.order_id, {SHIPMENT_COLUMNS} FROM shipments s \
+             JOIN orders o ON o.id = s.order_id \
+             WHERE o.user_id = $1 ORDER BY s.created_at"
+        ),
+        [user_id.into()],
+    ))
+    .all(conn)
+    .await
+}
+
+/// Record a fulfillment (ops / EDI 856): create a shipment with carrier +
+/// tracking and advance the order to fulfilled. Ownership is checked so an
+/// API key can only fulfill its own orders. Returns None if the order isn't
+/// the user's.
+pub async fn record_fulfillment(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+    order_id: Uuid,
+    carrier: &str,
+    tracking_number: &str,
+    ship_date: chrono::NaiveDate,
+) -> Result<Option<Uuid>, DbErr> {
+    let tx = conn.begin().await?;
+    let owned = tx
+        .query_one(stmt(
+            "SELECT ship_method::text AS ship_method FROM orders \
+             WHERE id = $1 AND user_id = $2 FOR UPDATE",
+            [order_id.into(), user_id.into()],
+        ))
+        .await?;
+    let Some(owned_row) = owned else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let ship_method = ShipMethod::parse(&owned_row.try_get::<String>("", "ship_method")?)
+        .unwrap_or(ShipMethod::Standard);
+
+    let (min, max) = ship_method.eta_business_days();
+    let inserted = tx
+        .query_one(stmt(
+            "INSERT INTO shipments \
+             (order_id, status, carrier, tracking_number, ship_date, eta_earliest, eta_latest) \
+             VALUES ($1, 'shipped', $2, $3, $4, $5, $6) RETURNING id",
+            [
+                order_id.into(),
+                carrier.into(),
+                tracking_number.into(),
+                ship_date.into(),
+                add_business_days(ship_date, min).into(),
+                add_business_days(ship_date, max).into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| DbErr::RecordNotFound("shipment insert returned no row".to_string()))?;
+    let shipment_id: Uuid = inserted.try_get("", "id")?;
+
+    tx.execute(stmt(
+        "UPDATE orders SET status = 'fulfilled' WHERE id = $1",
+        [order_id.into()],
+    ))
+    .await?;
+    tx.commit().await?;
+    Ok(Some(shipment_id))
+}
+
+/// Materialize every recurring order whose `next_run_at` is due. Each order is
+/// processed in its own transaction guarded by a transaction-scoped advisory
+/// lock on the order id, so two runners (or a runner and a bypassed leader
+/// guard) can never fire the same subscription twice. Returns how many child
+/// orders were created.
+pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, DbErr> {
+    let due = conn
+        .query_all(stmt(
+            "SELECT id FROM orders \
+             WHERE kind = 'recurring' AND status <> 'cancelled' \
+             AND next_run_at IS NOT NULL AND next_run_at <= now() \
+             ORDER BY next_run_at LIMIT 100",
+            [],
+        ))
+        .await?;
+
+    let mut created = 0u64;
+    for row in due {
+        let subscription_id: Uuid = row.try_get("", "id")?;
+        let tx = conn.begin().await?;
+
+        // hashtextextended gives a stable bigint key for the advisory lock;
+        // xact-scoped so it releases with commit/rollback automatically.
+        let got_row = tx
+            .query_one(stmt(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS got",
+                [subscription_id.to_string().into()],
+            ))
+            .await?
+            .ok_or_else(|| DbErr::RecordNotFound("advisory lock returned no row".to_string()))?;
+        let got: bool = got_row.try_get("", "got")?;
+        if !got {
+            tx.rollback().await?; // another runner owns this subscription
+            continue;
+        }
+
+        // Re-read under the lock; skip if no longer due (a racing runner that
+        // held the lock just before us already advanced it).
+        let sub = tx
+            .query_one(stmt(
+                "SELECT user_id, frequency::text AS frequency, channel::text AS channel, \
+                        ship_method::text AS ship_method FROM orders \
+                 WHERE id = $1 AND kind = 'recurring' AND status <> 'cancelled' \
+                 AND next_run_at IS NOT NULL AND next_run_at <= now()",
+                [subscription_id.into()],
+            ))
+            .await?;
+        let Some(sub) = sub else {
+            tx.rollback().await?;
+            continue;
+        };
+        let user_id: Uuid = sub.try_get("", "user_id")?;
+        let frequency: Option<String> = sub.try_get("", "frequency")?;
+        let channel: String = sub.try_get("", "channel")?;
+        let ship_method = ShipMethod::parse(&sub.try_get::<String>("", "ship_method")?)
+            .unwrap_or(ShipMethod::Standard);
+
+        let lines = tx
+            .query_all(stmt(
+                "SELECT product_id, qty, unit_price_cents FROM order_items WHERE order_id = $1",
+                [subscription_id.into()],
+            ))
+            .await?
+            .into_iter()
+            .map(|line| {
+                Ok((
+                    line.try_get::<i64>("", "product_id")?,
+                    line.try_get::<i32>("", "qty")?,
+                    line.try_get::<i32>("", "unit_price_cents")?,
+                ))
+            })
+            .collect::<Result<Vec<_>, DbErr>>()?;
+
+        // Decrement stock for tracked products; if any line is short, skip the
+        // child this cycle but still advance the cursor so the subscription
+        // isn't wedged (a real system would backorder).
+        let mut short = false;
+        for (product_id, qty, _) in &lines {
+            let on_hand = tx
+                .query_one(stmt(
+                    "SELECT on_hand FROM inventory WHERE product_id = $1 FOR UPDATE",
+                    [(*product_id).into()],
+                ))
+                .await?;
+            if let Some(on_hand_row) = on_hand {
+                if on_hand_row.try_get::<i32>("", "on_hand")? < *qty {
+                    short = true;
+                    break;
+                }
+            }
+        }
+
+        if !short {
+            for (product_id, qty, _) in &lines {
+                tx.execute(stmt(
+                    "UPDATE inventory SET on_hand = on_hand - $2, updated_at = now() \
+                     WHERE product_id = $1",
+                    [(*product_id).into(), (*qty).into()],
+                ))
+                .await?;
+            }
+            let subtotal: i64 = lines
+                .iter()
+                .map(|(_, qty, price)| i64::from(*price) * i64::from(*qty))
+                .sum();
+            let shipping = ship_method.shipping_cents();
+            let child_row = tx
+                .query_one(stmt(
+                    "INSERT INTO orders \
+                     (user_id, kind, channel, ship_method, subtotal_cents, shipping_cents, \
+                      tax_cents, total_cents, recurs_from) \
+                     VALUES ($1, 'one_time', $2::order_channel, $3::ship_method, $4, $5, 0, $6, $7) \
+                     RETURNING id",
+                    [
+                        user_id.into(),
+                        channel.into(),
+                        ship_method.into(),
+                        subtotal.into(),
+                        shipping.into(),
+                        (subtotal + shipping).into(),
+                        subscription_id.into(),
+                    ],
+                ))
+                .await?
+                .ok_or_else(|| DbErr::RecordNotFound("child order insert returned no row".into()))?;
+            let child_id: Uuid = child_row.try_get("", "id")?;
+            for (product_id, qty, price) in &lines {
+                tx.execute(stmt(
+                    "INSERT INTO order_items (order_id, product_id, qty, unit_price_cents) \
+                     VALUES ($1, $2, $3, $4)",
+                    [
+                        child_id.into(),
+                        (*product_id).into(),
+                        (*qty).into(),
+                        (*price).into(),
+                    ],
+                ))
+                .await?;
+            }
+            created += 1;
+        } else {
+            tracing::warn!(%subscription_id, "recurring order short on stock; skipping this cycle");
+        }
+
+        let interval = frequency
+            .as_deref()
+            .and_then(|f| match f {
+                "weekly" => Some(7),
+                "biweekly" => Some(14),
+                "monthly" => Some(30),
+                "quarterly" => Some(90),
+                _ => None,
+            })
+            .unwrap_or(30);
+        tx.execute(stmt(
+            "UPDATE orders SET next_run_at = next_run_at + make_interval(days => $2) WHERE id = $1",
+            [subscription_id.into(), interval.into()],
+        ))
+        .await?;
+        tx.commit().await?;
+    }
+    Ok(created)
 }
 
 #[cfg(test)]
@@ -1884,5 +1511,18 @@ mod order_fulfillment_tests {
         let mut s = shipment("UPS", "x");
         s.tracking_number = None;
         assert!(s.tracking_url().is_none());
+    }
+
+    #[test]
+    fn order_status_parse_round_trips() {
+        for status in [
+            OrderStatus::Placed,
+            OrderStatus::Processing,
+            OrderStatus::Fulfilled,
+            OrderStatus::Cancelled,
+        ] {
+            assert_eq!(OrderStatus::parse(status.label()), Some(status));
+        }
+        assert_eq!(OrderStatus::parse("bogus"), None);
     }
 }

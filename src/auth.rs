@@ -225,16 +225,10 @@ async fn gotrue_error_message(response: reqwest::Response) -> String {
 }
 
 /// Scheme + host to build same-site redirect URLs from, derived from the Host
-<<<<<<< HEAD
-/// header so app./biz./localhost all round-trip to themselves. Also used by
-/// checkout to build payment success/cancel return URLs on the same host.
-pub fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
-=======
 /// header so app./biz./localhost all round-trip to themselves. Hosts outside
 /// the ALLOWED_HOSTS allowlist fall back to the configured public base so a
 /// spoofed Host header cannot steer auth redirects off-site.
 fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
->>>>>>> origin/main
     let host = headers
         .get(HOST)
         .and_then(|value| value.to_str().ok())
