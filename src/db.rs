@@ -68,7 +68,9 @@ impl CartOwner {
 pub struct CartLine {
     pub item_id: i64,
     pub name: String,
+    pub subname: Option<String>,
     pub format: ProductFormat,
+    pub calories: i32,
     pub price_cents: i32,
     pub qty: i32,
 }
