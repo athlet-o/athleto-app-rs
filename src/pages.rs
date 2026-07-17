@@ -47,7 +47,11 @@ pub const REMEMBER_JS: &str = r#"
 (function(){
   var p=new URLSearchParams(location.hash.slice(1));
   var email=p.get('email')||''; var next=p.get('next')||'/';
-  if(next.charAt(0)!=='/'||next.charAt(1)==='/') next='/';
+  // Only a single-slash absolute path is a safe local redirect. Reject "//host"
+  // and "/\host" (browsers normalise "\" to "/", so "/\evil.com" would resolve
+  // off-site) and any control chars, so the attacker-controlled fragment can
+  // never steer this navigation to another origin.
+  if(!/^\/($|[^\/\\][\x20-\x7e]*$)/.test(next)) next='/';
   function go(){ location.replace(next); }
   if(!email||!window.indexedDB) return go();
   try{
