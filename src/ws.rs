@@ -11,6 +11,7 @@
 
 use std::time::Duration;
 
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -25,16 +26,21 @@ use crate::SharedState;
 
 /// GET /ws -- upgrade for signed-in users only; the session cookie is
 /// resolved exactly like every page request (MaybeUser), so an anonymous or
-/// expired-session upgrade is rejected before the handshake completes.
+/// expired-session upgrade is rejected before the handshake completes. The
+/// upgrade extractor is deferred (Result) so the auth check always answers
+/// first, even for non-upgrade requests.
 pub async fn upgrade(
     State(state): State<SharedState>,
     user: MaybeUser,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     let Some(user) = user.0 else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    ws.on_upgrade(move |socket| connection(state, user, socket))
+    match ws {
+        Ok(ws) => ws.on_upgrade(move |socket| connection(state, user, socket)),
+        Err(rejection) => rejection.into_response(),
+    }
 }
 
 async fn connection(state: SharedState, user: AuthUser, mut socket: WebSocket) {
