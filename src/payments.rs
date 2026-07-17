@@ -360,7 +360,7 @@ async fn stripe_checkout_session(
         .to_string();
 
     if let Some(orm) = &state.orm {
-        db::set_order_payment(pool, facts.id, PaymentProvider::Stripe, &session_id, PaymentStatus::Pending)
+        db::set_order_payment(orm, facts.id, PaymentProvider::Stripe, &session_id, PaymentStatus::Pending)
             .await?;
     }
     Ok(url)
@@ -738,7 +738,7 @@ async fn paypal_order(
     let order: Value = response.json().await?;
     let paypal_order_id = order["id"].as_str().unwrap_or_default();
     if let Some(orm) = &state.orm {
-        db::set_order_payment(pool, facts.id, PaymentProvider::Paypal, paypal_order_id, PaymentStatus::Pending)
+        db::set_order_payment(orm, facts.id, PaymentProvider::Paypal, paypal_order_id, PaymentStatus::Pending)
             .await?;
     }
     paypal_approval_link(&order)
@@ -818,7 +818,7 @@ async fn paypal_subscription(
     let subscription_id = subscription["id"].as_str().unwrap_or_default();
 
     if let Some(orm) = &state.orm {
-        db::set_order_payment(pool, facts.id, PaymentProvider::Paypal, subscription_id, PaymentStatus::Pending)
+        db::set_order_payment(orm, facts.id, PaymentProvider::Paypal, subscription_id, PaymentStatus::Pending)
             .await?;
         db::upsert_subscription(
             pool,
@@ -1040,7 +1040,7 @@ async fn square_payment_link(
         .to_string();
 
     if let Some(orm) = &state.orm {
-        db::set_order_payment(pool, facts.id, PaymentProvider::Square, square_order_id, PaymentStatus::Pending)
+        db::set_order_payment(orm, facts.id, PaymentProvider::Square, square_order_id, PaymentStatus::Pending)
             .await?;
     }
     Ok(url)
