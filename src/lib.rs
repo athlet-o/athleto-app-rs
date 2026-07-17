@@ -12,6 +12,7 @@ pub mod entities;
 pub mod orders;
 pub mod pages;
 pub mod security;
+pub mod ws;
 
 use std::sync::Arc;
 
@@ -84,6 +85,9 @@ pub struct AppState {
     pub config: Config,
     /// Per-IP / per-email throttle for the magic-link login endpoint.
     pub login_limiter: security::RateLimiter,
+    /// Cart mutations broadcast the affected cart id; /ws connections push a
+    /// fresh hold-countdown fragment to their owner.
+    pub cart_events: tokio::sync::broadcast::Sender<uuid::Uuid>,
 }
 
 impl AppState {
@@ -92,11 +96,13 @@ impl AppState {
         http: reqwest::Client,
         config: Config,
     ) -> Self {
+        let (cart_events, _) = tokio::sync::broadcast::channel(64);
         Self {
             pool,
             http,
             config,
             login_limiter: security::RateLimiter::new(),
+            cart_events,
         }
     }
 }
@@ -157,7 +163,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/account/2fa/{factor_id}/unenroll", post(account::factor_unenroll))
         .route("/account/api-keys", post(account::api_key_create))
         .route("/account/api-keys/{key_id}/revoke", post(account::api_key_revoke))
-        // Cart + holds.
+        // Cart + holds. /ws pushes the hold countdown as htmx OOB fragments;
+        // GET /cart/hold polling stays as the fallback.
+        .route("/ws", get(ws::upgrade))
         .route("/cart", get(cart::cart_page))
         .route("/cart/hold", get(cart::hold_status))
         .route("/cart/items", post(cart::add_item))

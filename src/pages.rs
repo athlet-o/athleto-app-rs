@@ -103,19 +103,26 @@ pub const CALLBACK_JS: &str = r#"
 "#;
 
 /// Cart-hold countdown: ticks locally every second and re-syncs against
-/// GET /cart/hold at random 25-55s intervals (lease-poll semantics).
+/// GET /cart/hold at random 25-55s intervals (lease-poll semantics). When the
+/// /ws socket replaces #hold-banner out-of-band, the fresh data-seconds is
+/// adopted (elements are re-queried per render, so swapped nodes stay live).
 pub const CART_HOLD_JS: &str = r#"
 (function(){
-  var el=document.getElementById('hold-banner'); if(!el) return;
-  var left=document.getElementById('hold-left');
-  var secs=parseInt(el.getAttribute('data-seconds')||'0',10);
+  var first=document.getElementById('hold-banner'); if(!first) return;
+  var secs=parseInt(first.getAttribute('data-seconds')||'0',10);
   function fmt(s){ var m=Math.floor(s/60); return m+'m '+(s%60)+'s'; }
   function render(){
+    var el=document.getElementById('hold-banner'); if(!el) return;
+    var left=document.getElementById('hold-left');
     if(secs>0){ if(left) left.textContent=fmt(secs); el.classList.remove('expired'); }
     else { el.classList.add('expired'); if(left) left.textContent='expired - items may go back on sale'; }
   }
   render();
   setInterval(function(){ if(secs>0){ secs-=1; render(); } },1000);
+  document.body.addEventListener('htmx:oobAfterSwap', function(){
+    var el=document.getElementById('hold-banner');
+    if(el){ secs=parseInt(el.getAttribute('data-seconds')||'0',10); render(); }
+  });
   function schedule(){ setTimeout(poll, 25000+Math.floor(Math.random()*30000)); }
   function poll(){
     fetch('/cart/hold',{credentials:'same-origin'})
@@ -806,6 +813,7 @@ pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Marku
                 title { (title) }
                 style nonce=(nonce) { (PreEscaped(APP_CSS)) }
                 script defer="defer" src=(assets::HTMX_JS_PATH) {}
+                script defer="defer" src=(assets::HTMX_WS_JS_PATH) {}
             }
             body hx-headers=(csrf_headers) {
                 header .site-header {

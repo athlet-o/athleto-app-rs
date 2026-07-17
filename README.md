@@ -29,6 +29,8 @@ and a powder packet (just add water).
 | `GET /product/{slug}` | Product detail |
 | `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase GoTrue auth; session tokens in HttpOnly Secure SameSite=Lax cookies |
 | `GET /cart`, `POST /cart/items`, `POST /cart/items/{id}/delete` | Cart pages + htmx fragments; keyed by Supabase user id or anonymous cart cookie |
+| `GET /ws` | Authenticated websocket pushing HTML fragments (htmx ws extension, `hx-swap-oob`): live cart-hold countdown; `GET /cart/hold` polling remains the fallback |
+| `GET /static/...` | Vendored htmx + ws extension, served same-origin with immutable caching |
 | `GET /healthz` | Liveness/readiness — always `ok`, no dependencies |
 
 ## Environment

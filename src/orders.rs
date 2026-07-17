@@ -105,7 +105,11 @@ pub async fn checkout(
     )
     .await
     {
-        Ok(_) => Ok((jar, Redirect::to("/orders?placed=1")).into_response()),
+        Ok(_) => {
+            // Holds were consumed with the order; refresh any /ws listeners.
+            let _ = state.cart_events.send(cart_id);
+            Ok((jar, Redirect::to("/orders?placed=1")).into_response())
+        }
         Err(db::OrderError::Insufficient(shortages)) => {
             let names: HashMap<i64, String> = lines
                 .iter()
@@ -322,6 +326,7 @@ pub async fn quick_order_submit(
             tracing::warn!(error = %err, "hold claim failed during quick order");
         }
     }
+    let _ = state.cart_events.send(cart_id);
     Ok(Redirect::to("/cart").into_response())
 }
 
