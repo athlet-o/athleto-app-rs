@@ -9,6 +9,7 @@ mod entities;
 mod orders;
 mod pages;
 mod payments;
+mod secrets;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
