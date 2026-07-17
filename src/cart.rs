@@ -107,9 +107,14 @@ fn cart_contents(lines: &[CartLine]) -> Markup {
     }
 }
 
-fn hold_banner(seconds_left: i64) -> Markup {
+/// The countdown banner itself. With `oob` set the fragment carries
+/// `hx-swap-oob` so the htmx ws extension swaps it in place by id when
+/// pushed over /ws.
+pub fn hold_banner_div(seconds_left: i64, oob: bool) -> Markup {
     html! {
-        div #hold-banner .hold-banner .expired[seconds_left <= 0] data-seconds=(seconds_left.max(0)) {
+        div #hold-banner .hold-banner .expired[seconds_left <= 0]
+            data-seconds=(seconds_left.max(0))
+            hx-swap-oob=[oob.then_some("true")] {
             span { "Items reserved for you: " }
             strong #hold-left {
                 @if seconds_left > 0 {
@@ -120,7 +125,13 @@ fn hold_banner(seconds_left: i64) -> Markup {
             }
             span .muted-inline { "(holds last " (db::HOLD_MINUTES) " minutes from your last cart change)" }
         }
-        script { (PreEscaped(pages::CART_HOLD_JS)) }
+    }
+}
+
+fn hold_banner(seconds_left: i64) -> Markup {
+    html! {
+        (hold_banner_div(seconds_left, false))
+        script nonce=(crate::security::csp_nonce()) { (PreEscaped(pages::CART_HOLD_JS)) }
     }
 }
 
@@ -131,7 +142,6 @@ pub struct CartPageParams {
 }
 
 fn cart_page_markup(
-    config: &crate::Config,
     user: &MaybeUser,
     biz: Biz,
     profile: Option<&CustomerProfile>,
@@ -163,12 +173,19 @@ fn cart_page_markup(
                     }
                 }
                 @if let Some(seconds) = hold_seconds {
-                    @if !lines.is_empty() { (hold_banner(seconds)) }
+                    @if !lines.is_empty() {
+                        // Signed-in carts get live pushes over /ws (the
+                        // banner script keeps polling as the fallback).
+                        @if user.as_ref().is_some() {
+                            div hx-ext="ws" ws-connect="/ws" { (hold_banner(seconds)) }
+                        } @else {
+                            (hold_banner(seconds))
+                        }
+                    }
                 }
                 (cart_contents(lines))
                 @if user.as_ref().is_some() && !lines.is_empty() {
                     (orders::checkout_form(
-                        config,
                         profile,
                         user.as_ref().map(|u| u.has_verified_factor()).unwrap_or(false),
                     ))
@@ -229,7 +246,7 @@ pub async fn cart_page(
         Some(auth_user) => auth::load_profile(&state, auth_user.id).await,
         None => None,
     };
-    Ok(cart_page_markup(&state.config, &user, biz, profile.as_ref(), &lines, hold_seconds, &params)
+    Ok(cart_page_markup(&user, biz, profile.as_ref(), &lines, hold_seconds, &params)
         .into_response())
 }
 
@@ -326,6 +343,8 @@ pub async fn add_item(
 
     db::add_cart_item(pool, cart_id, input.product_id, requested).await?;
     let count = db::cart_count(pool, cart_id).await?;
+    // Nudge any open /ws connections to push the refreshed hold countdown.
+    let _ = state.cart_events.send(cart_id);
 
     if is_htmx(&headers) {
         let fragment = html! {
@@ -369,6 +388,7 @@ pub async fn delete_item(
     if let Some(product_id) = removed_product {
         db::release_hold(pool, cart_id, product_id).await?;
     }
+    let _ = state.cart_events.send(cart_id);
 
     if is_htmx(&headers) {
         let lines = db::cart_lines(pool, cart_id).await?;
