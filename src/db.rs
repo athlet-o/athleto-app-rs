@@ -1,10 +1,11 @@
-//! Pool setup plus product and cart queries.
+//! Pool setup plus product, cart, customer, order, and API-key queries.
 //!
 //! All queries are runtime `sqlx::query` / `query_as` calls (no compile-time
 //! `query!` macros) so the crate builds without a live DATABASE_URL.
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -67,6 +68,7 @@ impl CartOwner {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct CartLine {
     pub item_id: i64,
+    pub product_id: i64,
     pub name: String,
     pub subname: Option<String>,
     pub format: ProductFormat,
@@ -172,7 +174,7 @@ pub async fn delete_cart_item(pool: &PgPool, cart_id: Uuid, item_id: i64) -> sql
 
 pub async fn cart_lines(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<Vec<CartLine>> {
     sqlx::query_as::<_, CartLine>(
-        "SELECT ci.id AS item_id, p.name, p.subname, p.format, p.calories, p.price_cents, ci.qty \
+        "SELECT ci.id AS item_id, ci.product_id, p.name, p.subname, p.format, p.calories, p.price_cents, ci.qty \
          FROM cart_items ci \
          JOIN products p ON p.id = ci.product_id \
          WHERE ci.cart_id = $1 \
@@ -283,4 +285,562 @@ pub fn fallback_products() -> Vec<Product> {
             249,
         ),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Customer profiles (B2C vs B2B) and login events.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "customer_type", rename_all = "lowercase")]
+pub enum CustomerType {
+    B2c,
+    B2b,
+}
+
+impl CustomerType {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::B2c => "Personal",
+            Self::B2b => "Business",
+        }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CustomerProfile {
+    pub customer_type: CustomerType,
+    pub company_name: Option<String>,
+}
+
+impl CustomerProfile {
+    pub fn is_b2b(&self) -> bool {
+        self.customer_type == CustomerType::B2b
+    }
+}
+
+pub async fn get_profile(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<CustomerProfile>> {
+    sqlx::query_as::<_, CustomerProfile>(
+        "SELECT customer_type, company_name FROM customer_profiles WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn upsert_profile(
+    pool: &PgPool,
+    user_id: Uuid,
+    customer_type: CustomerType,
+    company_name: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO customer_profiles (user_id, customer_type, company_name) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (user_id) DO UPDATE \
+         SET customer_type = EXCLUDED.customer_type, \
+             company_name = EXCLUDED.company_name, \
+             updated_at = now()",
+    )
+    .bind(user_id)
+    .bind(customer_type)
+    .bind(company_name)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn record_login_event(
+    pool: &PgPool,
+    user_id: Uuid,
+    email: &str,
+    aal: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("INSERT INTO login_events (user_id, email, aal) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(email)
+        .bind(aal)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct LoginEvent {
+    pub email: String,
+    pub aal: String,
+    pub created_at: DateTime<Utc>,
+}
+
+pub async fn recent_login_events(
+    pool: &PgPool,
+    user_id: Uuid,
+    limit: i64,
+) -> sqlx::Result<Vec<LoginEvent>> {
+    sqlx::query_as::<_, LoginEvent>(
+        "SELECT email, aal, created_at FROM login_events \
+         WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+    )
+    .bind(user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Orders.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Deserialize)]
+#[sqlx(type_name = "order_kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum OrderKind {
+    OneTime,
+    Recurring,
+}
+
+impl OrderKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OneTime => "one-time",
+            Self::Recurring => "recurring",
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OneTime => "one_time",
+            Self::Recurring => "recurring",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Deserialize)]
+#[sqlx(type_name = "order_frequency", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum OrderFrequency {
+    Weekly,
+    Biweekly,
+    Monthly,
+    Quarterly,
+}
+
+impl OrderFrequency {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Weekly => "weekly",
+            Self::Biweekly => "every 2 weeks",
+            Self::Monthly => "monthly",
+            Self::Quarterly => "quarterly",
+        }
+    }
+
+    pub fn interval_days(self) -> i64 {
+        match self {
+            Self::Weekly => 7,
+            Self::Biweekly => 14,
+            Self::Monthly => 30,
+            Self::Quarterly => 90,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "order_status", rename_all = "lowercase")]
+pub enum OrderStatus {
+    Placed,
+    Processing,
+    Fulfilled,
+    Cancelled,
+}
+
+impl OrderStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Placed => "placed",
+            Self::Processing => "processing",
+            Self::Fulfilled => "fulfilled",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "order_channel", rename_all = "snake_case")]
+pub enum OrderChannel {
+    D2cWeb,
+    B2bPortal,
+    B2bApi,
+    Edi,
+}
+
+impl OrderChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::D2cWeb => "d2c_web",
+            Self::B2bPortal => "b2b_portal",
+            Self::B2bApi => "b2b_api",
+            Self::Edi => "edi",
+        }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrderRow {
+    pub id: Uuid,
+    pub kind: OrderKind,
+    pub frequency: Option<OrderFrequency>,
+    pub status: OrderStatus,
+    pub channel: OrderChannel,
+    pub po_number: Option<String>,
+    pub total_cents: i64,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrderItemRow {
+    pub order_id: Uuid,
+    pub name: String,
+    pub subname: Option<String>,
+    pub format: ProductFormat,
+    pub qty: i32,
+    pub unit_price_cents: i32,
+}
+
+/// A validated order line ready for insertion.
+#[derive(Debug, Clone, Copy)]
+pub struct NewOrderLine {
+    pub product_id: i64,
+    pub qty: i32,
+    pub unit_price_cents: i32,
+}
+
+pub async fn list_orders(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<OrderRow>> {
+    sqlx::query_as::<_, OrderRow>(
+        "SELECT id, kind, frequency, status, channel, po_number, total_cents, next_run_at, created_at \
+         FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn order_items_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> sqlx::Result<Vec<OrderItemRow>> {
+    sqlx::query_as::<_, OrderItemRow>(
+        "SELECT oi.order_id, p.name, p.subname, p.format, oi.qty, oi.unit_price_cents \
+         FROM order_items oi \
+         JOIN orders o ON o.id = oi.order_id \
+         JOIN products p ON p.id = oi.product_id \
+         WHERE o.user_id = $1 \
+         ORDER BY oi.id",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn product_prices(pool: &PgPool) -> sqlx::Result<Vec<(i64, String, i32)>> {
+    let rows: Vec<(i64, String, i32)> =
+        sqlx::query_as("SELECT id, slug, price_cents FROM products ORDER BY id")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// B2B API keys. Only SHA-256 hashes are stored.
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ApiKeyRow {
+    pub id: Uuid,
+    pub name: String,
+    pub prefix: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+pub async fn insert_api_key(
+    pool: &PgPool,
+    user_id: Uuid,
+    name: &str,
+    key_hash: &str,
+    prefix: &str,
+) -> sqlx::Result<Uuid> {
+    let (id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO b2b_api_keys (user_id, name, key_hash, prefix) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(key_hash)
+    .bind(prefix)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Resolve an API key hash to its owning user, touching last_used_at.
+pub async fn api_key_user(pool: &PgPool, key_hash: &str) -> sqlx::Result<Option<Uuid>> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "UPDATE b2b_api_keys SET last_used_at = now() \
+         WHERE key_hash = $1 AND revoked_at IS NULL \
+         RETURNING user_id",
+    )
+    .bind(key_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(user_id,)| user_id))
+}
+
+pub async fn list_api_keys(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<ApiKeyRow>> {
+    sqlx::query_as::<_, ApiKeyRow>(
+        "SELECT id, name, prefix, created_at, last_used_at, revoked_at \
+         FROM b2b_api_keys WHERE user_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn revoke_api_key(pool: &PgPool, user_id: Uuid, key_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE b2b_api_keys SET revoked_at = now() \
+         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(key_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Inventory + 90-minute cart holds.
+//
+// A hold is a row with an expiry, never a long-lived lock: claims take a
+// milliseconds-long FOR UPDATE on the inventory row, availability treats
+// expired holds as free (lazy expiry), and checkout converts hold -> sold in
+// the same transaction as the order insert so they can never disagree.
+
+pub const HOLD_MINUTES: i64 = 90;
+
+#[derive(Debug, Clone, Copy)]
+pub enum HoldOutcome {
+    /// Hold placed or refreshed for another HOLD_MINUTES window.
+    Held,
+    /// Not enough unheld stock; `available` is what's left right now.
+    Insufficient { available: i32 },
+    /// Product has no inventory row; stock is untracked and unlimited.
+    Untracked,
+}
+
+/// Claim (or refresh) this cart's hold for `qty` units of a product.
+pub async fn ensure_hold(
+    pool: &PgPool,
+    cart_id: Uuid,
+    product_id: i64,
+    qty: i32,
+) -> sqlx::Result<HoldOutcome> {
+    let mut tx = pool.begin().await?;
+    let on_hand: Option<(i32,)> =
+        sqlx::query_as("SELECT on_hand FROM inventory WHERE product_id = $1 FOR UPDATE")
+            .bind(product_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((on_hand,)) = on_hand else {
+        tx.commit().await?;
+        return Ok(HoldOutcome::Untracked);
+    };
+
+    let (held_elsewhere,): (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(qty), 0)::BIGINT FROM stock_holds \
+         WHERE product_id = $1 AND cart_id <> $2 AND held_until > now()",
+    )
+    .bind(product_id)
+    .bind(cart_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let available = i64::from(on_hand) - held_elsewhere;
+    if available < i64::from(qty) {
+        tx.commit().await?;
+        return Ok(HoldOutcome::Insufficient {
+            available: available.max(0) as i32,
+        });
+    }
+
+    sqlx::query(
+        "INSERT INTO stock_holds (cart_id, product_id, qty, held_until) \
+         VALUES ($1, $2, $3, now() + make_interval(mins => $4)) \
+         ON CONFLICT (cart_id, product_id) DO UPDATE \
+         SET qty = EXCLUDED.qty, held_until = EXCLUDED.held_until",
+    )
+    .bind(cart_id)
+    .bind(product_id)
+    .bind(qty)
+    .bind(HOLD_MINUTES as i32)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(HoldOutcome::Held)
+}
+
+pub async fn release_hold(pool: &PgPool, cart_id: Uuid, product_id: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM stock_holds WHERE cart_id = $1 AND product_id = $2")
+        .bind(cart_id)
+        .bind(product_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Earliest active hold expiry for the cart (None = nothing actively held).
+pub async fn cart_hold_until(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<Option<DateTime<Utc>>> {
+    let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+        "SELECT MIN(held_until) FROM stock_holds WHERE cart_id = $1 AND held_until > now()",
+    )
+    .bind(cart_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(min,)| min))
+}
+
+/// Hygiene only: the claim/availability queries already ignore expired rows.
+pub async fn sweep_expired_holds(pool: &PgPool) -> sqlx::Result<u64> {
+    let result = sqlx::query("DELETE FROM stock_holds WHERE held_until < now()")
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct InsufficientLine {
+    pub product_id: i64,
+    pub requested: i32,
+    pub available: i32,
+}
+
+#[derive(Debug)]
+pub enum OrderError {
+    Insufficient(Vec<InsufficientLine>),
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for OrderError {
+    fn from(err: sqlx::Error) -> Self {
+        Self::Db(err)
+    }
+}
+
+/// Place an order, decrementing stock and consuming the cart's holds in the
+/// same transaction. Inventory rows are locked in product-id order so
+/// concurrent checkouts can't deadlock. Lines whose products are untracked
+/// (no inventory row) skip the stock check.
+#[allow(clippy::too_many_arguments)]
+pub async fn place_order(
+    pool: &PgPool,
+    user_id: Uuid,
+    kind: OrderKind,
+    frequency: Option<OrderFrequency>,
+    channel: OrderChannel,
+    po_number: Option<&str>,
+    lines: &[NewOrderLine],
+    cart_id: Option<Uuid>,
+) -> Result<Uuid, OrderError> {
+    let mut sorted: Vec<NewOrderLine> = lines.to_vec();
+    sorted.sort_by_key(|line| line.product_id);
+
+    let mut tx = pool.begin().await?;
+    let mut shortages = Vec::new();
+    for line in &sorted {
+        let on_hand: Option<(i32,)> =
+            sqlx::query_as("SELECT on_hand FROM inventory WHERE product_id = $1 FOR UPDATE")
+                .bind(line.product_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((on_hand,)) = on_hand else { continue };
+
+        let (held_elsewhere,): (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(qty), 0)::BIGINT FROM stock_holds \
+             WHERE product_id = $1 AND held_until > now() \
+             AND cart_id IS DISTINCT FROM $2",
+        )
+        .bind(line.product_id)
+        .bind(cart_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let available = i64::from(on_hand) - held_elsewhere;
+        if available < i64::from(line.qty) {
+            shortages.push(InsufficientLine {
+                product_id: line.product_id,
+                requested: line.qty,
+                available: available.max(0) as i32,
+            });
+            continue;
+        }
+        sqlx::query(
+            "UPDATE inventory SET on_hand = on_hand - $2, updated_at = now() WHERE product_id = $1",
+        )
+        .bind(line.product_id)
+        .bind(line.qty)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if !shortages.is_empty() {
+        tx.rollback().await?;
+        return Err(OrderError::Insufficient(shortages));
+    }
+
+    let total: i64 = sorted
+        .iter()
+        .map(|line| i64::from(line.unit_price_cents) * i64::from(line.qty))
+        .sum();
+    let next_run_at = match (kind, frequency) {
+        (OrderKind::Recurring, Some(freq)) => {
+            Some(Utc::now() + chrono::Duration::days(freq.interval_days()))
+        }
+        _ => None,
+    };
+    let (order_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO orders (user_id, kind, frequency, channel, po_number, total_cents, next_run_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(kind)
+    .bind(frequency)
+    .bind(channel)
+    .bind(po_number)
+    .bind(total)
+    .bind(next_run_at)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    for line in &sorted {
+        sqlx::query(
+            "INSERT INTO order_items (order_id, product_id, qty, unit_price_cents) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(order_id)
+        .bind(line.product_id)
+        .bind(line.qty)
+        .bind(line.unit_price_cents)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if let Some(cart_id) = cart_id {
+        sqlx::query("DELETE FROM stock_holds WHERE cart_id = $1")
+            .bind(cart_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM cart_items WHERE cart_id = $1")
+            .bind(cart_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(order_id)
 }

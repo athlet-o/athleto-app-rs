@@ -6,9 +6,124 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
-use crate::auth::{AuthUser, MaybeUser};
+use crate::auth::{AuthUser, Biz, MaybeUser};
 use crate::db::{self, Product};
 use crate::SharedState;
+
+/// Reads the three most recent successful-login emails from IndexedDB and
+/// renders them as tap-to-fill chips on the login form.
+pub const LOGIN_CHIPS_JS: &str = r#"
+(function(){
+  function open(cb){ try{ var r=indexedDB.open('athleto-auth',1);
+    r.onupgradeneeded=function(){ r.result.createObjectStore('past_logins',{keyPath:'email'}); };
+    r.onsuccess=function(){ cb(r.result); }; r.onerror=function(){};
+  }catch(e){} }
+  open(function(db){
+    try{
+      var req=db.transaction('past_logins','readonly').objectStore('past_logins').getAll();
+      req.onsuccess=function(){
+        var rows=(req.result||[]).sort(function(a,b){return (b.at||0)-(a.at||0)}).slice(0,3);
+        if(!rows.length) return;
+        var box=document.getElementById('past-logins'); if(!box) return;
+        var label=document.createElement('div'); label.className='chips-label';
+        label.textContent='Welcome back - pick an email:';
+        box.appendChild(label);
+        rows.forEach(function(row){
+          var b=document.createElement('button'); b.type='button'; b.className='chip';
+          b.textContent=row.email;
+          b.onclick=function(){ var i=document.getElementById('login-email');
+            if(i){ i.value=row.email; i.focus(); } };
+          box.appendChild(b);
+        });
+      };
+    }catch(e){}
+  });
+})();
+"#;
+
+/// Interstitial after a successful login: stores the email (capped at the 3
+/// most recent) in IndexedDB, then forwards to the fragment's `next` path.
+pub const REMEMBER_JS: &str = r#"
+(function(){
+  var p=new URLSearchParams(location.hash.slice(1));
+  var email=p.get('email')||''; var next=p.get('next')||'/';
+  if(next.charAt(0)!=='/'||next.charAt(1)==='/') next='/';
+  function go(){ location.replace(next); }
+  if(!email||!window.indexedDB) return go();
+  try{
+    var r=indexedDB.open('athleto-auth',1);
+    r.onupgradeneeded=function(){ r.result.createObjectStore('past_logins',{keyPath:'email'}); };
+    r.onerror=go;
+    r.onsuccess=function(){
+      try{
+        var store=r.result.transaction('past_logins','readwrite').objectStore('past_logins');
+        store.put({email:email, at:Date.now()});
+        var all=store.getAll();
+        all.onsuccess=function(){
+          (all.result||[]).sort(function(a,b){return (b.at||0)-(a.at||0)})
+            .slice(3).forEach(function(row){ store.delete(row.email); });
+          setTimeout(go,60);
+        };
+        all.onerror=go;
+      }catch(e){ go(); }
+    };
+  }catch(e){ go(); }
+})();
+"#;
+
+/// Magic-link landing: GoTrue puts the session in the URL fragment, which
+/// only the browser can see; forward it to POST /auth/session and scrub the
+/// tokens from the address bar/history.
+pub const CALLBACK_JS: &str = r#"
+(function(){
+  var p=new URLSearchParams(location.hash.slice(1));
+  var status=document.getElementById('callback-status');
+  var err=p.get('error_description')||p.get('error');
+  if(err){
+    if(status) status.textContent='Sign-in failed: '+err.replace(/\+/g,' ')+'. Request a fresh link from the login page.';
+    return;
+  }
+  var access=p.get('access_token'), refresh=p.get('refresh_token');
+  if(!access||!refresh){
+    if(status) status.textContent='No sign-in tokens found. Open the link from your email again, or request a new one.';
+    return;
+  }
+  var f=document.createElement('form'); f.method='POST'; f.action='/auth/session';
+  [['access_token',access],['refresh_token',refresh]].forEach(function(pair){
+    var i=document.createElement('input'); i.type='hidden'; i.name=pair[0]; i.value=pair[1];
+    f.appendChild(i);
+  });
+  document.body.appendChild(f);
+  history.replaceState(null,'',location.pathname);
+  f.submit();
+})();
+"#;
+
+/// Cart-hold countdown: ticks locally every second and re-syncs against
+/// GET /cart/hold at random 25-55s intervals (lease-poll semantics).
+pub const CART_HOLD_JS: &str = r#"
+(function(){
+  var el=document.getElementById('hold-banner'); if(!el) return;
+  var left=document.getElementById('hold-left');
+  var secs=parseInt(el.getAttribute('data-seconds')||'0',10);
+  function fmt(s){ var m=Math.floor(s/60); return m+'m '+(s%60)+'s'; }
+  function render(){
+    if(secs>0){ if(left) left.textContent=fmt(secs); el.classList.remove('expired'); }
+    else { el.classList.add('expired'); if(left) left.textContent='expired - items may go back on sale'; }
+  }
+  render();
+  setInterval(function(){ if(secs>0){ secs-=1; render(); } },1000);
+  function schedule(){ setTimeout(poll, 25000+Math.floor(Math.random()*30000)); }
+  function poll(){
+    fetch('/cart/hold',{credentials:'same-origin'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){ if(d&&typeof d.seconds_left==='number'){ secs=Math.max(0,d.seconds_left); if(!d.active) secs=0; render(); } })
+      .catch(function(){})
+      .then(schedule);
+  }
+  schedule();
+})();
+"#;
 
 pub const APP_CSS: &str = r###"
 :root {
@@ -486,6 +601,165 @@ button.danger { background: var(--coral); color: #ffffff; }
 }
 
 .site-footer .tagline { color: var(--green-dark); font-weight: 900; }
+
+.auth-section { display: flex; justify-content: center; }
+.auth-section .auth-card { width: min(480px, 100%); }
+.auth-lede { color: var(--muted); line-height: 1.55; }
+
+.biz-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 3px 10px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--aqua);
+  font-size: 0.68rem;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+}
+
+.past-logins { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chips-label { width: 100%; color: var(--muted); font-weight: 800; font-size: 0.88rem; }
+button.chip {
+  padding: 6px 14px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--yellow);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 800;
+  font-size: 0.9rem;
+  cursor: pointer;
+  box-shadow: 3px 3px 0 var(--ink);
+}
+button.chip:hover { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+
+.code-input {
+  font-size: 1.4rem;
+  letter-spacing: 0.35em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.qr-box {
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 4px 4px 0 var(--ink);
+}
+.qr-box svg, .qr-box img { width: 220px; height: 220px; }
+
+.radio-row { flex-direction: row !important; align-items: flex-start; gap: 10px !important; font-weight: 700 !important; }
+.radio-row input { min-height: 0 !important; margin-top: 4px; }
+.muted-inline { color: var(--muted); font-weight: 700; }
+.ok-inline { color: var(--green-dark); font-weight: 900; }
+
+.factor-list { margin: 0 0 14px; padding-left: 18px; line-height: 1.9; }
+.inline-form { display: inline; margin-left: 6px; }
+button.linklike {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 800;
+  color: var(--blue);
+  cursor: pointer;
+  text-decoration: underline;
+  box-shadow: none;
+}
+button.linklike.danger-link { color: var(--coral); }
+
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+.account-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 6px 6px 0 var(--ink), 0 26px 44px -18px rgba(18, 50, 58, 0.35);
+}
+.account-card form { display: flex; flex-direction: column; gap: 10px; }
+.account-card label { display: flex; flex-direction: column; gap: 6px; font-weight: 800; font-size: 0.92rem; }
+.account-card input, .account-card select {
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 2px solid rgba(18, 50, 58, 0.3);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+
+.key-reveal {
+  margin-top: 8px;
+  padding: 12px;
+  border: 2px dashed var(--ink);
+  border-radius: 8px;
+  background: var(--paper);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+.order-card {
+  margin-bottom: 18px;
+  padding: 18px 20px;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 5px 5px 0 var(--ink);
+}
+.order-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 6px; }
+
+.checkout-form {
+  margin-top: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 440px;
+  padding: 20px;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 5px 5px 0 var(--ink);
+}
+.checkout-form label { display: flex; flex-direction: column; gap: 6px; font-weight: 800; font-size: 0.92rem; }
+.checkout-form select, .checkout-form input {
+  min-height: 42px;
+  padding: 8px 12px;
+  border: 2px solid rgba(18, 50, 58, 0.3);
+  border-radius: 10px;
+  background: var(--paper);
+  font: inherit;
+}
+
+.hold-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  max-width: 640px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 2px solid var(--ink);
+  border-left: 10px solid var(--aqua);
+  border-radius: 8px;
+  background: var(--paper-2);
+  font-weight: 800;
+  box-shadow: 4px 4px 0 var(--ink);
+}
+.hold-banner.expired { border-left-color: var(--coral); }
+.hold-banner strong { color: var(--green-dark); }
+.qty-input { width: 90px; min-height: 38px; padding: 6px 10px; border: 2px solid rgba(18,50,58,0.3); border-radius: 10px; font: inherit; }
 "###;
 
 pub fn format_price(cents: i64) -> String {
@@ -506,8 +780,14 @@ fn product_display_name(product: &Product) -> String {
         .unwrap_or_else(|| product.name.clone())
 }
 
-/// Shared document shell: dark athletic theme, htmx, header nav, footer.
+/// Shared document shell: jelly paper theme, htmx, header nav, footer.
 pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
+    layout_for(title, user, Biz(false), content)
+}
+
+/// Layout variant that knows which storefront host served the request:
+/// biz.athleto.store gets the business chrome.
+pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -515,6 +795,7 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover";
                 meta name="theme-color" content="#f8fbff";
+                meta name="referrer" content="no-referrer";
                 title { (title) }
                 style { (PreEscaped(APP_CSS)) }
                 script defer="defer" src="https://unpkg.com/htmx.org@2.0.4" {}
@@ -523,21 +804,25 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
                 header .site-header {
                     a .brand-lockup href="/" {
                         span .brand-mark { "AO" }
-                        span .brand-name { (wordmark()) }
+                        span .brand-name {
+                            (wordmark())
+                            @if biz.0 { span .biz-chip { "BUSINESS" } }
+                        }
                     }
                     nav .site-nav {
                         a href="/" { "Shop" }
                         a href="/cart" { "Cart" }
                         @match user {
                             Some(user) => {
+                                a href="/orders" { "Orders" }
+                                a href="/account" { "Account" }
                                 span .nav-user { (user.email.as_deref().unwrap_or("signed in")) }
                                 form method="post" action="/logout" {
                                     button type="submit" { "Log out" }
                                 }
                             }
                             None => {
-                                a href="/login" { "Log in" }
-                                a .accent href="/signup" { "Sign up" }
+                                a .accent href="/login" { "Log in" }
                             }
                         }
                     }
@@ -550,6 +835,20 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
             }
         }
     }
+}
+
+/// Percent-encode a value for use inside a query string or fragment.
+pub fn urlencode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Fragment shown wherever a feature needs configuration that is missing.
@@ -613,20 +912,40 @@ fn product_card(product: &Product) -> Markup {
     }
 }
 
-/// GET / -- storefront product grid.
-pub async fn home(State(state): State<SharedState>, user: MaybeUser) -> Markup {
+/// GET / -- storefront product grid (business chrome on biz.athleto.store).
+pub async fn home(State(state): State<SharedState>, user: MaybeUser, biz: Biz) -> Markup {
     let products = load_catalog(&state).await;
-    layout(
-        "AthletO | performance gelatin protein",
+    layout_for(
+        if biz.0 {
+            "AthletO Business | wholesale performance gelatin"
+        } else {
+            "AthletO | performance gelatin protein"
+        },
         user.as_ref(),
+        biz,
         html! {
             section .hero {
-                p .eyebrow { "Performance gelatin protein" }
-                h1 { "Wobble hard. " em { "Recover clean." } }
-                p .lede {
-                    "Gelatin protein cups and powder packets built for training bags, "
-                    "bus rides, and post-lift cooldowns. Protein, fiber, vitamin C, and "
-                    "electrolytes -- no sugar rush."
+                @if biz.0 {
+                    p .eyebrow { "Wholesale & retail partners" }
+                    h1 { "Stock the wobble. " em { "By the case." } }
+                    p .lede {
+                        "Case-packed gelatin protein for retailers, clubs, and distributors: "
+                        "purchase orders, recurring replenishment, and an ERP-ready API. "
+                        "Business accounts sign in with a magic link and two-factor auth."
+                    }
+                    p {
+                        a .button href="/quick-order" { "Quick order by the case" }
+                        " "
+                        a .button .ghost href="/account" { "Business account & API keys" }
+                    }
+                } @else {
+                    p .eyebrow { "Performance gelatin protein" }
+                    h1 { "Wobble hard. " em { "Recover clean." } }
+                    p .lede {
+                        "Gelatin protein cups and powder packets built for training bags, "
+                        "bus rides, and post-lift cooldowns. Protein, fiber, vitamin C, and "
+                        "electrolytes -- no sugar rush."
+                    }
                 }
             }
             section .section {
