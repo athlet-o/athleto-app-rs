@@ -734,9 +734,100 @@ pub fn checkout_form(
                     }
                 }
             }
+            @if pay_options.is_empty() {
+                div .notice {
+                    "Online payment isn't configured in this environment; the order is "
+                    "placed as payment-pending."
+                }
+            } @else {
+                fieldset .pay-methods {
+                    legend { "Pay with" }
+                    @for (index, (value, label)) in pay_options.iter().enumerate() {
+                        label .pay-method {
+                            input type="radio" name="pay_method" value=(value) checked[index == 0];
+                            " " (label)
+                        }
+                    }
+                    @if is_b2b {
+                        p .muted-inline {
+                            "Recurring orders bill automatically on your saved method; "
+                            "Net-30 invoices arrive by email with card, ACH, and bank-transfer "
+                            "payment options."
+                        }
+                    }
+                }
+            }
             button .primary type="submit" { "Place order" }
         }
     }
+}
+
+/// Map payment status onto the existing badge palette.
+fn payment_class(status: db::PaymentStatus) -> &'static str {
+    match status {
+        db::PaymentStatus::Paid => "st-fulfilled",
+        db::PaymentStatus::Invoiced | db::PaymentStatus::Processing => "st-processing",
+        db::PaymentStatus::Pending => "st-placed",
+        db::PaymentStatus::Failed | db::PaymentStatus::Refunded => "st-cancelled",
+    }
+}
+
+/// Can the customer (re)start payment for this order from the orders page?
+fn payment_retryable(order: &db::OrderRow) -> bool {
+    order.status != db::OrderStatus::Cancelled
+        && matches!(
+            order.payment_status,
+            db::PaymentStatus::Pending | db::PaymentStatus::Failed
+        )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PayNowRequest {
+    #[serde(default)]
+    pay_method: String,
+}
+
+/// POST /orders/{id}/pay -- (re)start payment for a pending or failed order.
+pub async fn pay_now(
+    State(state): State<SharedState>,
+    user: MaybeUser,
+    headers: axum::http::HeaderMap,
+    Path(order_id): Path<Uuid>,
+    Form(request): Form<PayNowRequest>,
+) -> Result<Response, AppError> {
+    let (auth_user, profile) = match auth::require_full(&state, &user).await {
+        Ok(pair) => pair,
+        Err(redirect) => return Ok(redirect),
+    };
+    if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
+        return Ok(redirect);
+    }
+    let Some(pool) = &state.pool else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+    // Scoped to the logged-in user: no paying (or probing) other people's
+    // orders.
+    let Some(order) = db::get_order(pool, auth_user.id, order_id).await? else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+    if !payment_retryable(&order) {
+        return Ok(Redirect::to("/orders").into_response());
+    }
+    let is_b2b = profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false);
+    let Some(method) = payments::PayMethod::parse(request.pay_method.trim()) else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+    let redirect = dispatch_payment(
+        &state,
+        &headers,
+        &auth_user,
+        order_id,
+        method,
+        is_b2b,
+        order.po_number.as_deref(),
+    )
+    .await;
+    Ok(redirect.into_response())
 }
 
 #[cfg(test)]
