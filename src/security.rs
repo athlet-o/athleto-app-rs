@@ -153,7 +153,7 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
                             StatusCode::PAYLOAD_TOO_LARGE.into_response(),
                             &token,
                             is_new_token,
-                            Some((nonce, hsts)),
+                            Some((nonce.clone(), hsts)),
                         )
                     }
                 };
