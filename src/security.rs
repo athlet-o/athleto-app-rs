@@ -170,14 +170,18 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
                 .map(|provided| tokens_match(provided, &token))
                 .unwrap_or(false);
         if !verified {
-            return finish(csrf_rejection(), &token, is_new_token, None);
+            return finish(
+                csrf_rejection(),
+                &token,
+                is_new_token,
+                Some((nonce.clone(), hsts)),
+            );
         }
         request
     } else {
         request
     };
 
-    let hsts = wants_hsts(&request);
     let context = RequestContext {
         csrf_token: token.clone(),
         csp_nonce: nonce.clone(),
