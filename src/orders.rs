@@ -40,6 +40,8 @@ pub struct CheckoutRequest {
     frequency: String,
     #[serde(default)]
     po_number: String,
+    #[serde(default)]
+    ship_method: String,
 }
 
 /// POST /checkout -- turn the cart into an order (stock + holds resolved in
