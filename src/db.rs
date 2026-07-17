@@ -192,7 +192,7 @@ pub fn fallback_products() -> Vec<Product> {
     fn product(
         id: i64,
         slug: &str,
-        name: &str,
+        subname: &str,
         description: &str,
         format: ProductFormat,
         calories: i32,
@@ -202,7 +202,8 @@ pub fn fallback_products() -> Vec<Product> {
         Product {
             id,
             slug: slug.to_string(),
-            name: name.to_string(),
+            name: "AthletO".to_string(),
+            subname: Some(subname.to_string()),
             description: description.to_string(),
             format,
             calories,
@@ -215,7 +216,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             1,
             "athlet-o-starter-cup",
-            "Athlet-O Starter",
+            "starter",
             "Lime-citrus protein wobble for daily training. 20g gelatin protein, inulin fiber, vitamin C, and electrolytes in a grab-and-go ready cup.",
             ProductFormat::Cup,
             90,
