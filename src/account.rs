@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use axum_extra::extract::cookie::CookieJar;
-use maud::{html, Markup, PreEscaped};
+use maud::{html, Markup};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
