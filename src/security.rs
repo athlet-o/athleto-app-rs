@@ -351,10 +351,12 @@ mod tests {
     }
 
     #[test]
-    fn client_ip_prefers_first_forwarded_hop() {
+    fn client_ip_uses_trusted_last_forwarded_hop() {
         let mut headers = axum::http::HeaderMap::new();
         assert_eq!(client_ip(&headers), "local");
-        headers.insert("x-forwarded-for", "9.9.9.9, 10.0.0.1".parse().unwrap());
-        assert_eq!(client_ip(&headers), "9.9.9.9");
+        // The right-most hop is the one our trusted proxy appended; a client
+        // that forges a left-most "1.2.3.4" cannot escape its real bucket.
+        headers.insert("x-forwarded-for", "1.2.3.4, 9.9.9.9, 10.0.0.1".parse().unwrap());
+        assert_eq!(client_ip(&headers), "10.0.0.1");
     }
 }
