@@ -968,7 +968,9 @@ pub async fn paypal_webhook(
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok())
                 {
-                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge)
+                    let charged =
+                        charged_decimal(&resource["amount"]["value"], &resource["amount"]["currency_code"]);
+                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge, charged)
                         .await?;
                 }
             }
