@@ -147,11 +147,54 @@ pub async fn checkout(
     }
 }
 
-/// GET /orders
+/// CSS class for an order status badge.
+fn status_class(status: db::OrderStatus) -> &'static str {
+    match status {
+        db::OrderStatus::Placed => "st-placed",
+        db::OrderStatus::Processing => "st-processing",
+        db::OrderStatus::Fulfilled => "st-fulfilled",
+        db::OrderStatus::Cancelled => "st-cancelled",
+    }
+}
+
+/// Delivery-estimate phrase for an order given its (optional) shipment.
+fn delivery_estimate(order: &db::OrderRow, shipment: Option<&db::Shipment>) -> Markup {
+    // A recorded shipment carries the authoritative window; otherwise estimate
+    // from ship method + order date.
+    if let Some(s) = shipment {
+        if let Some(delivered) = s.delivered_at {
+            return html! { span .ok-inline { "Delivered " (delivered.format("%b %-d")) } };
+        }
+        if let (Some(a), Some(b)) = (s.eta_earliest, s.eta_latest) {
+            return html! { "Arrives " strong { (a.format("%b %-d")) "\u{2013}" (b.format("%b %-d")) } };
+        }
+    }
+    if order.status == db::OrderStatus::Cancelled {
+        return html! { span .muted-inline { "\u{2014}" } };
+    }
+    let (a, b) = order.delivery_window();
+    html! { "Est. delivery " strong { (a.format("%b %-d")) "\u{2013}" (b.format("%b %-d")) } }
+}
+
+/// Tracking snippet: carrier + number, linked to the carrier when known.
+fn tracking_snippet(shipment: &db::Shipment) -> Markup {
+    let carrier = shipment.carrier.as_deref().unwrap_or("Carrier");
+    match (&shipment.tracking_number, shipment.tracking_url()) {
+        (Some(number), Some(url)) => html! {
+            "Tracking: " (carrier) " " a .track-link href=(url) target="_blank" rel="noopener" { (number) }
+        },
+        (Some(number), None) => html! { "Tracking: " (carrier) " " code { (number) } },
+        _ => html! {},
+    }
+}
+
+/// GET /orders -- order history with status, delivery estimate, tracking,
+/// receipt link and reorder; B2B additionally gets PO/status filters.
 pub async fn orders_page(
     State(state): State<SharedState>,
     user: MaybeUser,
     biz: Biz,
+    axum::extract::Query(filter): axum::extract::Query<OrderFilter>,
 ) -> Result<Response, AppError> {
     let (auth_user, profile) = match auth::require_full(&state, &user).await {
         Ok(pair) => pair,
@@ -167,63 +210,130 @@ pub async fn orders_page(
         .into_response());
     };
 
-    let orders = db::list_orders(pool, auth_user.id).await?;
+    let mut orders = db::list_orders(pool, auth_user.id).await?;
     let items = db::order_items_for_user(pool, auth_user.id).await?;
+    let shipments = db::shipments_for_user(pool, auth_user.id).await?;
     let mut by_order: HashMap<Uuid, Vec<&db::OrderItemRow>> = HashMap::new();
     for item in &items {
         by_order.entry(item.order_id).or_default().push(item);
     }
+    let mut ship_by_order: HashMap<Uuid, db::Shipment> = HashMap::new();
+    for row in &shipments {
+        ship_by_order.insert(row.order_id, row.shipment());
+    }
 
     let is_b2b = profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false);
+
+    // B2B order-management filters.
+    let status_filter = filter.status.as_deref().and_then(db::OrderStatus::parse);
+    let po_query = filter.po.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if is_b2b {
+        if let Some(status) = status_filter {
+            orders.retain(|o| o.status == status);
+        }
+        if let Some(po) = po_query {
+            let needle = po.to_lowercase();
+            orders.retain(|o| {
+                o.po_number
+                    .as_deref()
+                    .map(|p| p.to_lowercase().contains(&needle))
+                    .unwrap_or(false)
+            });
+        }
+    }
+
     Ok(pages::layout_for(
         "Orders | AthletO",
         Some(&auth_user),
         biz,
         html! {
             section .section {
-                h2 { "Your orders" }
+                div .orders-head {
+                    h2 { @if is_b2b { "Order management" } @else { "Your orders" } }
+                    @if is_b2b {
+                        a .button .ghost href="/quick-order" { "Quick order by the case" }
+                    }
+                }
+
+                @if is_b2b {
+                    form .order-filters method="get" action="/orders" {
+                        label {
+                            "Status"
+                            select name="status" {
+                                option value="" selected[status_filter.is_none()] { "All statuses" }
+                                @for st in [db::OrderStatus::Placed, db::OrderStatus::Processing, db::OrderStatus::Fulfilled, db::OrderStatus::Cancelled] {
+                                    option value=(st.label()) selected[status_filter == Some(st)] { (st.label()) }
+                                }
+                            }
+                        }
+                        label {
+                            "PO number"
+                            input type="search" name="po" value=(po_query.unwrap_or("")) placeholder="PO-2026-...";
+                        }
+                        button .button type="submit" { "Filter" }
+                        @if status_filter.is_some() || po_query.is_some() {
+                            a .button .ghost href="/orders" { "Clear" }
+                        }
+                    }
+                }
+
                 @if orders.is_empty() {
-                    div .notice { "No orders yet. The lineup is waiting." }
+                    div .notice { "No orders match. The lineup is waiting." }
                     p { a .button href="/" { "Shop the lineup" } }
                 } @else {
                     @for order in &orders {
                         div .order-card {
                             div .order-head {
-                                strong { "Order " (order.id.simple().to_string()[..8].to_uppercase()) }
-                                span .format-badge { (order.status.label()) }
+                                a .order-id href=(format!("/orders/{}", order.id)) { "Order " (order.short_id()) }
+                                span .status-badge .(status_class(order.status)) { (order.status.label()) }
+                                @if order.recurs_flag() { span .status-badge .st-sub { "subscription" } }
                                 span .muted-inline { (order.created_at.format("%b %-d, %Y")) }
+                            }
+                            p .order-meta {
+                                (delivery_estimate(order, ship_by_order.get(&order.id)))
+                                @if let Some(ship) = ship_by_order.get(&order.id) {
+                                    @if ship.tracking_number.is_some() { " \u{00b7} " (tracking_snippet(ship)) }
+                                }
                             }
                             p .auth-alt {
                                 (order.kind.label())
                                 @if let Some(freq) = order.frequency { ", " (freq.label()) }
-                                @if let Some(next) = order.next_run_at {
-                                    " -- next run " (next.format("%b %-d"))
-                                }
-                                @if let Some(po) = order.po_number.as_deref() { " -- PO " code { (po) } }
+                                @if let Some(next) = order.next_run_at { " \u{00b7} next run " (next.format("%b %-d")) }
+                                @if let Some(po) = order.po_number.as_deref() { " \u{00b7} PO " code { (po) } }
                             }
                             ul .factor-list {
                                 @for item in by_order.get(&order.id).map(|v| v.as_slice()).unwrap_or(&[]) {
                                     li {
-                                        (item.qty) " x "
-                                        @if let Some(subname) = item.subname.as_deref() {
-                                            "AthletO " (subname)
-                                        } @else { (item.name) }
-                                        " (" (item.format.label()) ") -- "
+                                        (item.qty) " \u{00d7} "
+                                        @if let Some(subname) = item.subname.as_deref() { "AthletO " (subname) }
+                                        @else { (item.name) }
+                                        " (" (item.format.label()) ") \u{2014} "
                                         (pages::format_price(i64::from(item.unit_price_cents) * i64::from(item.qty)))
                                     }
                                 }
                             }
-                            p .cart-total { "Total: " strong { (pages::format_price(order.total_cents)) } }
+                            div .order-foot {
+                                p .cart-total { "Total: " strong { (pages::format_price(order.total_cents)) } }
+                                div .order-actions {
+                                    a .button .ghost href=(format!("/orders/{}", order.id)) { "View receipt" }
+                                    form .inline-form method="post" action=(format!("/orders/{}/reorder", order.id)) {
+                                        button .button type="submit" { "Reorder" }
+                                    }
+                                }
+                            }
                         }
                     }
-                }
-                @if is_b2b {
-                    p { a .button .ghost href="/quick-order" { "Quick order by the case" } }
                 }
             }
         },
     )
     .into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct OrderFilter {
+    status: Option<String>,
+    po: Option<String>,
 }
 
 /// GET /quick-order -- B2B grid: every SKU with a qty box, one submit.
