@@ -899,7 +899,13 @@ pub async fn paypal_webhook(
         return StatusCode::BAD_REQUEST.into_response();
     };
 
-    if let Some(webhook_id) = &cfg.webhook_id {
+    // Fail closed: without the webhook id we cannot ask PayPal to verify the
+    // transmission, and an unverified event could mark orders paid.
+    let Some(webhook_id) = &cfg.webhook_id else {
+        tracing::warn!("paypal webhook received but ATHLETO_PAYPAL_WEBHOOK_ID is unset; rejecting");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    {
         let header = |name: &str| {
             headers
                 .get(name)
