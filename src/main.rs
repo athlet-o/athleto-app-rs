@@ -193,6 +193,45 @@ async fn main() -> anyhow::Result<()> {
         fiducia_api_key: env_opt("FIDUCIA_API_KEY"),
         // HOSTNAME is the pod name under Kubernetes; unique per replica.
         replica_id: env_opt("HOSTNAME").unwrap_or_else(|| "local".to_string()),
+        stripe: env_opt("ATHLETO_STRIPE_SECRET_KEY").map(|secret_key| payments::StripeConfig {
+            secret_key,
+            webhook_secret: env_opt("ATHLETO_STRIPE_WEBHOOK_SECRET"),
+        }),
+        paypal: match (env_opt("ATHLETO_PAYPAL_CLIENT_ID"), env_opt("ATHLETO_PAYPAL_CLIENT_SECRET")) {
+            (Some(client_id), Some(client_secret)) => Some(payments::PayPalConfig {
+                client_id,
+                client_secret,
+                webhook_id: env_opt("ATHLETO_PAYPAL_WEBHOOK_ID"),
+                api_base: match env_opt("ATHLETO_PAYPAL_ENV").as_deref() {
+                    Some("live") => "https://api-m.paypal.com".to_string(),
+                    _ => "https://api-m.sandbox.paypal.com".to_string(),
+                },
+            }),
+            _ => None,
+        },
+        square: match (env_opt("ATHLETO_SQUARE_ACCESS_TOKEN"), env_opt("ATHLETO_SQUARE_LOCATION_ID")) {
+            (Some(access_token), Some(location_id)) => Some(payments::SquareConfig {
+                access_token,
+                location_id,
+                webhook_signature_key: env_opt("ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY"),
+                api_base: match env_opt("ATHLETO_SQUARE_ENV").as_deref() {
+                    Some("production") => "https://connect.squareup.com".to_string(),
+                    _ => "https://connect.squareupsandbox.com".to_string(),
+                },
+            }),
+            _ => None,
+        },
+        billing: match (
+            env_opt("ATHLETO_BILLING_URL"),
+            env_opt("ATHLETO_BILLING_TENANT_ID").and_then(|id| id.parse().ok()),
+        ) {
+            (Some(url), Some(tenant_id)) => Some(billing::BillingConfig {
+                url: url.trim_end_matches('/').to_string(),
+                api_key: env_opt("ATHLETO_BILLING_API_KEY"),
+                tenant_id,
+            }),
+            _ => None,
+        },
     };
     if config.supabase().is_none() {
         tracing::warn!("SUPABASE_URL / SUPABASE_ANON_KEY not set; auth routes will show a 'not configured' notice");
