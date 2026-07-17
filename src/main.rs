@@ -184,7 +184,11 @@ async fn main() -> anyhow::Result<()> {
             // leader election so exactly one runs it.
             let sweep_pool = pool.clone();
             tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(Duration::from_secs(15 * 60));
+                // First tick is delayed so the sweep never races the
+                // migrations that create stock_holds on a fresh database.
+                let period = Duration::from_secs(15 * 60);
+                let mut ticker =
+                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
                 loop {
                     ticker.tick().await;
                     match db::sweep_expired_holds(&sweep_pool).await {
