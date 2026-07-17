@@ -41,6 +41,13 @@ pub struct Config {
     pub fiducia_api_key: Option<String>,
     /// Identifies this replica in fiducia lease holder strings.
     pub replica_id: String,
+    /// Payment processors; each is independently optional and the checkout
+    /// only offers the ones with keys present.
+    pub stripe: Option<payments::StripeConfig>,
+    pub paypal: Option<payments::PayPalConfig>,
+    pub square: Option<payments::SquareConfig>,
+    /// Quaestor billing-server (observer AR/AP ledger for balances/credits).
+    pub billing: Option<billing::BillingConfig>,
 }
 
 impl Default for Config {
