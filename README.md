@@ -57,6 +57,14 @@ storefront renders from a built-in catalog, and auth/cart routes show a
 Payment processors are each independently optional — checkout only offers the ones
 with keys present, and with none configured orders are placed as payment-pending.
 
+**Secrets sourcing:** every variable above is read env-first; anything the
+environment leaves unset is fetched once at boot from the **fiducia.cloud
+config KV** (`secrets/athleto/<ENV_NAME>`, reachable with just `FIDUCIA_URL` +
+`FIDUCIA_API_KEY` from any cloud provider). Env always wins; fiducia being
+down is the same as unset. AWS Secrets Manager (via ESO) remains the
+production secrets-of-record. Details and the `fiducia-secrets` roadmap:
+[docs/secrets-management.md](docs/secrets-management.md).
+
 ## Payments
 
 Checkout accepts **one-time, subscription, and recurring** payments through three
