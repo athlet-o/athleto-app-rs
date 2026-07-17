@@ -246,7 +246,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             4,
             "recover-o-powder",
-            "Recover-O",
+            "recover",
             "Berry-orange recovery wobble for the ride home. Gelatin protein plus magnesium, potassium, vitamin C, fiber, and live cultures -- just add water and chill.",
             ProductFormat::Powder,
             80,
