@@ -554,14 +554,22 @@ impl ShipMethod {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type,
+    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
+)]
 #[sqlx(type_name = "payment_provider", rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_provider")]
 pub enum PaymentProvider {
+    #[sea_orm(string_value = "stripe")]
     Stripe,
+    #[sea_orm(string_value = "paypal")]
     Paypal,
+    #[sea_orm(string_value = "square")]
     Square,
     /// B2B open account: ships against a PO, settled via a hosted Net-30
     /// Stripe invoice (card / ACH / bank transfer).
+    #[sea_orm(string_value = "invoice")]
     Invoice,
 }
 
