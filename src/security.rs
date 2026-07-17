@@ -122,6 +122,9 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
     let is_new_token = cookie_token.is_none();
     let token = cookie_token.unwrap_or_else(random_token);
     let nonce = Uuid::new_v4().simple().to_string();
+    // Computed up front so the early CSRF/oversize rejections below carry the
+    // same security headers as a normal response (they used to skip them).
+    let hsts = wants_hsts(&request);
 
     let state_changing = matches!(
         *request.method(),
