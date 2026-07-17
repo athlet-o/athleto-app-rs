@@ -733,6 +733,9 @@ button.linklike.danger-link { color: var(--coral); }
   box-shadow: 5px 5px 0 var(--ink);
 }
 .checkout-form label { display: flex; flex-direction: column; gap: 6px; font-weight: 800; font-size: 0.92rem; }
+.pay-methods { border: 1px solid var(--line, #2a2a2a); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.pay-methods legend { font-weight: 800; font-size: 0.92rem; padding: 0 6px; }
+.pay-methods .pay-method { display: flex; flex-direction: row; align-items: center; gap: 8px; font-weight: 600; }
 .checkout-form select, .checkout-form input {
   min-height: 42px;
   padding: 8px 12px;
