@@ -1260,12 +1260,12 @@ async fn settle_order(
     provider_ref: &str,
     kind: PaymentKind,
 ) -> Result<(), PaymentError> {
-    let Some(facts) = db::order_payment_facts(pool, order_id).await? else {
+    let Some(facts) = db::order_payment_facts(orm, order_id).await? else {
         return Ok(());
     };
-    db::set_order_payment_status(pool, order_id, PaymentStatus::Paid).await?;
+    db::set_order_payment_status(orm, order_id, PaymentStatus::Paid).await?;
     let newly_recorded = db::record_payment(
-        pool,
+        orm,
         Some(order_id),
         facts.user_id,
         provider,
