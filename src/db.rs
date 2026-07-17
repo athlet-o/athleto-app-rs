@@ -97,7 +97,8 @@ pub fn build_pool(database_url: &str) -> Option<PgPool> {
     }
 }
 
-const PRODUCT_COLUMNS: &str = "id, slug, name, description, format, calories, protein_g, price_cents";
+const PRODUCT_COLUMNS: &str =
+    "id, slug, name, subname, description, format, calories, protein_g, price_cents";
 
 pub async fn list_products(pool: &PgPool) -> sqlx::Result<Vec<Product>> {
     sqlx::query_as::<_, Product>(&format!(
