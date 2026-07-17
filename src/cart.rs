@@ -334,7 +334,10 @@ pub async fn add_item(
     };
 
     let cart_id = db::find_or_create_cart(pool, &owner).await?;
-    let requested = input.qty.max(1);
+    // Clamp the per-line quantity: a single line above this is never a real
+    // storefront order, and the ceiling stops one request from reserving a
+    // product's entire on-hand stock in one shot.
+    let requested = input.qty.clamp(1, MAX_QTY_PER_LINE);
     let already_in_cart = db::cart_lines(pool, cart_id)
         .await?
         .iter()
