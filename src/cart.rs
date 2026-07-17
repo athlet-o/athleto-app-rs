@@ -168,6 +168,7 @@ fn cart_page_markup(
                 (cart_contents(lines))
                 @if user.as_ref().is_some() && !lines.is_empty() {
                     (orders::checkout_form(
+                        config,
                         profile,
                         user.as_ref().map(|u| u.has_verified_factor()).unwrap_or(false),
                     ))
