@@ -548,7 +548,7 @@ pub async fn stripe_webhook(
             return StatusCode::BAD_REQUEST.into_response();
         }
     }
-    let Some(pool) = state.pool.clone() else {
+    let Some(orm) = state.orm.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(event) = serde_json::from_slice::<Value>(&body) else {
@@ -844,7 +844,7 @@ pub async fn paypal_webhook(
     let Some(cfg) = &state.config.paypal else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Some(pool) = state.pool.clone() else {
+    let Some(orm) = state.orm.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(event) = serde_json::from_slice::<Value>(&body) else {
@@ -1146,7 +1146,7 @@ pub async fn square_webhook(
             return StatusCode::BAD_REQUEST.into_response();
         }
     }
-    let Some(pool) = state.pool.clone() else {
+    let Some(orm) = state.orm.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(event) = serde_json::from_slice::<Value>(&body) else {
@@ -1351,7 +1351,7 @@ pub async fn pay_success(
     State(state): State<SharedState>,
     Query(params): Query<ReturnParams>,
 ) -> Response {
-    let Some(pool) = state.pool.clone() else {
+    let Some(orm) = state.orm.clone() else {
         return Redirect::to("/orders").into_response();
     };
     let order_id = params.order;
