@@ -15,10 +15,23 @@ AWS Secrets Manager gives us the things a secrets store must have — encryption
 at rest under KMS, IAM-scoped access, rotation hooks, audit via CloudTrail —
 so it stays **production secrets-of-record** until fiducia offers equivalents.
 
+## Audit outcome (2026-07)
+
+A security audit of fiducia-node confirmed the KV is **plaintext at rest and
+in transit**: values sit in cleartext in the Raft log and snapshots on every
+node's disk, and cross the peer network over plain HTTP. It is *not* an
+encrypted vault. Verdict: **the KV is not safe to hold raw production secrets
+as-is.** Two required changes before it is — (1) values must be ciphertext
+fiducia never sees, (2) the secrets namespace must not be readable by a
+general org-wide `kv:read` scope.
+
+We implemented (1) on the client immediately (below). (2) and server-side
+at-rest encryption / peer mTLS are tracked as fiducia work.
+
 ## Can fiducia.cloud be the cross-provider secrets manager?
 
-**Yes as the distribution plane now; yes as the store later, after it grows a
-real secrets API.** The honest split:
+**Yes as the distribution plane now (holding only ciphertext); yes as the
+store later, after it grows a real encrypted secrets API.** The honest split:
 
 What fiducia already has that fits:
 
