@@ -823,7 +823,7 @@ async fn paypal_subscription(
         db::set_order_payment(orm, facts.id, PaymentProvider::Paypal, subscription_id, PaymentStatus::Pending)
             .await?;
         db::upsert_subscription(
-            pool,
+            orm,
             facts.user_id,
             Some(facts.id),
             PaymentProvider::Paypal,
