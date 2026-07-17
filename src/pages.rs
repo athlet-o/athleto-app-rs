@@ -665,8 +665,14 @@ fn product_display_name(product: &Product) -> String {
         .unwrap_or_else(|| product.name.clone())
 }
 
-/// Shared document shell: dark athletic theme, htmx, header nav, footer.
+/// Shared document shell: jelly paper theme, htmx, header nav, footer.
 pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
+    layout_for(title, user, Biz(false), content)
+}
+
+/// Layout variant that knows which storefront host served the request:
+/// biz.athleto.store gets the business chrome.
+pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -674,6 +680,7 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover";
                 meta name="theme-color" content="#f8fbff";
+                meta name="referrer" content="no-referrer";
                 title { (title) }
                 style { (PreEscaped(APP_CSS)) }
                 script defer="defer" src="https://unpkg.com/htmx.org@2.0.4" {}
@@ -682,21 +689,25 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
                 header .site-header {
                     a .brand-lockup href="/" {
                         span .brand-mark { "AO" }
-                        span .brand-name { (wordmark()) }
+                        span .brand-name {
+                            (wordmark())
+                            @if biz.0 { span .biz-chip { "BUSINESS" } }
+                        }
                     }
                     nav .site-nav {
                         a href="/" { "Shop" }
                         a href="/cart" { "Cart" }
                         @match user {
                             Some(user) => {
+                                a href="/orders" { "Orders" }
+                                a href="/account" { "Account" }
                                 span .nav-user { (user.email.as_deref().unwrap_or("signed in")) }
                                 form method="post" action="/logout" {
                                     button type="submit" { "Log out" }
                                 }
                             }
                             None => {
-                                a href="/login" { "Log in" }
-                                a .accent href="/signup" { "Sign up" }
+                                a .accent href="/login" { "Log in" }
                             }
                         }
                     }
@@ -709,6 +720,20 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
             }
         }
     }
+}
+
+/// Percent-encode a value for use inside a query string or fragment.
+pub fn urlencode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Fragment shown wherever a feature needs configuration that is missing.
