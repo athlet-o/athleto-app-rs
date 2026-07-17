@@ -389,11 +389,17 @@ pub async fn recent_login_events(
 // ---------------------------------------------------------------------------
 // Orders.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Deserialize,
+    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
+)]
 #[sqlx(type_name = "order_kind", rename_all = "snake_case")]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "order_kind")]
 #[serde(rename_all = "snake_case")]
 pub enum OrderKind {
+    #[sea_orm(string_value = "one_time")]
     OneTime,
+    #[sea_orm(string_value = "recurring")]
     Recurring,
 }
 
