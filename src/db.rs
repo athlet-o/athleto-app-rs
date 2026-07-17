@@ -1423,7 +1423,7 @@ pub async fn place_order(
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::NotSet, ActiveValue::Set, ColumnTrait, DatabaseConnection,
-    DbErr, EntityTrait, QueryFilter, QueryOrder, TryInsertResult,
+    DbErr, EntityTrait, QueryFilter, TryInsertResult,
 };
 
 use crate::entities::{order, payment, payment_event, payment_subscription};
