@@ -60,6 +60,10 @@ impl Default for Config {
             fiducia_url: None,
             fiducia_api_key: None,
             replica_id: "local".to_string(),
+            stripe: None,
+            paypal: None,
+            square: None,
+            billing: None,
         }
     }
 }
