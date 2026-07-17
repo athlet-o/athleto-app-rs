@@ -125,6 +125,10 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Max accepted body on provider webhook routes. Real Stripe/PayPal/Square
+/// events are a few KB; 64 KiB is generous headroom while capping abuse.
+const WEBHOOK_BODY_LIMIT: usize = 64 * 1024;
+
 fn router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(pages::home))
