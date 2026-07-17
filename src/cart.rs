@@ -319,7 +319,7 @@ pub async fn add_item(
             }
             return Ok((jar, Redirect::to("/cart")).into_response());
         }
-        HoldOutcome::Held(_) | HoldOutcome::Untracked => {}
+        HoldOutcome::Held | HoldOutcome::Untracked => {}
     }
 
     db::add_cart_item(pool, cart_id, input.product_id, requested).await?;
@@ -403,9 +403,9 @@ mod tests {
     fn hold_banner_shows_countdown_and_expiry() {
         let active = hold_banner(125).into_string();
         assert!(active.contains("2m 5s"));
-        assert!(!active.contains("expired"));
+        assert!(!active.contains("hold-banner expired"));
 
         let expired = hold_banner(0).into_string();
-        assert!(expired.contains("expired"));
+        assert!(expired.contains("hold-banner expired"));
     }
 }

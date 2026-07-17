@@ -185,14 +185,6 @@ pub async fn cart_lines(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<Vec<CartLi
     .await
 }
 
-pub async fn clear_cart(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM cart_items WHERE cart_id = $1")
-        .bind(cart_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 pub async fn cart_count(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<i64> {
     let (count,): (i64,) =
         sqlx::query_as("SELECT COALESCE(SUM(qty), 0)::BIGINT FROM cart_items WHERE cart_id = $1")
@@ -316,7 +308,6 @@ impl CustomerType {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct CustomerProfile {
-    pub user_id: Uuid,
     pub customer_type: CustomerType,
     pub company_name: Option<String>,
 }
@@ -329,7 +320,7 @@ impl CustomerProfile {
 
 pub async fn get_profile(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<CustomerProfile>> {
     sqlx::query_as::<_, CustomerProfile>(
-        "SELECT user_id, customer_type, company_name FROM customer_profiles WHERE user_id = $1",
+        "SELECT customer_type, company_name FROM customer_profiles WHERE user_id = $1",
     )
     .bind(user_id)
     .fetch_optional(pool)
@@ -637,8 +628,8 @@ pub const HOLD_MINUTES: i64 = 90;
 
 #[derive(Debug, Clone, Copy)]
 pub enum HoldOutcome {
-    /// Hold placed or refreshed until the given time.
-    Held(DateTime<Utc>),
+    /// Hold placed or refreshed for another HOLD_MINUTES window.
+    Held,
     /// Not enough unheld stock; `available` is what's left right now.
     Insufficient { available: i32 },
     /// Product has no inventory row; stock is untracked and unlimited.
@@ -680,21 +671,20 @@ pub async fn ensure_hold(
         });
     }
 
-    let (held_until,): (DateTime<Utc>,) = sqlx::query_as(
+    sqlx::query(
         "INSERT INTO stock_holds (cart_id, product_id, qty, held_until) \
          VALUES ($1, $2, $3, now() + make_interval(mins => $4)) \
          ON CONFLICT (cart_id, product_id) DO UPDATE \
-         SET qty = EXCLUDED.qty, held_until = EXCLUDED.held_until \
-         RETURNING held_until",
+         SET qty = EXCLUDED.qty, held_until = EXCLUDED.held_until",
     )
     .bind(cart_id)
     .bind(product_id)
     .bind(qty)
     .bind(HOLD_MINUTES as i32)
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(HoldOutcome::Held(held_until))
+    Ok(HoldOutcome::Held)
 }
 
 pub async fn release_hold(pool: &PgPool, cart_id: Uuid, product_id: i64) -> sqlx::Result<()> {

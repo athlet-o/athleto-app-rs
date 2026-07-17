@@ -327,6 +327,9 @@ fn account_markup(
                                             strong { (key.name) }
                                             " -- " code { (key.prefix) "..." }
                                             " -- created " span .muted-inline { (key.created_at.format("%b %-d")) }
+                                            @if let Some(last) = key.last_used_at {
+                                                " -- last used " span .muted-inline { (last.format("%b %-d, %H:%M UTC")) }
+                                            }
                                             @if key.revoked_at.is_some() {
                                                 " -- " span .muted-inline { "revoked" }
                                             } @else {
