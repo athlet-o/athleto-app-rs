@@ -606,10 +606,48 @@ pub struct NewOrderLine {
 }
 
 pub async fn list_orders(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<OrderRow>> {
-    sqlx::query_as::<_, OrderRow>(
-        "SELECT id, kind, frequency, status, channel, po_number, total_cents, next_run_at, created_at \
-         FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50",
+    sqlx::query_as::<_, OrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50"
+    ))
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// One order scoped to its owner (None if not found or not theirs).
+pub async fn get_order(pool: &PgPool, user_id: Uuid, order_id: Uuid) -> sqlx::Result<Option<OrderRow>> {
+    sqlx::query_as::<_, OrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM orders WHERE id = $1 AND user_id = $2"
+    ))
+    .bind(order_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn order_items(pool: &PgPool, order_id: Uuid) -> sqlx::Result<Vec<OrderItemRow>> {
+    sqlx::query_as::<_, OrderItemRow>(
+        "SELECT oi.order_id, p.name, p.subname, p.format, oi.qty, oi.unit_price_cents \
+         FROM order_items oi JOIN products p ON p.id = oi.product_id \
+         WHERE oi.order_id = $1 ORDER BY oi.id",
     )
+    .bind(order_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Lines from a past order, for the reorder-into-cart action.
+pub async fn order_reorder_lines(
+    pool: &PgPool,
+    user_id: Uuid,
+    order_id: Uuid,
+) -> sqlx::Result<Vec<(i64, i32)>> {
+    sqlx::query_as(
+        "SELECT oi.product_id, oi.qty FROM order_items oi \
+         JOIN orders o ON o.id = oi.order_id \
+         WHERE oi.order_id = $1 AND o.user_id = $2",
+    )
+    .bind(order_id)
     .bind(user_id)
     .fetch_all(pool)
     .await
