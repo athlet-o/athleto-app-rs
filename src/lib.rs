@@ -15,12 +15,21 @@ pub mod security;
 pub mod ws;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+
+/// Hard ceiling on request bodies. Storefront forms and the JSON API are tiny;
+/// anything larger is abuse, so cap it before a handler buffers it.
+const MAX_BODY_BYTES: usize = 512 * 1024;
+/// Whole-request timeout. Bounds slow-body / slow-handler resource holding.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub use auth::{auth_session_cookie, refresh_session_cookie};
 
