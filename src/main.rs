@@ -31,6 +31,13 @@ pub struct Config {
     /// SMS second factors need the Supabase phone-MFA add-on plus a
     /// configured SMS provider; the UI stays hidden until this is set.
     pub sms_mfa_enabled: bool,
+    /// fiducia.cloud lock service, used only for singleton-job leadership
+    /// leases (never for cart holds). Both must be set to activate; otherwise
+    /// leadership falls back to a Postgres advisory lock.
+    pub fiducia_url: Option<String>,
+    pub fiducia_api_key: Option<String>,
+    /// Identifies this replica in fiducia lease holder strings.
+    pub replica_id: String,
 }
 
 impl Default for Config {
@@ -40,6 +47,9 @@ impl Default for Config {
             supabase_anon_key: None,
             public_base_url: "https://app.athleto.store".to_string(),
             sms_mfa_enabled: false,
+            fiducia_url: None,
+            fiducia_api_key: None,
+            replica_id: "local".to_string(),
         }
     }
 }
