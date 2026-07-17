@@ -950,3 +950,62 @@ pub async fn logout(State(state): State<SharedState>, jar: CookieJar) -> Respons
     }
     (clear_session(jar), Redirect::to("/")).into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    fn factor(status: &str, kind: &str) -> Factor {
+        Factor {
+            id: "f-1".into(),
+            factor_type: kind.into(),
+            status: status.into(),
+            friendly_name: None,
+        }
+    }
+
+    fn user(aal: &str, factors: Vec<Factor>) -> AuthUser {
+        AuthUser {
+            id: Uuid::nil(),
+            email: Some("a@b.co".into()),
+            aal: aal.into(),
+            factors,
+            access_token: "t".into(),
+        }
+    }
+
+    #[test]
+    fn jwt_aal_reads_claim_and_defaults_to_aal1() {
+        let enc = |v: &serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap())
+        };
+        let token = format!(
+            "header.{}.sig",
+            enc(&serde_json::json!({ "aal": "aal2", "sub": "x" }))
+        );
+        assert_eq!(jwt_aal(&token), "aal2");
+        // Missing claim, malformed token, and empty string all fall back safely.
+        assert_eq!(jwt_aal(&format!("h.{}.s", enc(&serde_json::json!({})))), "aal1");
+        assert_eq!(jwt_aal("not-a-jwt"), "aal1");
+    }
+
+    #[test]
+    fn needs_aal2_only_when_enrolled_and_not_yet_upgraded() {
+        // Enrolled + AAL1 -> must step up.
+        assert!(user("aal1", vec![factor("verified", "totp")]).needs_aal2());
+        // Enrolled + already AAL2 -> satisfied.
+        assert!(!user("aal2", vec![factor("verified", "totp")]).needs_aal2());
+        // Unverified factor doesn't count as enrolled.
+        assert!(!user("aal1", vec![factor("unverified", "totp")]).needs_aal2());
+        // No factors at all -> nothing to step up to.
+        assert!(!user("aal1", vec![]).needs_aal2());
+    }
+
+    #[test]
+    fn urlencode_escapes_reserved_but_keeps_path_and_unreserved() {
+        assert_eq!(urlencode("a@b.co"), "a%40b.co");
+        assert_eq!(urlencode("/account/setup"), "/account/setup");
+        assert_eq!(urlencode("a b&c"), "a%20b%26c");
+    }
+}

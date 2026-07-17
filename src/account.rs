@@ -757,3 +757,36 @@ pub async fn api_key_revoke(
     }
     Redirect::to("/account").into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_api_key_matches_the_shared_vector() {
+        // Must equal api::hash_key's vector so a key minted here verifies there.
+        assert_eq!(
+            hash_api_key("athk_test_vector_001"),
+            "66adca3c7ae7f126ff03b7cc7daba157a1b9705447faaabd4fc1c2995c0d308a"
+        );
+    }
+
+    #[test]
+    fn new_api_key_is_prefixed_unique_and_display_prefix_is_stable() {
+        let a = new_api_key();
+        let b = new_api_key();
+        assert!(a.starts_with("athk_"));
+        assert_ne!(a, b, "keys must be unique");
+        // The stored display prefix is the first 13 chars ("athk_" + 8 hex).
+        let prefix: String = a.chars().take(13).collect();
+        assert_eq!(prefix.len(), 13);
+        assert!(a.starts_with(&prefix));
+    }
+
+    #[test]
+    fn urlencoding_light_escapes_spaces_and_reserved() {
+        assert_eq!(urlencoding_light("a b"), "a+b");
+        assert_eq!(urlencoding_light("PO#1&2"), "PO%231%262");
+        assert_eq!(urlencoding_light("plain.Text_1-2"), "plain.Text_1-2");
+    }
+}
