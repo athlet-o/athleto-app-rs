@@ -456,6 +456,7 @@ h1, h2, h3, p { margin-top: 0; }
 
 button.buy,
 a.button,
+button.button,
 button.primary {
   display: inline-flex;
   min-height: 44px;
@@ -476,12 +477,14 @@ button.primary {
 
 button.buy:hover,
 a.button:hover,
+button.button:hover,
 button.primary:hover {
   transform: translate(2px, 2px);
   box-shadow: 2px 2px 0 var(--ink);
 }
 
-a.button.ghost { background: var(--paper-2); }
+a.button.ghost,
+button.button.ghost { background: var(--paper-2); }
 
 button.danger { background: var(--coral); color: #ffffff; }
 
