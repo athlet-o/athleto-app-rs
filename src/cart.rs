@@ -229,7 +229,7 @@ pub async fn cart_page(
         Some(auth_user) => auth::load_profile(&state, auth_user.id).await,
         None => None,
     };
-    Ok(cart_page_markup(&user, biz, profile.as_ref(), &lines, hold_seconds, &params)
+    Ok(cart_page_markup(&state.config, &user, biz, profile.as_ref(), &lines, hold_seconds, &params)
         .into_response())
 }
 
