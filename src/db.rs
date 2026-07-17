@@ -1316,3 +1316,174 @@ pub async fn place_order(
     tx.commit().await?;
     Ok(order_id)
 }
+
+// ---------------------------------------------------------------------------
+// Payments: provider handles on orders, settled payments, provider-billed
+// subscriptions, and the webhook idempotency ledger (see 0006_payments.sql).
+
+/// Attach the provider checkout handle to an order right after the hosted
+/// session / approval link / invoice is created.
+pub async fn set_order_payment(
+    pool: &PgPool,
+    order_id: Uuid,
+    provider: PaymentProvider,
+    payment_ref: &str,
+    status: PaymentStatus,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE orders SET payment_provider = $2, payment_ref = $3, payment_status = $4 \
+         WHERE id = $1",
+    )
+    .bind(order_id)
+    .bind(provider)
+    .bind(payment_ref)
+    .bind(status)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Advance an order's payment status. `paid_at` is stamped once, on the
+/// first transition into `Paid`.
+pub async fn set_order_payment_status(
+    pool: &PgPool,
+    order_id: Uuid,
+    status: PaymentStatus,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE orders SET payment_status = $2, \
+         paid_at = CASE WHEN $2 = 'paid'::payment_status THEN COALESCE(paid_at, now()) \
+                        ELSE paid_at END \
+         WHERE id = $1",
+    )
+    .bind(order_id)
+    .bind(status)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Minimal order facts for webhook / return-URL handlers, which act on
+/// behalf of the provider rather than a logged-in user.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrderPaymentFacts {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub total_cents: i64,
+    pub kind: OrderKind,
+    pub frequency: Option<OrderFrequency>,
+    pub payment_provider: Option<PaymentProvider>,
+    pub payment_status: PaymentStatus,
+    pub payment_ref: Option<String>,
+}
+
+pub async fn order_payment_facts(
+    pool: &PgPool,
+    order_id: Uuid,
+) -> sqlx::Result<Option<OrderPaymentFacts>> {
+    sqlx::query_as(
+        "SELECT id, user_id, total_cents, kind, frequency, payment_provider, payment_status, \
+                payment_ref \
+         FROM orders WHERE id = $1",
+    )
+    .bind(order_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Record a settled (or failed/refunded) money movement. Returns `true` when
+/// the row is new; a repeat of the same (provider, provider_ref) only
+/// refreshes the status, so callers can skip double-posting to the ledger.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_payment(
+    pool: &PgPool,
+    order_id: Option<Uuid>,
+    user_id: Uuid,
+    provider: PaymentProvider,
+    kind: PaymentKind,
+    provider_ref: &str,
+    amount_cents: i64,
+    status: PaymentStatus,
+) -> sqlx::Result<bool> {
+    let (inserted,): (bool,) = sqlx::query_as(
+        "INSERT INTO payments (order_id, user_id, provider, kind, provider_ref, amount_cents, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (provider, provider_ref) \
+         DO UPDATE SET status = EXCLUDED.status, updated_at = now() \
+         RETURNING (xmax = 0)",
+    )
+    .bind(order_id)
+    .bind(user_id)
+    .bind(provider)
+    .bind(kind)
+    .bind(provider_ref)
+    .bind(amount_cents)
+    .bind(status)
+    .fetch_one(pool)
+    .await?;
+    Ok(inserted)
+}
+
+pub async fn upsert_subscription(
+    pool: &PgPool,
+    user_id: Uuid,
+    order_id: Option<Uuid>,
+    provider: PaymentProvider,
+    provider_ref: &str,
+    status: SubscriptionStatus,
+    frequency: OrderFrequency,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO payment_subscriptions (user_id, order_id, provider, provider_ref, status, frequency) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
+         ON CONFLICT (provider, provider_ref) \
+         DO UPDATE SET status = EXCLUDED.status, updated_at = now()",
+    )
+    .bind(user_id)
+    .bind(order_id)
+    .bind(provider)
+    .bind(provider_ref)
+    .bind(status)
+    .bind(frequency)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_subscription_status(
+    pool: &PgPool,
+    provider: PaymentProvider,
+    provider_ref: &str,
+    status: SubscriptionStatus,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE payment_subscriptions SET status = $3, updated_at = now() \
+         WHERE provider = $1 AND provider_ref = $2",
+    )
+    .bind(provider)
+    .bind(provider_ref)
+    .bind(status)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Webhook idempotency: returns `true` the first time an event id is seen.
+/// Handlers bail out on `false` so provider retries can't double-apply.
+pub async fn record_payment_event(
+    pool: &PgPool,
+    provider: PaymentProvider,
+    event_id: &str,
+    payload: &serde_json::Value,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO payment_events (provider, event_id, payload) VALUES ($1, $2, $3) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(provider)
+    .bind(event_id)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
