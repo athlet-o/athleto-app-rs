@@ -643,7 +643,8 @@ pub async fn stripe_webhook(
                         .or_else(|| object["subscription"].as_str())
                         .or_else(|| object["id"].as_str())
                         .unwrap_or_default();
-                    settle_order(&state, &orm, order_id, PaymentProvider::Stripe, reference, PaymentKind::Charge)
+                    let charged = charged_minor(&object["amount_total"], &object["currency"]);
+                    settle_order(&state, &orm, order_id, PaymentProvider::Stripe, reference, PaymentKind::Charge, charged)
                         .await?;
                 } else {
                     // ACH debit initiated; settles via async_payment_succeeded.
