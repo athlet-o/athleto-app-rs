@@ -1,10 +1,11 @@
-//! Pool setup plus product and cart queries.
+//! Pool setup plus product, cart, customer, order, and API-key queries.
 //!
 //! All queries are runtime `sqlx::query` / `query_as` calls (no compile-time
 //! `query!` macros) so the crate builds without a live DATABASE_URL.
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
