@@ -730,6 +730,23 @@ pub async fn login_2fa_send(
     let Some(user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
+    // Each send triggers an SMS; throttle per user so a live AAL1 session can't
+    // be used to spam the victim's phone (toll/SMS-bomb).
+    if !state.login_limiter.check(
+        &format!("2fa-send:{}", user.id),
+        3,
+        std::time::Duration::from_secs(5 * 60),
+    ) {
+        return two_fa_form(
+            user,
+            Biz(false),
+            false,
+            Some(html! { div .notice .error {
+                "Too many code requests. Wait a few minutes and try again."
+            } }),
+        )
+        .into_response();
+    }
     match create_challenge(&state, &user.access_token, &request.factor_id).await {
         Ok(challenge_id) => {
             let cookie = Cookie::build((

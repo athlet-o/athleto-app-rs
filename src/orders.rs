@@ -1,10 +1,9 @@
-//! Web checkout (B2C one-time/recurring, B2B with PO numbers), order history
-//! with receipts / delivery estimates / tracking, reorder, and the B2B
-//! quick-order grid.
+//! Web checkout (B2C one-time/recurring, B2B with PO numbers), the order
+//! history page, and the B2B quick-order grid.
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use axum_extra::extract::cookie::CookieJar;
@@ -41,8 +40,6 @@ pub struct CheckoutRequest {
     frequency: String,
     #[serde(default)]
     po_number: String,
-    #[serde(default)]
-    ship_method: String,
 }
 
 /// POST /checkout -- turn the cart into an order (stock + holds resolved in
@@ -86,12 +83,6 @@ pub async fn checkout(
     } else {
         db::OrderChannel::D2cWeb
     };
-    // B2B ships freight (billed on account); B2C picks standard/expedited.
-    let ship_method = if is_b2b {
-        db::ShipMethod::Freight
-    } else {
-        db::ShipMethod::parse(&request.ship_method).unwrap_or(db::ShipMethod::Standard)
-    };
 
     let order_lines: Vec<db::NewOrderLine> = lines
         .iter()
@@ -108,7 +99,6 @@ pub async fn checkout(
         kind,
         frequency,
         channel,
-        ship_method,
         po_number,
         &order_lines,
         Some(cart_id),
@@ -152,68 +142,11 @@ pub async fn checkout(
     }
 }
 
-/// CSS class for an order status badge.
-fn status_class(status: db::OrderStatus) -> &'static str {
-    match status {
-        db::OrderStatus::Placed => "st-placed",
-        db::OrderStatus::Processing => "st-processing",
-        db::OrderStatus::Fulfilled => "st-fulfilled",
-        db::OrderStatus::Cancelled => "st-cancelled",
-    }
-}
-
-fn shipment_status_class(status: db::ShipmentStatus) -> &'static str {
-    match status {
-        db::ShipmentStatus::Packing => "st-processing",
-        db::ShipmentStatus::Shipped => "st-placed",
-        db::ShipmentStatus::Delivered => "st-fulfilled",
-    }
-}
-
-/// Delivery-estimate phrase for an order given its (optional) shipment.
-fn delivery_estimate(order: &db::OrderRow, shipment: Option<&db::Shipment>) -> Markup {
-    // A recorded shipment carries the authoritative window; otherwise estimate
-    // from ship method + order date.
-    if let Some(s) = shipment {
-        if let Some(delivered) = s.delivered_at {
-            return html! { span .ok-inline { "Delivered " (delivered.format("%b %-d")) } };
-        }
-        if let (Some(a), Some(b)) = (s.eta_earliest, s.eta_latest) {
-            return html! { "Arrives " strong { (a.format("%b %-d")) "\u{2013}" (b.format("%b %-d")) } };
-        }
-    }
-    if order.status == db::OrderStatus::Cancelled {
-        return html! { span .muted-inline { "\u{2014}" } };
-    }
-    let (a, b) = order.delivery_window();
-    html! { "Est. delivery " strong { (a.format("%b %-d")) "\u{2013}" (b.format("%b %-d")) } }
-}
-
-/// Tracking snippet: carrier + number, linked to the carrier when known.
-fn tracking_snippet(shipment: &db::Shipment) -> Markup {
-    let carrier = shipment.carrier.as_deref().unwrap_or("Carrier");
-    match (&shipment.tracking_number, shipment.tracking_url()) {
-        (Some(number), Some(url)) => html! {
-            "Tracking: " (carrier) " " a .track-link href=(url) target="_blank" rel="noopener" { (number) }
-        },
-        (Some(number), None) => html! { "Tracking: " (carrier) " " code { (number) } },
-        _ => html! {},
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct OrderFilter {
-    status: Option<String>,
-    po: Option<String>,
-}
-
-/// GET /orders -- order history with status, delivery estimate, tracking,
-/// receipt link and reorder; B2B additionally gets PO/status filters.
+/// GET /orders
 pub async fn orders_page(
     State(state): State<SharedState>,
     user: MaybeUser,
     biz: Biz,
-    Query(filter): Query<OrderFilter>,
 ) -> Result<Response, AppError> {
     let (auth_user, profile) = match auth::require_full(&state, &user).await {
         Ok(pair) => pair,
@@ -229,281 +162,63 @@ pub async fn orders_page(
         .into_response());
     };
 
-    let mut orders = db::list_orders(pool, auth_user.id).await?;
+    let orders = db::list_orders(pool, auth_user.id).await?;
     let items = db::order_items_for_user(pool, auth_user.id).await?;
-    let shipments = db::shipments_for_user(pool, auth_user.id).await?;
     let mut by_order: HashMap<Uuid, Vec<&db::OrderItemRow>> = HashMap::new();
     for item in &items {
         by_order.entry(item.order_id).or_default().push(item);
     }
-    let mut ship_by_order: HashMap<Uuid, db::Shipment> = HashMap::new();
-    for row in &shipments {
-        ship_by_order.insert(row.order_id, row.shipment());
-    }
 
     let is_b2b = profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false);
-
-    // B2B order-management filters.
-    let status_filter = filter.status.as_deref().and_then(db::OrderStatus::parse);
-    let po_query = filter.po.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    if is_b2b {
-        if let Some(status) = status_filter {
-            orders.retain(|o| o.status == status);
-        }
-        if let Some(po) = po_query {
-            let needle = po.to_lowercase();
-            orders.retain(|o| {
-                o.po_number
-                    .as_deref()
-                    .map(|p| p.to_lowercase().contains(&needle))
-                    .unwrap_or(false)
-            });
-        }
-    }
-
     Ok(pages::layout_for(
         "Orders | AthletO",
         Some(&auth_user),
         biz,
         html! {
             section .section {
-                div .orders-head {
-                    h2 { @if is_b2b { "Order management" } @else { "Your orders" } }
-                    @if is_b2b {
-                        a .button .ghost href="/quick-order" { "Quick order by the case" }
-                    }
-                }
-
-                @if is_b2b {
-                    form .order-filters method="get" action="/orders" {
-                        label {
-                            "Status"
-                            select name="status" {
-                                option value="" selected[status_filter.is_none()] { "All statuses" }
-                                @for st in [db::OrderStatus::Placed, db::OrderStatus::Processing, db::OrderStatus::Fulfilled, db::OrderStatus::Cancelled] {
-                                    option value=(st.label()) selected[status_filter == Some(st)] { (st.label()) }
-                                }
-                            }
-                        }
-                        label {
-                            "PO number"
-                            input type="search" name="po" value=(po_query.unwrap_or("")) placeholder="PO-2026-...";
-                        }
-                        button .button type="submit" { "Filter" }
-                        @if status_filter.is_some() || po_query.is_some() {
-                            a .button .ghost href="/orders" { "Clear" }
-                        }
-                    }
-                }
-
+                h2 { "Your orders" }
                 @if orders.is_empty() {
-                    div .notice { "No orders match. The lineup is waiting." }
+                    div .notice { "No orders yet. The lineup is waiting." }
                     p { a .button href="/" { "Shop the lineup" } }
                 } @else {
                     @for order in &orders {
                         div .order-card {
                             div .order-head {
-                                a .order-id href=(format!("/orders/{}", order.id)) { "Order " (order.short_id()) }
-                                span .status-badge .(status_class(order.status)) { (order.status.label()) }
-                                @if order.kind == db::OrderKind::Recurring { span .status-badge .st-sub { "subscription" } }
+                                strong { "Order " (order.id.simple().to_string()[..8].to_uppercase()) }
+                                span .format-badge { (order.status.label()) }
                                 span .muted-inline { (order.created_at.format("%b %-d, %Y")) }
-                            }
-                            p .order-meta {
-                                (delivery_estimate(order, ship_by_order.get(&order.id)))
-                                @if let Some(ship) = ship_by_order.get(&order.id) {
-                                    @if ship.tracking_number.is_some() { " \u{00b7} " (tracking_snippet(ship)) }
-                                }
                             }
                             p .auth-alt {
                                 (order.kind.label())
                                 @if let Some(freq) = order.frequency { ", " (freq.label()) }
-                                @if let Some(next) = order.next_run_at { " \u{00b7} next run " (next.format("%b %-d")) }
-                                @if let Some(po) = order.po_number.as_deref() { " \u{00b7} PO " code { (po) } }
+                                @if let Some(next) = order.next_run_at {
+                                    " -- next run " (next.format("%b %-d"))
+                                }
+                                @if let Some(po) = order.po_number.as_deref() { " -- PO " code { (po) } }
                             }
                             ul .factor-list {
                                 @for item in by_order.get(&order.id).map(|v| v.as_slice()).unwrap_or(&[]) {
                                     li {
-                                        (item.qty) " \u{00d7} "
-                                        @if let Some(subname) = item.subname.as_deref() { "AthletO " (subname) }
-                                        @else { (item.name) }
-                                        " (" (item.format.label()) ") \u{2014} "
+                                        (item.qty) " x "
+                                        @if let Some(subname) = item.subname.as_deref() {
+                                            "AthletO " (subname)
+                                        } @else { (item.name) }
+                                        " (" (item.format.label()) ") -- "
                                         (pages::format_price(i64::from(item.unit_price_cents) * i64::from(item.qty)))
                                     }
                                 }
                             }
-                            div .order-foot {
-                                p .cart-total { "Total: " strong { (pages::format_price(order.total_cents)) } }
-                                div .order-actions {
-                                    a .button .ghost href=(format!("/orders/{}", order.id)) { "View receipt" }
-                                    form .inline-form method="post" action=(format!("/orders/{}/reorder", order.id)) {
-                                        (pages::csrf_field())
-                                        button .button type="submit" { "Reorder" }
-                                    }
-                                }
-                            }
+                            p .cart-total { "Total: " strong { (pages::format_price(order.total_cents)) } }
                         }
                     }
+                }
+                @if is_b2b {
+                    p { a .button .ghost href="/quick-order" { "Quick order by the case" } }
                 }
             }
         },
     )
     .into_response())
-}
-
-/// GET /orders/{id} -- order detail + printable receipt (both cohorts).
-pub async fn order_detail_page(
-    State(state): State<SharedState>,
-    user: MaybeUser,
-    biz: Biz,
-    Path(order_id): Path<Uuid>,
-) -> Result<Response, AppError> {
-    let (auth_user, _profile) = match auth::require_full(&state, &user).await {
-        Ok(pair) => pair,
-        Err(redirect) => return Ok(redirect),
-    };
-    let Some(pool) = &state.pool else {
-        return Ok(Redirect::to("/orders").into_response());
-    };
-
-    let Some(order) = db::get_order(pool, auth_user.id, order_id).await? else {
-        return Ok(Redirect::to("/orders").into_response());
-    };
-    let items = db::order_items(pool, order_id).await?;
-    let shipments = db::shipments_for_order(pool, order_id).await?;
-    let primary_shipment = shipments.first();
-
-    Ok(pages::layout_for(
-        &format!("Receipt {} | AthletO", order.short_id()),
-        Some(&auth_user),
-        biz,
-        html! {
-            section .section {
-                div .receipt {
-                    div .receipt-top {
-                        div {
-                            span .wordmark { "Athlet" span .o { "O" } }
-                            p .muted-inline { "Order receipt" }
-                        }
-                        div .receipt-id {
-                            strong { "Order " (order.short_id()) }
-                            div .muted-inline { (order.created_at.format("%B %-d, %Y")) }
-                            span .status-badge .(status_class(order.status)) { (order.status.label()) }
-                        }
-                    }
-
-                    div .receipt-grid {
-                        div {
-                            h3 { "Fulfillment" }
-                            p { (order.ship_method.label()) }
-                            p { (delivery_estimate(&order, primary_shipment)) }
-                            @if order.kind == db::OrderKind::Recurring {
-                                p .auth-alt {
-                                    "Subscription \u{00b7} " (order.frequency.map(|f| f.label()).unwrap_or("recurring"))
-                                    @if let Some(next) = order.next_run_at { " \u{00b7} next " (next.format("%b %-d, %Y")) }
-                                }
-                            }
-                        }
-                        div {
-                            h3 { "Details" }
-                            @if let Some(po) = order.po_number.as_deref() { p { "PO number: " code { (po) } } }
-                            p .muted-inline { "Channel: " (order.channel.as_str()) }
-                        }
-                    }
-
-                    @if !shipments.is_empty() {
-                        div .receipt-shipments {
-                            h3 { "Shipments & tracking" }
-                            @for s in &shipments {
-                                div .shipment-row {
-                                    span .status-badge .(shipment_status_class(s.status)) { (s.status.label()) }
-                                    @if let Some(date) = s.ship_date { span .muted-inline { "Shipped " (date.format("%b %-d")) } }
-                                    span { (tracking_snippet(s)) }
-                                }
-                            }
-                        }
-                    }
-
-                    table .receipt-table {
-                        thead { tr { th { "Item" } th { "Qty" } th { "Unit" } th .num { "Amount" } } }
-                        tbody {
-                            @for item in &items {
-                                tr {
-                                    td {
-                                        @if let Some(subname) = item.subname.as_deref() { "AthletO " (subname) }
-                                        @else { (item.name) }
-                                        " " span .muted-inline { "(" (item.format.label()) ")" }
-                                    }
-                                    td { (item.qty) }
-                                    td { (pages::format_price(item.unit_price_cents.into())) }
-                                    td .num { (pages::format_price(i64::from(item.unit_price_cents) * i64::from(item.qty))) }
-                                }
-                            }
-                        }
-                        tfoot {
-                            tr { td colspan="3" { "Subtotal" } td .num { (pages::format_price(order.subtotal_cents)) } }
-                            tr { td colspan="3" { (order.ship_method.label()) } td .num {
-                                @if order.shipping_cents == 0 { "billed on account" }
-                                @else { (pages::format_price(order.shipping_cents)) }
-                            } }
-                            tr { td colspan="3" { "Tax" } td .num {
-                                @if order.tax_cents == 0 { span .muted-inline { "at fulfillment" } }
-                                @else { (pages::format_price(order.tax_cents)) }
-                            } }
-                            tr .receipt-total { td colspan="3" { "Total" } td .num { (pages::format_price(order.total_cents)) } }
-                        }
-                    }
-
-                    div .receipt-actions {
-                        button .button type="button" onclick="window.print()" { "Print / Save PDF" }
-                        form .inline-form method="post" action=(format!("/orders/{}/reorder", order.id)) {
-                            (pages::csrf_field())
-                            button .button .ghost type="submit" { "Reorder" }
-                        }
-                        a .button .ghost href="/orders" { "All orders" }
-                    }
-                }
-            }
-        },
-    )
-    .into_response())
-}
-
-/// POST /orders/{id}/reorder -- re-add a past order's lines to the cart with
-/// fresh stock holds, then send the shopper to the cart.
-pub async fn reorder(
-    State(state): State<SharedState>,
-    user: MaybeUser,
-    Path(order_id): Path<Uuid>,
-) -> Result<Response, AppError> {
-    let (auth_user, profile) = match auth::require_full(&state, &user).await {
-        Ok(pair) => pair,
-        Err(redirect) => return Ok(redirect),
-    };
-    if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
-        return Ok(redirect);
-    }
-    let Some(pool) = &state.pool else {
-        return Ok(Redirect::to("/orders").into_response());
-    };
-
-    let lines = db::order_reorder_lines(pool, auth_user.id, order_id).await?;
-    if lines.is_empty() {
-        return Ok(Redirect::to("/orders").into_response());
-    }
-    let cart_id = db::find_or_create_cart(pool, &CartOwner::User(auth_user.id)).await?;
-    for (product_id, qty) in lines {
-        db::add_cart_item(pool, cart_id, product_id, qty).await?;
-        let total = db::cart_lines(pool, cart_id)
-            .await?
-            .iter()
-            .find(|l| l.product_id == product_id)
-            .map(|l| l.qty)
-            .unwrap_or(qty);
-        let _ = db::ensure_hold(pool, cart_id, product_id, total).await;
-    }
-    // Cart contents changed; refresh any /ws listeners.
-    let _ = state.cart_events.send(cart_id);
-    Ok(Redirect::to("/cart").into_response())
 }
 
 /// GET /quick-order -- B2B grid: every SKU with a qty box, one submit.
@@ -585,9 +300,23 @@ pub async fn quick_order_submit(
     if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
         return Ok(redirect);
     }
+    // Quick order is the B2B bulk entry point; `require_b2b_ready` is a no-op
+    // for B2C, so gate the endpoint on the profile explicitly rather than let a
+    // personal account drive it.
+    if !profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false) {
+        return Ok(Redirect::to("/").into_response());
+    }
     let Some(pool) = &state.pool else {
         return Ok(Redirect::to("/cart").into_response());
     };
+
+    // Validate product ids against the catalog up front: an unknown id would
+    // otherwise hit the cart_items FK and surface as a 500.
+    let valid_products: std::collections::HashSet<i64> = db::product_prices(pool)
+        .await?
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect();
 
     let owner = CartOwner::User(auth_user.id);
     let cart_id = db::find_or_create_cart(pool, &owner).await?;
@@ -596,10 +325,14 @@ pub async fn quick_order_submit(
         else {
             continue;
         };
+        if !valid_products.contains(&product_id) {
+            continue;
+        }
         let qty: i32 = value.trim().parse().unwrap_or(0);
         if qty <= 0 {
             continue;
         }
+        let qty = qty.min(crate::cart::MAX_QTY_PER_LINE);
         db::add_cart_item(pool, cart_id, product_id, qty).await?;
         let total_qty = db::cart_lines(pool, cart_id)
             .await?
@@ -650,20 +383,8 @@ pub fn checkout_form(profile: Option<&CustomerProfile>, has_2fa: bool) -> Markup
             }
             @if is_b2b {
                 label {
-                    "Shipping"
-                    select disabled { option selected { "Freight (LTL) \u{2014} billed on account" } }
-                }
-                label {
                     "PO number " span .muted-inline { "(optional)" }
                     input type="text" name="po_number" maxlength="60" placeholder="PO-2026-0417";
-                }
-            } @else {
-                label {
-                    "Shipping"
-                    select name="ship_method" {
-                        option value="standard" selected { "Standard \u{2014} $5.99 (3\u{2013}5 business days)" }
-                        option value="expedited" { "Expedited \u{2014} $14.99 (1\u{2013}2 business days)" }
-                    }
                 }
             }
             button .primary type="submit" { "Place order" }
@@ -687,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn b2b_checkout_form_blocks_until_2fa_then_shows_po_and_freight() {
+    fn b2b_checkout_form_blocks_until_2fa_then_shows_po_field() {
         let profile = CustomerProfile {
             customer_type: db::CustomerType::B2b,
             company_name: Some("Wobble Co".into()),
@@ -696,16 +417,14 @@ mod tests {
         let blocked = checkout_form(Some(&profile), false).into_string();
         assert!(blocked.contains("Two-factor authentication required"));
         assert!(!blocked.contains("Place order"));
-        // With 2FA satisfied: the order form renders, including PO + freight.
+        // With 2FA satisfied: the order form renders, including the PO field.
         let allowed = checkout_form(Some(&profile), true).into_string();
         assert!(allowed.contains("Place order"));
         assert!(allowed.contains("PO number"));
-        assert!(allowed.contains("Freight (LTL)"));
-        assert!(!allowed.contains("name=\"ship_method\""));
     }
 
     #[test]
-    fn b2c_checkout_form_offers_ship_methods_but_no_po() {
+    fn b2c_checkout_form_has_no_po_field() {
         let profile = CustomerProfile {
             customer_type: db::CustomerType::B2c,
             company_name: None,
@@ -713,14 +432,5 @@ mod tests {
         let rendered = checkout_form(Some(&profile), false).into_string();
         assert!(rendered.contains("Place order"));
         assert!(!rendered.contains("PO number"));
-        assert!(rendered.contains("name=\"ship_method\""));
-        assert!(rendered.contains("Expedited"));
-    }
-
-    #[test]
-    fn status_badges_map_every_status() {
-        assert_eq!(status_class(db::OrderStatus::Placed), "st-placed");
-        assert_eq!(status_class(db::OrderStatus::Fulfilled), "st-fulfilled");
-        assert_eq!(shipment_status_class(db::ShipmentStatus::Delivered), "st-fulfilled");
     }
 }

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use athleto_app_rs::{coordinate, db, router, AppState, Config, SharedState};
+use athleto_app_rs::{db, router, AppState, Config, SharedState};
 
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name)
@@ -38,10 +38,6 @@ async fn main() -> anyhow::Result<()> {
                 .collect()
         }),
         sms_mfa_enabled: env_opt("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
-        fiducia_url: env_opt("FIDUCIA_URL"),
-        fiducia_api_key: env_opt("FIDUCIA_API_KEY"),
-        // HOSTNAME is the pod name under Kubernetes; unique per replica.
-        replica_id: env_opt("HOSTNAME").unwrap_or_else(|| "local".to_string()),
     };
     if config.supabase().is_none() {
         tracing::warn!("SUPABASE_URL / SUPABASE_ANON_KEY not set; auth routes will show a 'not configured' notice");
@@ -68,64 +64,24 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
-            // Singleton background jobs. Across replicas exactly one runs each
-            // tick, chosen by coordinate::try_lead (a fiducia lease when
-            // configured, else a Postgres advisory lock). First ticks are
-            // delayed so nothing races the migrations on a fresh database.
-
-            // Expired-hold sweeper -- hygiene only (claims/availability already
-            // treat stale holds as free via lazy expiry).
+            // Expired-hold sweeper. Hygiene only: claims and availability
+            // already treat stale holds as free (lazy expiry). Runs in-process
+            // because the app is single-replica; with more replicas this wants
+            // leader election so exactly one runs it.
             let sweep_pool = pool.clone();
-            let sweep_config = config.clone();
             tokio::spawn(async move {
+                // First tick is delayed so the sweep never races the
+                // migrations that create stock_holds on a fresh database.
                 let period = Duration::from_secs(15 * 60);
                 let mut ticker =
                     tokio::time::interval_at(tokio::time::Instant::now() + period, period);
                 loop {
                     ticker.tick().await;
-                    let Some(lead) =
-                        coordinate::try_lead(&sweep_pool, &sweep_config, "hold-sweeper", 120).await
-                    else {
-                        continue; // another replica is sweeping this tick
-                    };
                     match db::sweep_expired_holds(&sweep_pool).await {
                         Ok(0) => {}
                         Ok(swept) => tracing::info!(swept, "cleared expired stock holds"),
                         Err(err) => tracing::warn!(error = %err, "hold sweep failed"),
                     }
-                    lead.release().await;
-                }
-            });
-
-            // Recurring-order runner -- materializes due subscriptions / B2B
-            // replenishment. Each due order is additionally claimed under a
-            // transaction-scoped advisory lock inside
-            // db::run_due_recurring_orders, so even if the leader guard were
-            // bypassed no subscription could double-fire.
-            let recur_pool = pool.clone();
-            let recur_config = config.clone();
-            tokio::spawn(async move {
-                let period = Duration::from_secs(10 * 60);
-                let mut ticker =
-                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-                loop {
-                    ticker.tick().await;
-                    let Some(lead) = coordinate::try_lead(
-                        &recur_pool,
-                        &recur_config,
-                        "recurring-runner",
-                        120,
-                    )
-                    .await
-                    else {
-                        continue;
-                    };
-                    match db::run_due_recurring_orders(&recur_pool).await {
-                        Ok(0) => {}
-                        Ok(n) => tracing::info!(materialized = n, "recurring orders advanced"),
-                        Err(err) => tracing::warn!(error = %err, "recurring runner failed"),
-                    }
-                    lead.release().await;
                 }
             });
         }
