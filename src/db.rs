@@ -992,6 +992,7 @@ pub async fn place_order(
     kind: OrderKind,
     frequency: Option<OrderFrequency>,
     channel: OrderChannel,
+    ship_method: ShipMethod,
     po_number: Option<&str>,
     lines: &[NewOrderLine],
     cart_id: Option<Uuid>,
