@@ -117,7 +117,41 @@ To run them manually instead: `cargo install sqlx-cli --no-default-features --fe
 then `sqlx migrate run`.
 
 All queries are runtime `sqlx::query`/`query_as` calls (no compile-time `query!`
-macros), so the crate builds without a live `DATABASE_URL`.
+macros), so the crate builds without a live `DATABASE_URL`. **New data access is
+written with SeaORM** (`src/entities.rs`, over the same pool via
+`AppState::orm`); the legacy sqlx queries in `db.rs` are being ported
+incrementally.
+
+### Go-forward: declarative migrations (dpm)
+
+We can keep generating numbered SQL files in `migrations/` for now, but the
+target workflow is **declarative migrations** via
+[dpm](https://github.com/declarative-migrations/declarative-postgres-migrate.rs)
+(github.com/declarative-migrations): a single `schema/schema.sql` is the source
+of truth and the live database *converges* onto it — dpm materializes the schema
+on a shadow server, introspects both sides, and emits ordered, reviewable SQL.
+The Quaestor billing-server and the shared pg-defs contract already work this
+way (its `migrations/` dir is frozen as an audit trail).
+
+```sh
+brew install declarative-migrations/tap/dpm
+
+export SHADOW_DATABASE_URL=postgres://…   # server where dpm may create throwaway DBs
+export TARGET_DATABASE_URL=postgres://…   # or DATABASE_URL
+
+dpm diff      # print the migration SQL (never executes)
+dpm verify    # rehearse on a shadow replica, prove convergence
+dpm apply     # generate + execute (interactive confirm; destructive SQL gated)
+```
+
+When this app's schema moves to the **shared dd-platform Amazon RDS Postgres**,
+it gets its **own database named `athleto`** (per-project database namespace —
+never a shared `public` schema, so table names like `orders`/`payments` can't
+collide with other projects). The shared schema contract lives in
+`k8s-libs-and-shared-defs` → `pg-defs/` (checked out locally at
+`~/codes/ores/k8s-cluster/remote/libs/pg-defs`, vendored into `k8s-cluster` as
+`remote/libs`); porting this app's commerce schema there is an agreed follow-up
+(currently blocked on Supabase `auth.uid()` RLS references).
 
 ## Deploy
 
