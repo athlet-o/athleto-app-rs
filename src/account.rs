@@ -442,10 +442,16 @@ fn totp_verify_page(
                     }
                     @if let Some(notice) = notice { (notice) }
                     div .qr-box {
+                        // Only ever render the QR as a data: image URI. The old
+                        // fallback emitted `qr` as raw HTML, and `qr` is
+                        // round-tripped through a hidden form field on verify --
+                        // so a crafted `qr=<img onerror=...>` would inject
+                        // markup. When the code is not a data: URI, fall back to
+                        // the manual secret shown below instead of raw output.
                         @if qr.starts_with("data:") {
                             img src=(qr) alt="TOTP QR code" width="220" height="220";
                         } @else {
-                            (PreEscaped(qr.to_string()))
+                            p .auth-alt { "Enter the setup key below into your authenticator app." }
                         }
                     }
                     p .auth-alt { "Can't scan? Enter this secret manually: " code { (secret) } }
