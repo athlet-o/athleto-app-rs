@@ -553,6 +553,11 @@ pub async fn phone_enroll(
     let Some(auth_user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
+    // See totp_enroll: a mid-step-up session must clear /login/2fa before it
+    // can enroll another factor.
+    if auth_user.needs_aal2() {
+        return Redirect::to("/login/2fa").into_response();
+    }
     if !state.config.sms_mfa_enabled {
         return Redirect::to("/account?error=SMS+codes+are+not+enabled+on+this+deployment")
             .into_response();
