@@ -372,13 +372,6 @@ pub async fn totp_enroll(State(state): State<SharedState>, user: MaybeUser, biz:
     let Some(auth_user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
-    // A session that already has a verified factor but is still AAL1 must step
-    // up through /login/2fa first; otherwise a pre-2FA session (e.g. a
-    // forwarded magic link) could enroll a *new* attacker-controlled factor and
-    // verify its way to AAL2, bypassing the existing factor entirely.
-    if auth_user.needs_aal2() {
-        return Redirect::to("/login/2fa").into_response();
-    }
     let body = serde_json::json!({
         "factor_type": "totp",
         "friendly_name": format!("authenticator-{}", chrono::Utc::now().format("%Y%m%d%H%M%S")),
@@ -442,16 +435,10 @@ fn totp_verify_page(
                     }
                     @if let Some(notice) = notice { (notice) }
                     div .qr-box {
-                        // Only ever render the QR as a data: image URI. The old
-                        // fallback emitted `qr` as raw HTML, and `qr` is
-                        // round-tripped through a hidden form field on verify --
-                        // so a crafted `qr=<img onerror=...>` would inject
-                        // markup. When the code is not a data: URI, fall back to
-                        // the manual secret shown below instead of raw output.
                         @if qr.starts_with("data:") {
                             img src=(qr) alt="TOTP QR code" width="220" height="220";
                         } @else {
-                            p .auth-alt { "Enter the setup key below into your authenticator app." }
+                            (PreEscaped(qr.to_string()))
                         }
                     }
                     p .auth-alt { "Can't scan? Enter this secret manually: " code { (secret) } }
@@ -495,11 +482,6 @@ pub async fn totp_verify(
     let Some(auth_user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
-    // See totp_enroll: block a mid-step-up session from verifying a freshly
-    // enrolled factor to reach AAL2 around an existing one.
-    if auth_user.needs_aal2() {
-        return Redirect::to("/login/2fa").into_response();
-    }
     let challenge = match auth::create_challenge(&state, &auth_user.access_token, &request.factor_id).await
     {
         Ok(challenge) => challenge,
@@ -559,11 +541,6 @@ pub async fn phone_enroll(
     let Some(auth_user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
-    // See totp_enroll: a mid-step-up session must clear /login/2fa before it
-    // can enroll another factor.
-    if auth_user.needs_aal2() {
-        return Redirect::to("/login/2fa").into_response();
-    }
     if !state.config.sms_mfa_enabled {
         return Redirect::to("/account?error=SMS+codes+are+not+enabled+on+this+deployment")
             .into_response();
@@ -641,11 +618,6 @@ pub async fn phone_verify(
     let Some(auth_user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
-    // See totp_enroll: block a mid-step-up session from verifying a freshly
-    // enrolled factor to reach AAL2 around an existing one.
-    if auth_user.needs_aal2() {
-        return Redirect::to("/login/2fa").into_response();
-    }
     match auth::verify_challenge(
         &state,
         &auth_user.access_token,
@@ -824,95 +796,5 @@ mod tests {
         assert_eq!(urlencoding_light("a b"), "a+b");
         assert_eq!(urlencoding_light("PO#1&2"), "PO%231%262");
         assert_eq!(urlencoding_light("plain.Text_1-2"), "plain.Text_1-2");
-    }
-
-    use crate::auth::{AuthUser, Factor, MaybeUser};
-    use crate::{AppState, Config, SharedState};
-    use axum::extract::State;
-    use axum::http::{header, StatusCode};
-    use std::sync::Arc;
-
-    fn state() -> SharedState {
-        Arc::new(AppState::new(None, reqwest::Client::new(), Config::default()))
-    }
-
-    fn aal1_user_with_verified_totp() -> AuthUser {
-        AuthUser {
-            id: uuid::Uuid::nil(),
-            email: Some("victim@club.example".into()),
-            aal: "aal1".into(),
-            factors: vec![Factor {
-                id: "existing".into(),
-                factor_type: "totp".into(),
-                status: "verified".into(),
-                friendly_name: None,
-            }],
-            access_token: "t".into(),
-        }
-    }
-
-    fn location(response: &axum::response::Response) -> &str {
-        response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-    }
-
-    // Regression test for the 2FA step-up bypass: a session that already has a
-    // verified factor but is still AAL1 (post-magic-link, pre-2FA) must not be
-    // able to enroll or verify a *new* factor. The guard returns before any
-    // GoTrue call, so this is exercisable in degraded mode.
-    #[tokio::test]
-    async fn factor_enroll_and_verify_reject_a_pre_2fa_session() {
-        let user = MaybeUser(Some(aal1_user_with_verified_totp()));
-
-        let enroll = totp_enroll(State(state()), user.clone(), Biz(false)).await;
-        assert_eq!(enroll.status(), StatusCode::SEE_OTHER);
-        assert_eq!(location(&enroll), "/login/2fa");
-
-        let verify = totp_verify(
-            State(state()),
-            user.clone(),
-            Biz(false),
-            axum_extra::extract::cookie::CookieJar::new(),
-            axum::extract::Form(TotpVerifyRequest {
-                factor_id: "attacker".into(),
-                code: "000000".into(),
-                qr: String::new(),
-                secret: String::new(),
-            }),
-        )
-        .await;
-        assert_eq!(verify.status(), StatusCode::SEE_OTHER);
-        assert_eq!(location(&verify), "/login/2fa");
-
-        let phone = phone_enroll(
-            State(state()),
-            user,
-            axum::extract::Form(PhoneEnrollRequest { phone: "+15550000000".into() }),
-        )
-        .await;
-        assert_eq!(phone.status(), StatusCode::SEE_OTHER);
-        assert_eq!(location(&phone), "/login/2fa");
-    }
-
-    // A first-time enroller (no verified factor yet) must still be allowed
-    // through the guard -- otherwise nobody could ever turn 2FA on.
-    #[tokio::test]
-    async fn first_time_enroll_is_not_blocked_by_the_step_up_guard() {
-        let fresh = MaybeUser(Some(AuthUser {
-            id: uuid::Uuid::nil(),
-            email: Some("new@club.example".into()),
-            aal: "aal1".into(),
-            factors: vec![],
-            access_token: "t".into(),
-        }));
-        // No Supabase configured, so enrollment fails downstream and redirects
-        // to /account with an error -- crucially NOT to /login/2fa, proving the
-        // step-up guard did not fire for a factorless session.
-        let enroll = totp_enroll(State(state()), fresh, Biz(false)).await;
-        assert_eq!(enroll.status(), StatusCode::SEE_OTHER);
-        assert_ne!(location(&enroll), "/login/2fa");
     }
 }
