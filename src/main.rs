@@ -24,7 +24,10 @@ pub struct Config {
 impl Config {
     /// Returns `(base_url, anon_key)` when Supabase auth is fully configured.
     pub fn supabase(&self) -> Option<(&str, &str)> {
-        match (self.supabase_url.as_deref(), self.supabase_anon_key.as_deref()) {
+        match (
+            self.supabase_url.as_deref(),
+            self.supabase_anon_key.as_deref(),
+        ) {
             (Some(url), Some(key)) => Some((url, key)),
             _ => None,
         }
@@ -124,7 +127,9 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         None => {
-            tracing::warn!("DATABASE_URL not set; cart persistence disabled, storefront uses built-in catalog");
+            tracing::warn!(
+                "DATABASE_URL not set; cart persistence disabled, storefront uses built-in catalog"
+            );
         }
     }
 

@@ -59,6 +59,7 @@ fn cart_contents(lines: &[CartLine]) -> Markup {
                         tr {
                             th { "Product" }
                             th { "Format" }
+                            th { "Calories" }
                             th { "Qty" }
                             th { "Price" }
                             th { "Total" }
@@ -68,8 +69,16 @@ fn cart_contents(lines: &[CartLine]) -> Markup {
                     tbody {
                         @for line in lines {
                             tr {
-                                td { (line.name) }
+                                td .cart-product {
+                                    span .wordmark { "Athlet" span .o { "O" } }
+                                    @if let Some(subname) = line.subname.as_deref() {
+                                        div .subname { (subname) }
+                                    } @else {
+                                        div .subname { (line.name) }
+                                    }
+                                }
                                 td { (line.format.label()) }
+                                td .cart-cal { (line.calories) " cal" }
                                 td { (line.qty) }
                                 td { (pages::format_price(line.price_cents.into())) }
                                 td { (pages::format_price(line.line_total_cents())) }
@@ -96,7 +105,7 @@ fn cart_contents(lines: &[CartLine]) -> Markup {
 
 fn cart_page_markup(user: &MaybeUser, lines: &[CartLine]) -> Markup {
     pages::layout(
-        "Your cart | Athlet-O",
+        "Your cart | AthletO",
         user.as_ref(),
         html! {
             section .section {
@@ -116,7 +125,7 @@ fn cart_page_markup(user: &MaybeUser, lines: &[CartLine]) -> Markup {
 
 fn cart_not_configured(user: &MaybeUser) -> Markup {
     pages::layout(
-        "Your cart | Athlet-O",
+        "Your cart | AthletO",
         user.as_ref(),
         html! {
             section .section {
@@ -169,8 +178,10 @@ pub async fn add_item(
 ) -> Result<Response, AppError> {
     let Some(pool) = &state.pool else {
         if is_htmx(&headers) {
-            return Ok(html! { span .added { "Cart is not configured on this deployment." } }
-                .into_response());
+            return Ok(
+                html! { span .added { "Cart is not configured on this deployment." } }
+                    .into_response(),
+            );
         }
         return Ok(cart_not_configured(&user).into_response());
     };
@@ -229,5 +240,28 @@ pub async fn delete_item(
         Ok(cart_contents(&lines).into_response())
     } else {
         Ok(Redirect::to("/cart").into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cart_contents_preserve_subname_calories_and_totals() {
+        let rendered = cart_contents(&[CartLine {
+            item_id: 7,
+            name: "AthletO".to_string(),
+            subname: Some("recover".to_string()),
+            format: db::ProductFormat::Cup,
+            calories: 90,
+            price_cents: 499,
+            qty: 2,
+        }])
+        .into_string();
+
+        assert!(rendered.contains("recover"));
+        assert!(rendered.contains("90 cal"));
+        assert!(rendered.contains("$9.98"));
     }
 }

@@ -51,13 +51,14 @@ impl FromRequestParts<SharedState> for MaybeUser {
         parts: &mut Parts,
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
-        let jar = match CookieJar::from_request_parts(parts, state).await {
-            Ok(jar) => jar,
-        };
+        let Ok(jar) = CookieJar::from_request_parts(parts, state).await;
         let Some((base, key)) = state.config.supabase() else {
             return Ok(Self(None));
         };
-        let Some(token) = jar.get(ACCESS_COOKIE).map(|cookie| cookie.value().to_string()) else {
+        let Some(token) = jar
+            .get(ACCESS_COOKIE)
+            .map(|cookie| cookie.value().to_string())
+        else {
             return Ok(Self(None));
         };
 
@@ -343,7 +344,8 @@ pub async fn login_submit(
 pub async fn logout(State(state): State<SharedState>, jar: CookieJar) -> Response {
     if let (Some((base, key)), Some(token)) = (
         state.config.supabase(),
-        jar.get(ACCESS_COOKIE).map(|cookie| cookie.value().to_string()),
+        jar.get(ACCESS_COOKIE)
+            .map(|cookie| cookie.value().to_string()),
     ) {
         let result = state
             .http

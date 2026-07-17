@@ -492,6 +492,20 @@ pub fn format_price(cents: i64) -> String {
     format!("${}.{:02}", cents / 100, cents % 100)
 }
 
+fn wordmark() -> Markup {
+    html! {
+        span .wordmark { "Athlet" span .o { "O" } }
+    }
+}
+
+fn product_display_name(product: &Product) -> String {
+    product
+        .subname
+        .as_deref()
+        .map(|subname| format!("AthletO {subname}"))
+        .unwrap_or_else(|| product.name.clone())
+}
+
 /// Shared document shell: dark athletic theme, htmx, header nav, footer.
 pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
     html! {
@@ -500,7 +514,7 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover";
-                meta name="theme-color" content="#0b1519";
+                meta name="theme-color" content="#f8fbff";
                 title { (title) }
                 style { (PreEscaped(APP_CSS)) }
                 script defer="defer" src="https://unpkg.com/htmx.org@2.0.4" {}
@@ -508,8 +522,8 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
             body {
                 header .site-header {
                     a .brand-lockup href="/" {
-                        span .brand-mark { "A-O" }
-                        span .brand-name { "Athlet-O" }
+                        span .brand-mark { "AO" }
+                        span .brand-name { (wordmark()) }
                     }
                     nav .site-nav {
                         a href="/" { "Shop" }
@@ -531,7 +545,7 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
                 main { (content) }
                 footer .site-footer {
                     span .tagline { "Wobble hard. Recover clean." }
-                    span { "Athlet-O performance gelatin protein" }
+                    span { (wordmark()) " performance gelatin protein" }
                 }
             }
         }
@@ -550,7 +564,7 @@ pub fn not_configured_notice(what: &str) -> Markup {
 
 pub fn error_page(message: &str) -> Markup {
     layout(
-        "Something wobbled wrong | Athlet-O",
+        "Something wobbled wrong | AthletO",
         None,
         html! {
             section .section {
@@ -570,13 +584,20 @@ fn product_card(product: &Product) -> Markup {
     html! {
         article .product-card {
             div .card-top {
-                h3 { a href=(format!("/product/{}", product.slug)) { (product.name) } }
-                span .format-badge.(format_class) { (product.format.label()) }
+                div {
+                    h3 { a href=(format!("/product/{}", product.slug)) { (wordmark()) } }
+                    @if let Some(subname) = product.subname.as_deref() {
+                        div .subname { (subname) }
+                    }
+                }
+                div .card-chips {
+                    span .cal-chip { (product.calories) " cal" }
+                    span .format-badge.(format_class) { (product.format.label()) }
+                }
             }
             p .product-desc { (product.description) }
             div .stat-row {
-                span { (product.protein_g) "g protein" }
-                span { (product.calories) " kcal" }
+                span .stat-protein { (product.protein_g) "g protein" }
                 @if product.format == db::ProductFormat::Powder { span { "just add water" } }
             }
             div .card-buy {
@@ -596,7 +617,7 @@ fn product_card(product: &Product) -> Markup {
 pub async fn home(State(state): State<SharedState>, user: MaybeUser) -> Markup {
     let products = load_catalog(&state).await;
     layout(
-        "Athlet-O | performance gelatin protein",
+        "AthletO | performance gelatin protein",
         user.as_ref(),
         html! {
             section .hero {
@@ -641,7 +662,7 @@ pub async fn product_page(
         return (
             StatusCode::NOT_FOUND,
             layout(
-                "Not found | Athlet-O",
+                "Not found | AthletO",
                 user.as_ref(),
                 html! {
                     section .section {
@@ -665,7 +686,11 @@ pub async fn product_page(
     };
 
     layout(
-        &format!("{} ({}) | Athlet-O", product.name, product.format.label()),
+        &format!(
+            "{} ({}) | AthletO",
+            product_display_name(&product),
+            product.format.label()
+        ),
         user.as_ref(),
         html! {
             section .section {
@@ -701,4 +726,21 @@ fn fallback_by_slug(slug: &str) -> Option<Product> {
     db::fallback_products()
         .into_iter()
         .find(|product| product.slug == slug)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn product_card_preserves_brand_subname_and_format_details() {
+        let product = db::fallback_products().remove(0);
+        let rendered = product_card(&product).into_string();
+
+        assert!(rendered.contains("Athlet"));
+        assert!(rendered.contains("starter"));
+        assert!(rendered.contains("90 cal"));
+        assert!(rendered.contains("20g protein"));
+        assert!(rendered.contains("Add to cart"));
+    }
 }

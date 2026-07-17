@@ -120,7 +120,10 @@ pub async fn product_by_slug(pool: &PgPool, slug: &str) -> sqlx::Result<Option<P
 /// Find the owner's cart id if one exists.
 pub async fn find_cart(pool: &PgPool, owner: &CartOwner) -> sqlx::Result<Option<Uuid>> {
     let sql = format!("SELECT id FROM carts WHERE {} = $1", owner.column());
-    let row: Option<(Uuid,)> = sqlx::query_as(&sql).bind(owner.id()).fetch_optional(pool).await?;
+    let row: Option<(Uuid,)> = sqlx::query_as(&sql)
+        .bind(owner.id())
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(|(id,)| id))
 }
 
@@ -133,7 +136,10 @@ pub async fn find_or_create_cart(pool: &PgPool, owner: &CartOwner) -> sqlx::Resu
          ON CONFLICT ({col}) DO UPDATE SET {col} = EXCLUDED.{col} \
          RETURNING id"
     );
-    let (id,): (Uuid,) = sqlx::query_as(&sql).bind(owner.id()).fetch_one(pool).await?;
+    let (id,): (Uuid,) = sqlx::query_as(&sql)
+        .bind(owner.id())
+        .fetch_one(pool)
+        .await?;
     Ok(id)
 }
 
@@ -189,6 +195,9 @@ pub async fn cart_count(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<i64> {
 /// Built-in catalog mirroring the seed migration, used so the storefront still
 /// renders when the database is not configured or not yet migrated.
 pub fn fallback_products() -> Vec<Product> {
+    // The built-in catalog mirrors the database columns explicitly; keeping
+    // each seed in one call makes the six fallback SKUs easy to compare.
+    #[allow(clippy::too_many_arguments)]
     fn product(
         id: i64,
         slug: &str,
