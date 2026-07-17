@@ -670,6 +670,123 @@ pub async fn order_items_for_user(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// Shipments / fulfillment (carrier + tracking). Populated by ops or an EDI
+// 856 mapping; surfaced on the order-detail/receipt page.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "shipment_status", rename_all = "lowercase")]
+pub enum ShipmentStatus {
+    Packing,
+    Shipped,
+    Delivered,
+}
+
+impl ShipmentStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Packing => "packing",
+            Self::Shipped => "shipped",
+            Self::Delivered => "delivered",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "packing" => Some(Self::Packing),
+            "shipped" => Some(Self::Shipped),
+            "delivered" => Some(Self::Delivered),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Shipment {
+    pub id: Uuid,
+    pub status: ShipmentStatus,
+    pub carrier: Option<String>,
+    pub tracking_number: Option<String>,
+    pub ship_date: Option<chrono::NaiveDate>,
+    pub eta_earliest: Option<chrono::NaiveDate>,
+    pub eta_latest: Option<chrono::NaiveDate>,
+    pub delivered_at: Option<DateTime<Utc>>,
+}
+
+impl Shipment {
+    /// Carrier tracking URL for the major carriers, else None.
+    pub fn tracking_url(&self) -> Option<String> {
+        let number = self.tracking_number.as_deref()?;
+        let carrier = self.carrier.as_deref().unwrap_or("").to_lowercase();
+        let url = if carrier.contains("ups") {
+            format!("https://www.ups.com/track?tracknum={number}")
+        } else if carrier.contains("fedex") {
+            format!("https://www.fedex.com/fedextrack/?trknbr={number}")
+        } else if carrier.contains("usps") {
+            format!("https://tools.usps.com/go/TrackConfirmAction?tLabels={number}")
+        } else if carrier.contains("dhl") {
+            format!("https://www.dhl.com/us-en/home/tracking.html?tracking-id={number}")
+        } else {
+            return None;
+        };
+        Some(url)
+    }
+}
+
+pub async fn shipments_for_order(pool: &PgPool, order_id: Uuid) -> sqlx::Result<Vec<Shipment>> {
+    sqlx::query_as::<_, Shipment>(
+        "SELECT id, status, carrier, tracking_number, ship_date, eta_earliest, eta_latest, delivered_at \
+         FROM shipments WHERE order_id = $1 ORDER BY created_at",
+    )
+    .bind(order_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Record a fulfillment (ops / EDI 856): create a shipment with carrier +
+/// tracking and advance the order to fulfilled. Ownership is checked so an
+/// API key can only fulfill its own orders. Returns None if the order isn't
+/// the user's.
+pub async fn record_fulfillment(
+    pool: &PgPool,
+    user_id: Uuid,
+    order_id: Uuid,
+    carrier: &str,
+    tracking_number: &str,
+    ship_date: chrono::NaiveDate,
+) -> sqlx::Result<Option<Uuid>> {
+    let mut tx = pool.begin().await?;
+    let owned: Option<(ShipMethod,)> =
+        sqlx::query_as("SELECT ship_method FROM orders WHERE id = $1 AND user_id = $2 FOR UPDATE")
+            .bind(order_id)
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((ship_method,)) = owned else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let (min, max) = ship_method.eta_business_days();
+    let (id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO shipments \
+         (order_id, status, carrier, tracking_number, ship_date, eta_earliest, eta_latest) \
+         VALUES ($1, 'shipped', $2, $3, $4, $5, $6) RETURNING id",
+    )
+    .bind(order_id)
+    .bind(carrier)
+    .bind(tracking_number)
+    .bind(ship_date)
+    .bind(add_business_days(ship_date, min))
+    .bind(add_business_days(ship_date, max))
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE orders SET status = 'fulfilled' WHERE id = $1")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(id))
+}
+
 pub async fn product_prices(pool: &PgPool) -> sqlx::Result<Vec<(i64, String, i32)>> {
     let rows: Vec<(i64, String, i32)> =
         sqlx::query_as("SELECT id, slug, price_cents FROM products ORDER BY id")
