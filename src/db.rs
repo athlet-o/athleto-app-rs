@@ -962,6 +962,142 @@ pub async fn sweep_expired_holds(pool: &PgPool) -> sqlx::Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Materialize every recurring order whose `next_run_at` is due. Each order is
+/// processed in its own transaction guarded by a transaction-scoped advisory
+/// lock on the order id, so two runners (or a runner and a bypassed leader
+/// guard) can never fire the same subscription twice. Returns how many child
+/// orders were created.
+pub async fn run_due_recurring_orders(pool: &PgPool) -> sqlx::Result<u64> {
+    let due: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM orders \
+         WHERE kind = 'recurring' AND status <> 'cancelled' \
+         AND next_run_at IS NOT NULL AND next_run_at <= now() \
+         ORDER BY next_run_at LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut created = 0u64;
+    for (subscription_id,) in due {
+        // hashtextextended gives a stable bigint key for the advisory lock.
+        let mut tx = pool.begin().await?;
+        let got: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))",
+        )
+        .bind(subscription_id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+        if !got {
+            tx.rollback().await?; // another runner owns this subscription
+            continue;
+        }
+
+        // Re-read under the lock; skip if no longer due (a racing runner that
+        // held the lock just before us already advanced it).
+        let sub: Option<(Option<OrderFrequency>, OrderChannel, ShipMethod, DateTime<Utc>)> =
+            sqlx::query_as(
+                "SELECT frequency, channel, ship_method, next_run_at FROM orders \
+                 WHERE id = $1 AND kind = 'recurring' AND status <> 'cancelled' \
+                 AND next_run_at IS NOT NULL AND next_run_at <= now()",
+            )
+            .bind(subscription_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some((frequency, channel, ship_method, _next)) = sub else {
+            tx.rollback().await?;
+            continue;
+        };
+
+        let user_id: (Uuid,) = sqlx::query_as("SELECT user_id FROM orders WHERE id = $1")
+            .bind(subscription_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let lines: Vec<(i64, i32, i32)> = sqlx::query_as(
+            "SELECT product_id, qty, unit_price_cents FROM order_items WHERE order_id = $1",
+        )
+        .bind(subscription_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        // Decrement stock for tracked products; if any line is short, skip the
+        // child this cycle but still advance the cursor so the subscription
+        // isn't wedged (a real system would backorder).
+        let mut short = false;
+        for (product_id, qty, _) in &lines {
+            let on_hand: Option<(i32,)> =
+                sqlx::query_as("SELECT on_hand FROM inventory WHERE product_id = $1 FOR UPDATE")
+                    .bind(product_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if let Some((on_hand,)) = on_hand {
+                if on_hand < *qty {
+                    short = true;
+                    break;
+                }
+            }
+        }
+
+        if !short {
+            for (product_id, qty, _) in &lines {
+                sqlx::query(
+                    "UPDATE inventory SET on_hand = on_hand - $2, updated_at = now() \
+                     WHERE product_id = $1",
+                )
+                .bind(product_id)
+                .bind(qty)
+                .execute(&mut *tx)
+                .await?;
+            }
+            let subtotal: i64 = lines
+                .iter()
+                .map(|(_, qty, price)| i64::from(*price) * i64::from(*qty))
+                .sum();
+            let shipping = ship_method.shipping_cents();
+            let (child_id,): (Uuid,) = sqlx::query_as(
+                "INSERT INTO orders \
+                 (user_id, kind, channel, ship_method, subtotal_cents, shipping_cents, \
+                  tax_cents, total_cents, recurs_from) \
+                 VALUES ($1, 'one_time', $2, $3, $4, $5, 0, $6, $7) RETURNING id",
+            )
+            .bind(user_id.0)
+            .bind(channel)
+            .bind(ship_method)
+            .bind(subtotal)
+            .bind(shipping)
+            .bind(subtotal + shipping)
+            .bind(subscription_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            for (product_id, qty, price) in &lines {
+                sqlx::query(
+                    "INSERT INTO order_items (order_id, product_id, qty, unit_price_cents) \
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(child_id)
+                .bind(product_id)
+                .bind(qty)
+                .bind(price)
+                .execute(&mut *tx)
+                .await?;
+            }
+            created += 1;
+        } else {
+            tracing::warn!(%subscription_id, "recurring order short on stock; skipping this cycle");
+        }
+
+        let interval = frequency.map(|f| f.interval_days()).unwrap_or(30);
+        sqlx::query(
+            "UPDATE orders SET next_run_at = next_run_at + make_interval(days => $2) WHERE id = $1",
+        )
+        .bind(subscription_id)
+        .bind(interval as i32)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+    Ok(created)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct InsufficientLine {
     pub product_id: i64,
