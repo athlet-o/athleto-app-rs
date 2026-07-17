@@ -995,7 +995,9 @@ pub async fn paypal_webhook(
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok())
                 {
-                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, subscription, PaymentKind::Charge)
+                    // Activation itself carries no charge amount; the first
+                    // cycle's PAYMENT.SALE.COMPLETED verifies the money.
+                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, subscription, PaymentKind::Charge, None)
                         .await?;
                 }
             }
