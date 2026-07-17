@@ -7,13 +7,15 @@ deployment and Git history stay stable.
 The AthletO shop app serves performance gelatin protein cups. *Wobble hard.
 Recover clean.*
 
-A self-contained Rust web app on the "mash" stack:
+A self-contained Rust web app on the "MASH" stack:
 
 - **M**aud — server-rendered HTML (inline dark athletic theme, no asset pipeline)
-- **A**xum — HTTP server and routing
-- **S**QLx — runtime Postgres queries + embedded migrations (Supabase pooled Postgres)
-- Supabase — GoTrue email/password auth via its REST API
-- **H**TMX — add-to-cart / remove-from-cart fragment swaps
+- **A**xum — HTTP server and routing (plus a websocket endpoint pushing HTML fragments)
+- **S**eaORM — entity query builders over the Supabase pooled Postgres (raw SQL kept
+  for the transactional hold/checkout paths; SQLx remains underneath for the
+  embedded migrations)
+- Supabase — GoTrue passwordless (magic link + MFA) auth via its REST API
+- **H**TMX — add-to-cart / remove-from-cart fragment swaps (vendored, served same-origin)
 
 Products: **Athlet-O Starter** (20g gelatin protein, inulin fiber, vitamin C, electrolytes),
 **Recover-O**, and **Pre-Game-O** — each as a ready cup (just add water was already done for you)
@@ -38,6 +40,7 @@ and a powder packet (just add water).
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
+| `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a
@@ -70,8 +73,10 @@ inserts the 3 products x 2 formats.
 To run them manually instead: `cargo install sqlx-cli --no-default-features --features rustls,postgres`
 then `sqlx migrate run`.
 
-All queries are runtime `sqlx::query`/`query_as` calls (no compile-time `query!`
-macros), so the crate builds without a live `DATABASE_URL`.
+Application queries go through SeaORM (`src/entities/` + `src/db.rs`); the
+hold-claim and checkout transactions stay hand-written SQL executed via
+`sea_orm::Statement` to preserve their locking semantics. Everything runs at
+runtime against the pool, so the crate builds without a live `DATABASE_URL`.
 
 ## Deploy
 

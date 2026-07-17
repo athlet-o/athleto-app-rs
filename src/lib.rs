@@ -8,6 +8,7 @@ pub mod assets;
 pub mod auth;
 pub mod cart;
 pub mod db;
+pub mod entities;
 pub mod orders;
 pub mod pages;
 pub mod security;
@@ -78,7 +79,7 @@ impl Config {
 pub struct AppState {
     /// `None` when DATABASE_URL is unset; product pages fall back to the
     /// built-in catalog and cart routes show a "not configured" notice.
-    pub pool: Option<sqlx::PgPool>,
+    pub pool: Option<sea_orm::DatabaseConnection>,
     pub http: reqwest::Client,
     pub config: Config,
     /// Per-IP / per-email throttle for the magic-link login endpoint.
@@ -86,7 +87,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(pool: Option<sqlx::PgPool>, http: reqwest::Client, config: Config) -> Self {
+    pub fn new(
+        pool: Option<sea_orm::DatabaseConnection>,
+        http: reqwest::Client,
+        config: Config,
+    ) -> Self {
         Self {
             pool,
             http,
@@ -101,7 +106,7 @@ pub type SharedState = Arc<AppState>;
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("database error: {0}")]
-    Db(#[from] sqlx::Error),
+    Db(#[from] sea_orm::DbErr),
     #[error("upstream request error: {0}")]
     Upstream(#[from] reqwest::Error),
 }

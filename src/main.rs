@@ -52,8 +52,9 @@ async fn main() -> anyhow::Result<()> {
     match &pool {
         Some(pool) => {
             // Run migrations in the background so startup (and /healthz) never
-            // blocks on database availability.
-            let migrate_pool = pool.clone();
+            // blocks on database availability. `sqlx::migrate!` runs on the
+            // sqlx pool underneath the SeaORM connection.
+            let migrate_pool = pool.get_postgres_connection_pool().clone();
             tokio::spawn(async move {
                 match sqlx::migrate!().run(&migrate_pool).await {
                     Ok(()) => tracing::info!("database migrations applied"),
