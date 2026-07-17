@@ -237,6 +237,7 @@ pub async fn orders_create(
         kind,
         request.frequency,
         db::OrderChannel::B2bApi,
+        db::ShipMethod::Freight,
         request.po_number.as_deref().map(str::trim).filter(|po| !po.is_empty()),
         &lines,
         None,
