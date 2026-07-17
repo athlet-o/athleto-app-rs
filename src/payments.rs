@@ -1570,10 +1570,11 @@ pub async fn pay_success(
                     .await?;
                 let capture: Value = response.json().await?;
                 if capture["status"].as_str() == Some("COMPLETED") {
-                    let capture_id = capture["purchase_units"][0]["payments"]["captures"][0]["id"]
-                        .as_str()
-                        .unwrap_or(paypal_order);
-                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge)
+                    let capture = &capture["purchase_units"][0]["payments"]["captures"][0];
+                    let capture_id = capture["id"].as_str().unwrap_or(paypal_order);
+                    let charged =
+                        charged_decimal(&capture["amount"]["value"], &capture["amount"]["currency_code"]);
+                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge, charged)
                         .await?;
                     Ok(PaymentStatus::Paid)
                 } else {
