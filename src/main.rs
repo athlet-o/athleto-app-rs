@@ -2,6 +2,7 @@ mod account;
 mod api;
 mod auth;
 mod cart;
+mod coordinate;
 mod db;
 mod orders;
 mod pages;
