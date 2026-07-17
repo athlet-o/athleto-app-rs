@@ -1254,7 +1254,7 @@ pub async fn square_webhook(
 /// the Quaestor ledger (invoice + payment postings) on first sight.
 async fn settle_order(
     state: &SharedState,
-    pool: &sqlx::PgPool,
+    orm: &sea_orm::DatabaseConnection,
     order_id: Uuid,
     provider: PaymentProvider,
     provider_ref: &str,
