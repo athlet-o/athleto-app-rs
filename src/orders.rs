@@ -251,6 +251,7 @@ pub async fn quick_order_page(
                     "powders 24. Prefer machines? Use the " a href="/account#api-keys" { "ERP API" } "."
                 }
                 form method="post" action="/quick-order" {
+                    (pages::csrf_field())
                     table .cart-table {
                         thead {
                             tr { th { "Product" } th { "Format" } th { "Unit price" } th { "Quantity (units)" } }
@@ -338,6 +339,7 @@ pub fn checkout_form(profile: Option<&CustomerProfile>, has_2fa: bool) -> Markup
     }
     html! {
         form .checkout-form method="post" action="/checkout" {
+            (pages::csrf_field())
             h3 { "Place this order" }
             label {
                 "Order type"

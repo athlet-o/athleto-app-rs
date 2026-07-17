@@ -120,7 +120,7 @@ fn hold_banner(seconds_left: i64) -> Markup {
             }
             span .muted-inline { "(holds last " (db::HOLD_MINUTES) " minutes from your last cart change)" }
         }
-        script { (PreEscaped(pages::CART_HOLD_JS)) }
+        script nonce=(crate::security::csp_nonce()) { (PreEscaped(pages::CART_HOLD_JS)) }
     }
 }
 
