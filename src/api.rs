@@ -1,0 +1,283 @@
+//! B2B ERP-facing JSON API under /api/v1, authenticated with per-account API
+//! keys (created on /account, stored as SHA-256 hashes). This is the surface
+//! an EDI provider or ERP connector calls; docs/erp-integration.md maps X12
+//! documents (850/855/856/810) onto these endpoints and tables.
+
+use std::collections::HashMap;
+
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Deserialize;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::db::{self, CustomerProfile};
+use crate::SharedState;
+
+fn error_response(status: StatusCode, message: &str) -> Response {
+    (status, Json(json!({ "error": message }))).into_response()
+}
+
+fn hash_key(key: &str) -> String {
+    Sha256::digest(key.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Resolve `Authorization: Bearer athk_...` to a B2B customer.
+async fn authenticate(
+    state: &SharedState,
+    headers: &HeaderMap,
+) -> Result<(Uuid, CustomerProfile), Response> {
+    let Some(pool) = &state.pool else {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database not configured",
+        ));
+    };
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or_default();
+    if !token.starts_with("athk_") {
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "missing or malformed API key (expected 'Authorization: Bearer athk_...')",
+        ));
+    }
+    let user_id = match db::api_key_user(pool, &hash_key(token)).await {
+        Ok(Some(user_id)) => user_id,
+        Ok(None) => {
+            return Err(error_response(StatusCode::UNAUTHORIZED, "unknown or revoked API key"))
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "api key lookup failed");
+            return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "lookup failed"));
+        }
+    };
+    match db::get_profile(pool, user_id).await {
+        Ok(Some(profile)) if profile.is_b2b() => Ok((user_id, profile)),
+        Ok(_) => Err(error_response(
+            StatusCode::FORBIDDEN,
+            "API access is for business accounts",
+        )),
+        Err(err) => {
+            tracing::error!(error = %err, "profile lookup failed");
+            Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "lookup failed"))
+        }
+    }
+}
+
+/// GET /api/v1/products
+pub async fn products(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if let Err(response) = authenticate(&state, &headers).await {
+        return response;
+    }
+    let products = match &state.pool {
+        Some(pool) => db::list_products(pool)
+            .await
+            .unwrap_or_else(|_| db::fallback_products()),
+        None => db::fallback_products(),
+    };
+    let body: Vec<_> = products
+        .iter()
+        .map(|product| {
+            json!({
+                "id": product.id,
+                "slug": product.slug,
+                "name": product.name,
+                "subname": product.subname,
+                "format": product.format.label(),
+                "calories": product.calories,
+                "protein_g": product.protein_g,
+                "unit_price_cents": product.price_cents,
+            })
+        })
+        .collect();
+    Json(json!({ "products": body })).into_response()
+}
+
+/// GET /api/v1/orders
+pub async fn orders_list(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    let (user_id, _) = match authenticate(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    let pool = state.pool.as_ref().expect("authenticate checked pool");
+
+    let (orders, items) = match (
+        db::list_orders(pool, user_id).await,
+        db::order_items_for_user(pool, user_id).await,
+    ) {
+        (Ok(orders), Ok(items)) => (orders, items),
+        (Err(err), _) | (_, Err(err)) => {
+            tracing::error!(error = %err, "order listing failed");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "order listing failed");
+        }
+    };
+    let mut items_by_order: HashMap<Uuid, Vec<serde_json::Value>> = HashMap::new();
+    for item in items {
+        items_by_order.entry(item.order_id).or_default().push(json!({
+            "name": item.name,
+            "subname": item.subname,
+            "format": item.format.label(),
+            "qty": item.qty,
+            "unit_price_cents": item.unit_price_cents,
+        }));
+    }
+    let body: Vec<_> = orders
+        .iter()
+        .map(|order| {
+            json!({
+                "id": order.id,
+                "kind": order.kind.as_str(),
+                "frequency": order.frequency.map(|f| f.label()),
+                "status": order.status.label(),
+                "channel": order.channel.as_str(),
+                "po_number": order.po_number,
+                "total_cents": order.total_cents,
+                "next_run_at": order.next_run_at,
+                "created_at": order.created_at,
+                "items": items_by_order.remove(&order.id).unwrap_or_default(),
+            })
+        })
+        .collect();
+    Json(json!({ "orders": body })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApiOrderRequest {
+    #[serde(default)]
+    pub po_number: Option<String>,
+    #[serde(default)]
+    pub kind: Option<db::OrderKind>,
+    #[serde(default)]
+    pub frequency: Option<db::OrderFrequency>,
+    pub items: Vec<ApiOrderItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApiOrderItem {
+    #[serde(default)]
+    pub product_id: Option<i64>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    pub qty: i32,
+}
+
+/// POST /api/v1/orders -- place an order (the "850 in" path when an EDI
+/// provider webhook is mapped onto this endpoint).
+pub async fn orders_create(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(request): Json<ApiOrderRequest>,
+) -> Response {
+    let (user_id, _) = match authenticate(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(response) => return response,
+    };
+    let pool = state.pool.as_ref().expect("authenticate checked pool");
+
+    if request.items.is_empty() {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "items must not be empty");
+    }
+    let kind = request.kind.unwrap_or(db::OrderKind::OneTime);
+    if kind == db::OrderKind::Recurring && request.frequency.is_none() {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "recurring orders need a frequency (weekly|biweekly|monthly|quarterly)",
+        );
+    }
+
+    let catalog = match db::product_prices(pool).await {
+        Ok(catalog) => catalog,
+        Err(err) => {
+            tracing::error!(error = %err, "catalog load failed");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "catalog load failed");
+        }
+    };
+    let by_id: HashMap<i64, i32> = catalog.iter().map(|(id, _, price)| (*id, *price)).collect();
+    let by_slug: HashMap<&str, (i64, i32)> = catalog
+        .iter()
+        .map(|(id, slug, price)| (slug.as_str(), (*id, *price)))
+        .collect();
+
+    let mut lines = Vec::new();
+    for item in &request.items {
+        if item.qty <= 0 {
+            return error_response(StatusCode::UNPROCESSABLE_ENTITY, "qty must be positive");
+        }
+        let resolved = match (item.product_id, item.slug.as_deref()) {
+            (Some(id), _) => by_id.get(&id).map(|price| (id, *price)),
+            (None, Some(slug)) => by_slug.get(slug).copied(),
+            (None, None) => None,
+        };
+        let Some((product_id, unit_price_cents)) = resolved else {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "each item needs a valid product_id or slug",
+            );
+        };
+        lines.push(db::NewOrderLine {
+            product_id,
+            qty: item.qty,
+            unit_price_cents,
+        });
+    }
+
+    match db::place_order(
+        pool,
+        user_id,
+        kind,
+        request.frequency,
+        db::OrderChannel::B2bApi,
+        request.po_number.as_deref().map(str::trim).filter(|po| !po.is_empty()),
+        &lines,
+        None,
+    )
+    .await
+    {
+        Ok(order_id) => {
+            let total: i64 = lines
+                .iter()
+                .map(|line| i64::from(line.unit_price_cents) * i64::from(line.qty))
+                .sum();
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": order_id,
+                    "status": "placed",
+                    "kind": kind.as_str(),
+                    "po_number": request.po_number,
+                    "total_cents": total,
+                })),
+            )
+                .into_response()
+        }
+        Err(db::OrderError::Insufficient(shortages)) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "insufficient stock",
+                "shortages": shortages
+                    .iter()
+                    .map(|s| json!({
+                        "product_id": s.product_id,
+                        "requested": s.requested,
+                        "available": s.available,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+        )
+            .into_response(),
+        Err(db::OrderError::Db(err)) => {
+            tracing::error!(error = %err, "order placement failed");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "order placement failed")
+        }
+    }
+}
