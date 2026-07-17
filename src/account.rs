@@ -635,6 +635,11 @@ pub async fn phone_verify(
     let Some(auth_user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
+    // See totp_enroll: block a mid-step-up session from verifying a freshly
+    // enrolled factor to reach AAL2 around an existing one.
+    if auth_user.needs_aal2() {
+        return Redirect::to("/login/2fa").into_response();
+    }
     match auth::verify_challenge(
         &state,
         &auth_user.access_token,
