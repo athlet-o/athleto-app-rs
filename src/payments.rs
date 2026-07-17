@@ -556,7 +556,7 @@ pub async fn stripe_webhook(
     };
     let event_id = event["id"].as_str().unwrap_or_default().to_string();
     let event_type = event["type"].as_str().unwrap_or_default().to_string();
-    match db::record_payment_event(&pool, PaymentProvider::Stripe, &event_id, &event).await {
+    match db::record_payment_event(&orm, PaymentProvider::Stripe, &event_id, &event).await {
         Ok(true) => {}
         Ok(false) => return StatusCode::OK.into_response(), // replay
         Err(err) => {
@@ -574,10 +574,10 @@ pub async fn stripe_webhook(
                     .and_then(|id| id.parse::<Uuid>().ok());
                 let Some(order_id) = order_id else { return Ok(()) };
                 if let Some(subscription) = object["subscription"].as_str() {
-                    if let Ok(Some(facts)) = db::order_payment_facts(&pool, order_id).await {
+                    if let Ok(Some(facts)) = db::order_payment_facts(&orm, order_id).await {
                         if let Some(freq) = facts.frequency {
                             db::upsert_subscription(
-                                &pool,
+                                &orm,
                                 facts.user_id,
                                 Some(order_id),
                                 PaymentProvider::Stripe,
@@ -595,11 +595,11 @@ pub async fn stripe_webhook(
                         .or_else(|| object["subscription"].as_str())
                         .or_else(|| object["id"].as_str())
                         .unwrap_or_default();
-                    settle_order(&state, &pool, order_id, PaymentProvider::Stripe, reference, PaymentKind::Charge)
+                    settle_order(&state, &orm, order_id, PaymentProvider::Stripe, reference, PaymentKind::Charge)
                         .await?;
                 } else {
                     // ACH debit initiated; settles via async_payment_succeeded.
-                    db::set_order_payment_status(&pool, order_id, PaymentStatus::Processing).await?;
+                    db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
                 }
             }
             "checkout.session.async_payment_failed" => {
@@ -607,7 +607,7 @@ pub async fn stripe_webhook(
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok())
                 {
-                    db::set_order_payment_status(&pool, order_id, PaymentStatus::Failed).await?;
+                    db::set_order_payment_status(&orm, order_id, PaymentStatus::Failed).await?;
                 }
             }
             "invoice.paid" => {
@@ -618,12 +618,12 @@ pub async fn stripe_webhook(
                     .and_then(|id| id.parse::<Uuid>().ok())
                 {
                     // Our hosted Net-30 invoice.
-                    settle_order(&state, &pool, order_id, PaymentProvider::Invoice, invoice_id, PaymentKind::Charge)
+                    settle_order(&state, &orm, order_id, PaymentProvider::Invoice, invoice_id, PaymentKind::Charge)
                         .await?;
                 } else if let Some(subscription) = object["subscription"].as_str() {
                     record_subscription_cycle(
                         &state,
-                        &pool,
+                        &orm,
                         PaymentProvider::Stripe,
                         subscription,
                         invoice_id,
@@ -635,7 +635,7 @@ pub async fn stripe_webhook(
             "invoice.payment_failed" => {
                 if let Some(subscription) = object["subscription"].as_str() {
                     db::set_subscription_status(
-                        &pool,
+                        &orm,
                         PaymentProvider::Stripe,
                         subscription,
                         SubscriptionStatus::PastDue,
@@ -646,7 +646,7 @@ pub async fn stripe_webhook(
             "customer.subscription.deleted" => {
                 if let Some(subscription) = object["id"].as_str() {
                     db::set_subscription_status(
-                        &pool,
+                        &orm,
                         PaymentProvider::Stripe,
                         subscription,
                         SubscriptionStatus::Cancelled,
@@ -894,7 +894,7 @@ pub async fn paypal_webhook(
 
     let event_id = event["id"].as_str().unwrap_or_default().to_string();
     let event_type = event["event_type"].as_str().unwrap_or_default().to_string();
-    match db::record_payment_event(&pool, PaymentProvider::Paypal, &event_id, &event).await {
+    match db::record_payment_event(&orm, PaymentProvider::Paypal, &event_id, &event).await {
         Ok(true) => {}
         Ok(false) => return StatusCode::OK.into_response(),
         Err(err) => {
@@ -912,7 +912,7 @@ pub async fn paypal_webhook(
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok())
                 {
-                    settle_order(&state, &pool, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge)
+                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge)
                         .await?;
                 }
             }
@@ -925,30 +925,30 @@ pub async fn paypal_webhook(
                     .and_then(|value| value.replace('.', "").parse::<i64>().ok())
                     .unwrap_or_default();
                 if let Some(subscription) = resource["billing_agreement_id"].as_str() {
-                    record_subscription_cycle(&state, &pool, PaymentProvider::Paypal, subscription, sale_id, amount)
+                    record_subscription_cycle(&state, &orm, PaymentProvider::Paypal, subscription, sale_id, amount)
                         .await?;
                 }
             }
             "BILLING.SUBSCRIPTION.ACTIVATED" => {
                 let subscription = resource["id"].as_str().unwrap_or_default();
-                db::set_subscription_status(&pool, PaymentProvider::Paypal, subscription, SubscriptionStatus::Active)
+                db::set_subscription_status(&orm, PaymentProvider::Paypal, subscription, SubscriptionStatus::Active)
                     .await?;
                 if let Some(order_id) = resource["custom_id"]
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok())
                 {
-                    settle_order(&state, &pool, order_id, PaymentProvider::Paypal, subscription, PaymentKind::Charge)
+                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, subscription, PaymentKind::Charge)
                         .await?;
                 }
             }
             "BILLING.SUBSCRIPTION.CANCELLED" | "BILLING.SUBSCRIPTION.SUSPENDED" => {
                 let subscription = resource["id"].as_str().unwrap_or_default();
-                db::set_subscription_status(&pool, PaymentProvider::Paypal, subscription, SubscriptionStatus::Cancelled)
+                db::set_subscription_status(&orm, PaymentProvider::Paypal, subscription, SubscriptionStatus::Cancelled)
                     .await?;
             }
             "BILLING.SUBSCRIPTION.PAYMENT.FAILED" => {
                 let subscription = resource["id"].as_str().unwrap_or_default();
-                db::set_subscription_status(&pool, PaymentProvider::Paypal, subscription, SubscriptionStatus::PastDue)
+                db::set_subscription_status(&orm, PaymentProvider::Paypal, subscription, SubscriptionStatus::PastDue)
                     .await?;
             }
             _ => {}
@@ -1154,7 +1154,7 @@ pub async fn square_webhook(
     };
     let event_id = event["event_id"].as_str().unwrap_or_default().to_string();
     let event_type = event["type"].as_str().unwrap_or_default().to_string();
-    match db::record_payment_event(&pool, PaymentProvider::Square, &event_id, &event).await {
+    match db::record_payment_event(&orm, PaymentProvider::Square, &event_id, &event).await {
         Ok(true) => {}
         Ok(false) => return StatusCode::OK.into_response(),
         Err(err) => {
@@ -1175,9 +1175,9 @@ pub async fn square_webhook(
                     return Ok(());
                 };
                 if let Some(order_id) =
-                    db::find_order_by_payment_ref(&pool, PaymentProvider::Square, square_order).await?
+                    db::find_order_by_payment_ref(&orm, PaymentProvider::Square, square_order).await?
                 {
-                    settle_order(&state, &pool, order_id, PaymentProvider::Square, payment_id, PaymentKind::Charge)
+                    settle_order(&state, &orm, order_id, PaymentProvider::Square, payment_id, PaymentKind::Charge)
                         .await?;
                 }
             }
@@ -1194,16 +1194,16 @@ pub async fn square_webhook(
                 // tie back to the shop order via the checkout order id.
                 let order_id = match subscription["order_id"].as_str() {
                     Some(square_order) => {
-                        db::find_order_by_payment_ref(&pool, PaymentProvider::Square, square_order)
+                        db::find_order_by_payment_ref(&orm, PaymentProvider::Square, square_order)
                             .await?
                     }
                     None => None,
                 };
                 if let Some(order_id) = order_id {
-                    if let Ok(Some(facts)) = db::order_payment_facts(&pool, order_id).await {
+                    if let Ok(Some(facts)) = db::order_payment_facts(&orm, order_id).await {
                         if let Some(freq) = facts.frequency {
                             db::upsert_subscription(
-                                &pool,
+                                &orm,
                                 facts.user_id,
                                 Some(order_id),
                                 PaymentProvider::Square,
@@ -1215,7 +1215,7 @@ pub async fn square_webhook(
                         }
                     }
                 } else {
-                    db::set_subscription_status(&pool, PaymentProvider::Square, subscription_id, status)
+                    db::set_subscription_status(&orm, PaymentProvider::Square, subscription_id, status)
                         .await?;
                 }
             }
@@ -1226,7 +1226,7 @@ pub async fn square_webhook(
                     .as_i64()
                     .unwrap_or_default();
                 if let Some(subscription) = invoice["subscription_id"].as_str() {
-                    record_subscription_cycle(&state, &pool, PaymentProvider::Square, subscription, invoice_id, amount)
+                    record_subscription_cycle(&state, &orm, PaymentProvider::Square, subscription, invoice_id, amount)
                         .await?;
                 }
             }
@@ -1377,10 +1377,10 @@ pub async fn pay_success(
                     return Ok(PaymentStatus::Pending);
                 }
                 if let Some(subscription) = session["subscription"].as_str() {
-                    if let Ok(Some(facts)) = db::order_payment_facts(&pool, order_id).await {
+                    if let Ok(Some(facts)) = db::order_payment_facts(&orm, order_id).await {
                         if let Some(freq) = facts.frequency {
                             db::upsert_subscription(
-                                &pool,
+                                &orm,
                                 facts.user_id,
                                 Some(order_id),
                                 PaymentProvider::Stripe,
@@ -1398,13 +1398,13 @@ pub async fn pay_success(
                             .as_str()
                             .or_else(|| session["subscription"].as_str())
                             .unwrap_or(session_id);
-                        settle_order(&state, &pool, order_id, PaymentProvider::Stripe, reference, PaymentKind::Charge)
+                        settle_order(&state, &orm, order_id, PaymentProvider::Stripe, reference, PaymentKind::Charge)
                             .await?;
                         Ok(PaymentStatus::Paid)
                     }
                     _ => {
                         // ACH debit still clearing.
-                        db::set_order_payment_status(&pool, order_id, PaymentStatus::Processing).await?;
+                        db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
                         Ok(PaymentStatus::Processing)
                     }
                 }
@@ -1424,11 +1424,11 @@ pub async fn pay_success(
                         .json()
                         .await?;
                     if matches!(subscription["status"].as_str(), Some("ACTIVE") | Some("APPROVED")) {
-                        settle_order(&state, &pool, order_id, PaymentProvider::Paypal, subscription_id, PaymentKind::Charge)
+                        settle_order(&state, &orm, order_id, PaymentProvider::Paypal, subscription_id, PaymentKind::Charge)
                             .await?;
                         return Ok(PaymentStatus::Paid);
                     }
-                    db::set_order_payment_status(&pool, order_id, PaymentStatus::Processing).await?;
+                    db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
                     return Ok(PaymentStatus::Processing);
                 }
                 let Some(paypal_order) = params.token.as_deref() else {
@@ -1447,11 +1447,11 @@ pub async fn pay_success(
                     let capture_id = capture["purchase_units"][0]["payments"]["captures"][0]["id"]
                         .as_str()
                         .unwrap_or(paypal_order);
-                    settle_order(&state, &pool, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge)
+                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge)
                         .await?;
                     Ok(PaymentStatus::Paid)
                 } else {
-                    db::set_order_payment_status(&pool, order_id, PaymentStatus::Processing).await?;
+                    db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
                     Ok(PaymentStatus::Processing)
                 }
             }
@@ -1459,7 +1459,7 @@ pub async fn pay_success(
                 let Some(cfg) = &state.config.square else {
                     return Ok(PaymentStatus::Pending);
                 };
-                let Some(facts) = db::order_payment_facts(&pool, order_id).await? else {
+                let Some(facts) = db::order_payment_facts(&orm, order_id).await? else {
                     return Ok(PaymentStatus::Pending);
                 };
                 let Some(square_order) = facts.payment_ref.as_deref() else {
@@ -1476,12 +1476,12 @@ pub async fn pay_success(
                 let tender_id = order["order"]["tenders"][0]["id"].as_str();
                 if order["order"]["state"].as_str() == Some("COMPLETED") || tender_id.is_some() {
                     let reference = tender_id.unwrap_or(square_order);
-                    settle_order(&state, &pool, order_id, PaymentProvider::Square, reference, PaymentKind::Charge)
+                    settle_order(&state, &orm, order_id, PaymentProvider::Square, reference, PaymentKind::Charge)
                         .await?;
                     Ok(PaymentStatus::Paid)
                 } else {
                     // The webhook will finish this once Square marks it paid.
-                    db::set_order_payment_status(&pool, order_id, PaymentStatus::Processing).await?;
+                    db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
                     Ok(PaymentStatus::Processing)
                 }
             }
