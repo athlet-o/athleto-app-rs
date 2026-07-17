@@ -173,7 +173,7 @@ pub async fn delete_cart_item(pool: &PgPool, cart_id: Uuid, item_id: i64) -> sql
 
 pub async fn cart_lines(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<Vec<CartLine>> {
     sqlx::query_as::<_, CartLine>(
-        "SELECT ci.id AS item_id, p.name, p.subname, p.format, p.calories, p.price_cents, ci.qty \
+        "SELECT ci.id AS item_id, ci.product_id, p.name, p.subname, p.format, p.calories, p.price_cents, ci.qty \
          FROM cart_items ci \
          JOIN products p ON p.id = ci.product_id \
          WHERE ci.cart_id = $1 \
@@ -182,6 +182,14 @@ pub async fn cart_lines(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<Vec<CartLi
     .bind(cart_id)
     .fetch_all(pool)
     .await
+}
+
+pub async fn clear_cart(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM cart_items WHERE cart_id = $1")
+        .bind(cart_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn cart_count(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<i64> {
