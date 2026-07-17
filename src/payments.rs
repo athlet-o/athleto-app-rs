@@ -359,7 +359,7 @@ async fn stripe_checkout_session(
         .ok_or_else(|| PaymentError::Provider("checkout session has no url".into()))?
         .to_string();
 
-    if let Some(pool) = &state.pool {
+    if let Some(orm) = &state.orm {
         db::set_order_payment(pool, facts.id, PaymentProvider::Stripe, &session_id, PaymentStatus::Pending)
             .await?;
     }
@@ -487,7 +487,7 @@ async fn stripe_net30_invoice(
         }
     }
 
-    if let Some(pool) = &state.pool {
+    if let Some(orm) = &state.orm {
         db::set_order_payment(
             pool,
             facts.id,
@@ -737,7 +737,7 @@ async fn paypal_order(
     }
     let order: Value = response.json().await?;
     let paypal_order_id = order["id"].as_str().unwrap_or_default();
-    if let Some(pool) = &state.pool {
+    if let Some(orm) = &state.orm {
         db::set_order_payment(pool, facts.id, PaymentProvider::Paypal, paypal_order_id, PaymentStatus::Pending)
             .await?;
     }
@@ -817,7 +817,7 @@ async fn paypal_subscription(
     let subscription: Value = response.json().await?;
     let subscription_id = subscription["id"].as_str().unwrap_or_default();
 
-    if let Some(pool) = &state.pool {
+    if let Some(orm) = &state.orm {
         db::set_order_payment(pool, facts.id, PaymentProvider::Paypal, subscription_id, PaymentStatus::Pending)
             .await?;
         db::upsert_subscription(
@@ -1039,7 +1039,7 @@ async fn square_payment_link(
         .ok_or_else(|| PaymentError::Provider("square payment link had no url".into()))?
         .to_string();
 
-    if let Some(pool) = &state.pool {
+    if let Some(orm) = &state.orm {
         db::set_order_payment(pool, facts.id, PaymentProvider::Square, square_order_id, PaymentStatus::Pending)
             .await?;
     }
