@@ -166,7 +166,7 @@ pub async fn delete_cart_item(pool: &PgPool, cart_id: Uuid, item_id: i64) -> sql
 
 pub async fn cart_lines(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<Vec<CartLine>> {
     sqlx::query_as::<_, CartLine>(
-        "SELECT ci.id AS item_id, p.name, p.format, p.price_cents, ci.qty \
+        "SELECT ci.id AS item_id, p.name, p.subname, p.format, p.calories, p.price_cents, ci.qty \
          FROM cart_items ci \
          JOIN products p ON p.id = ci.product_id \
          WHERE ci.cart_id = $1 \
