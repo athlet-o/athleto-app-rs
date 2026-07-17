@@ -85,6 +85,9 @@ pub struct AppState {
     /// `None` when DATABASE_URL is unset; product pages fall back to the
     /// built-in catalog and cart routes show a "not configured" notice.
     pub pool: Option<sqlx::PgPool>,
+    /// SeaORM handle over the same pool — the data-access layer for all new
+    /// code (payments, billing); see src/entities.rs.
+    pub orm: Option<sea_orm::DatabaseConnection>,
     pub http: reqwest::Client,
     pub config: Config,
 }
