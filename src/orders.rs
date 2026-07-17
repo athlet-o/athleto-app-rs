@@ -178,7 +178,6 @@ pub async fn checkout(
     )
     .await
     {
-<<<<<<< HEAD
         Ok(order_id) => {
             let redirect = match payments::PayMethod::parse(request.pay_method.trim()) {
                 Some(method) => {
@@ -190,12 +189,6 @@ pub async fn checkout(
                 None => Redirect::to("/orders?placed=1"),
             };
             Ok((jar, redirect).into_response())
-=======
-        Ok(_) => {
-            // Holds were consumed with the order; refresh any /ws listeners.
-            let _ = state.cart_events.send(cart_id);
-            Ok((jar, Redirect::to("/orders?placed=1")).into_response())
->>>>>>> origin/main
         }
         Err(db::OrderError::Insufficient(shortages)) => {
             let names: HashMap<i64, String> = lines
@@ -627,7 +620,6 @@ pub async fn quick_order_page(
                     "powders 24. Prefer machines? Use the " a href="/account#api-keys" { "ERP API" } "."
                 }
                 form method="post" action="/quick-order" {
-                    (pages::csrf_field())
                     table .cart-table {
                         thead {
                             tr { th { "Product" } th { "Format" } th { "Unit price" } th { "Quantity (units)" } }
@@ -698,7 +690,6 @@ pub async fn quick_order_submit(
             tracing::warn!(error = %err, "hold claim failed during quick order");
         }
     }
-    let _ = state.cart_events.send(cart_id);
     Ok(Redirect::to("/cart").into_response())
 }
 
@@ -721,7 +712,6 @@ pub fn checkout_form(
     }
     html! {
         form .checkout-form method="post" action="/checkout" {
-            (pages::csrf_field())
             h3 { "Place this order" }
             label {
                 "Order type"
@@ -906,6 +896,76 @@ mod tests {
         let rendered = checkout_form(&config, Some(&profile), false).into_string();
         assert!(rendered.contains("Place order"));
         assert!(!rendered.contains("PO number"));
+    }
+
+    fn order_row(
+        status: db::OrderStatus,
+        payment_status: db::PaymentStatus,
+    ) -> db::OrderRow {
+        db::OrderRow {
+            id: Uuid::nil(),
+            kind: OrderKind::OneTime,
+            frequency: None,
+            status,
+            channel: db::OrderChannel::D2cWeb,
+            ship_method: db::ShipMethod::Standard,
+            po_number: None,
+            subtotal_cents: 1000,
+            shipping_cents: 599,
+            tax_cents: 0,
+            total_cents: 1599,
+            next_run_at: None,
+            created_at: chrono::Utc::now(),
+            payment_provider: None,
+            payment_status,
+            payment_ref: None,
+            paid_at: None,
+        }
+    }
+
+    #[test]
+    fn payment_is_retryable_only_while_pending_or_failed_on_live_orders() {
+        use db::{OrderStatus, PaymentStatus};
+        assert!(payment_retryable(&order_row(OrderStatus::Placed, PaymentStatus::Pending)));
+        assert!(payment_retryable(&order_row(OrderStatus::Processing, PaymentStatus::Failed)));
+        // Settled, in-flight, or invoiced payments must not be re-payable.
+        assert!(!payment_retryable(&order_row(OrderStatus::Placed, PaymentStatus::Paid)));
+        assert!(!payment_retryable(&order_row(OrderStatus::Placed, PaymentStatus::Processing)));
+        assert!(!payment_retryable(&order_row(OrderStatus::Placed, PaymentStatus::Invoiced)));
+        // Cancelled orders take no money, whatever the payment state.
+        assert!(!payment_retryable(&order_row(OrderStatus::Cancelled, PaymentStatus::Pending)));
+    }
+
+    #[test]
+    fn payment_badges_reuse_the_status_palette() {
+        use db::PaymentStatus;
+        assert_eq!(payment_class(PaymentStatus::Paid), "st-fulfilled");
+        assert_eq!(payment_class(PaymentStatus::Invoiced), "st-processing");
+        assert_eq!(payment_class(PaymentStatus::Processing), "st-processing");
+        assert_eq!(payment_class(PaymentStatus::Pending), "st-placed");
+        assert_eq!(payment_class(PaymentStatus::Failed), "st-cancelled");
+        assert_eq!(payment_class(PaymentStatus::Refunded), "st-cancelled");
+    }
+
+    #[test]
+    fn b2b_checkout_form_offers_ach_and_net30_when_stripe_is_configured() {
+        let config = config_with_stripe();
+        let profile = CustomerProfile {
+            customer_type: db::CustomerType::B2b,
+            company_name: Some("Wobble Co".into()),
+        };
+        let rendered = checkout_form(&config, Some(&profile), true).into_string();
+        assert!(rendered.contains("ACH bank debit"));
+        assert!(rendered.contains("Net 30"));
+        assert!(rendered.contains("name=\"pay_method\""));
+        // Freight-only shipping for B2B: no ship_method selector.
+        assert!(!rendered.contains("name=\"ship_method\""));
+
+        // B2C with the same config: card only, ship-method picker present.
+        let rendered = checkout_form(&config, None, false).into_string();
+        assert!(!rendered.contains("Net 30"));
+        assert!(!rendered.contains("ACH"));
+        assert!(rendered.contains("name=\"ship_method\""));
     }
 
     #[test]

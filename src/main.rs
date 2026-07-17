@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 mod account;
 mod api;
 mod auth;
@@ -10,14 +9,12 @@ mod entities;
 mod orders;
 mod pages;
 mod payments;
+mod secrets;
 
-=======
->>>>>>> origin/main
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-<<<<<<< HEAD
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -116,9 +113,6 @@ impl IntoResponse for AppError {
             .into_response()
     }
 }
-=======
-use athleto_app_rs::{db, router, AppState, Config, SharedState};
->>>>>>> origin/main
 
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name)
@@ -127,7 +121,6 @@ fn env_opt(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-<<<<<<< HEAD
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -177,8 +170,6 @@ fn router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-=======
->>>>>>> origin/main
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -193,45 +184,60 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(8080);
 
+    // Secrets: env always wins; the fiducia config KV fills anything the
+    // environment leaves unset (cross-provider bootstrap from just
+    // FIDUCIA_URL + FIDUCIA_API_KEY). See src/secrets.rs and
+    // docs/secrets-management.md.
+    let fiducia_url = env_opt("FIDUCIA_URL");
+    let fiducia_api_key = env_opt("FIDUCIA_API_KEY");
+    let fiducia_client = match (fiducia_url.clone(), fiducia_api_key.clone()) {
+        (Some(url), Some(key)) => Some(coordinate::FiduciaClient::new(url, key)),
+        _ => None,
+    };
+    let secret = secrets::SecretSource::load(fiducia_client.as_ref()).await;
+
     let config = Config {
-        supabase_url: env_opt("SUPABASE_URL").map(|url| url.trim_end_matches('/').to_string()),
-        supabase_anon_key: env_opt("SUPABASE_ANON_KEY"),
+        supabase_url: secret
+            .get("SUPABASE_URL")
+            .map(|url| url.trim_end_matches('/').to_string()),
+        supabase_anon_key: secret.get("SUPABASE_ANON_KEY"),
         public_base_url: env_opt("ATHLETO_PUBLIC_BASE_URL")
             .unwrap_or_else(|| "https://app.athleto.store".to_string()),
-        allowed_hosts: env_opt("ALLOWED_HOSTS").map(|hosts| {
-            hosts
-                .split(',')
-                .map(|host| host.trim().to_string())
-                .filter(|host| !host.is_empty())
-                .collect()
-        }),
         sms_mfa_enabled: env_opt("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
-        fiducia_url: env_opt("FIDUCIA_URL"),
-        fiducia_api_key: env_opt("FIDUCIA_API_KEY"),
+        fiducia_url,
+        fiducia_api_key,
         // HOSTNAME is the pod name under Kubernetes; unique per replica.
         replica_id: env_opt("HOSTNAME").unwrap_or_else(|| "local".to_string()),
-        stripe: env_opt("ATHLETO_STRIPE_SECRET_KEY").map(|secret_key| payments::StripeConfig {
-            secret_key,
-            webhook_secret: env_opt("ATHLETO_STRIPE_WEBHOOK_SECRET"),
+        stripe: secret.get("ATHLETO_STRIPE_SECRET_KEY").map(|secret_key| {
+            payments::StripeConfig {
+                secret_key,
+                webhook_secret: secret.get("ATHLETO_STRIPE_WEBHOOK_SECRET"),
+            }
         }),
-        paypal: match (env_opt("ATHLETO_PAYPAL_CLIENT_ID"), env_opt("ATHLETO_PAYPAL_CLIENT_SECRET")) {
+        paypal: match (
+            secret.get("ATHLETO_PAYPAL_CLIENT_ID"),
+            secret.get("ATHLETO_PAYPAL_CLIENT_SECRET"),
+        ) {
             (Some(client_id), Some(client_secret)) => Some(payments::PayPalConfig {
                 client_id,
                 client_secret,
-                webhook_id: env_opt("ATHLETO_PAYPAL_WEBHOOK_ID"),
-                api_base: match env_opt("ATHLETO_PAYPAL_ENV").as_deref() {
+                webhook_id: secret.get("ATHLETO_PAYPAL_WEBHOOK_ID"),
+                api_base: match secret.get("ATHLETO_PAYPAL_ENV").as_deref() {
                     Some("live") => "https://api-m.paypal.com".to_string(),
                     _ => "https://api-m.sandbox.paypal.com".to_string(),
                 },
             }),
             _ => None,
         },
-        square: match (env_opt("ATHLETO_SQUARE_ACCESS_TOKEN"), env_opt("ATHLETO_SQUARE_LOCATION_ID")) {
+        square: match (
+            secret.get("ATHLETO_SQUARE_ACCESS_TOKEN"),
+            secret.get("ATHLETO_SQUARE_LOCATION_ID"),
+        ) {
             (Some(access_token), Some(location_id)) => Some(payments::SquareConfig {
                 access_token,
                 location_id,
-                webhook_signature_key: env_opt("ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY"),
-                api_base: match env_opt("ATHLETO_SQUARE_ENV").as_deref() {
+                webhook_signature_key: secret.get("ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY"),
+                api_base: match secret.get("ATHLETO_SQUARE_ENV").as_deref() {
                     Some("production") => "https://connect.squareup.com".to_string(),
                     _ => "https://connect.squareupsandbox.com".to_string(),
                 },
@@ -239,12 +245,12 @@ async fn main() -> anyhow::Result<()> {
             _ => None,
         },
         billing: match (
-            env_opt("ATHLETO_BILLING_URL"),
-            env_opt("ATHLETO_BILLING_TENANT_ID").and_then(|id| id.parse().ok()),
+            secret.get("ATHLETO_BILLING_URL"),
+            secret.get("ATHLETO_BILLING_TENANT_ID").and_then(|id| id.parse().ok()),
         ) {
             (Some(url), Some(tenant_id)) => Some(billing::BillingConfig {
                 url: url.trim_end_matches('/').to_string(),
-                api_key: env_opt("ATHLETO_BILLING_API_KEY"),
+                api_key: secret.get("ATHLETO_BILLING_API_KEY"),
                 tenant_id,
             }),
             _ => None,
@@ -253,19 +259,13 @@ async fn main() -> anyhow::Result<()> {
     if config.supabase().is_none() {
         tracing::warn!("SUPABASE_URL / SUPABASE_ANON_KEY not set; auth routes will show a 'not configured' notice");
     }
-    if config.allowed_hosts.is_none() {
-        tracing::warn!(
-            "ALLOWED_HOSTS not set; trusting any inbound Host header (fine for dev, set it in production)"
-        );
-    }
 
-    let pool = env_opt("DATABASE_URL").and_then(|url| db::build_pool(&url));
+    let pool = secret.get("DATABASE_URL").and_then(|url| db::build_pool(&url));
     match &pool {
         Some(pool) => {
             // Run migrations in the background so startup (and /healthz) never
-            // blocks on database availability. `sqlx::migrate!` runs on the
-            // sqlx pool underneath the SeaORM connection.
-            let migrate_pool = pool.get_postgres_connection_pool().clone();
+            // blocks on database availability.
+            let migrate_pool = pool.clone();
             tokio::spawn(async move {
                 match sqlx::migrate!().run(&migrate_pool).await {
                     Ok(()) => tracing::info!("database migrations applied"),
@@ -342,7 +342,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-<<<<<<< HEAD
     let orm = pool
         .clone()
         .map(sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool);
@@ -352,9 +351,6 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         config,
     });
-=======
-    let state: SharedState = Arc::new(AppState::new(pool, reqwest::Client::new(), config));
->>>>>>> origin/main
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;

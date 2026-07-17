@@ -8,7 +8,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 use crate::auth::{AuthUser, Biz, MaybeUser};
 use crate::db::{self, Product};
-use crate::{assets, security, SharedState};
+use crate::SharedState;
 
 /// Reads the three most recent successful-login emails from IndexedDB and
 /// renders them as tap-to-fill chips on the login form.
@@ -88,11 +88,8 @@ pub const CALLBACK_JS: &str = r#"
     if(status) status.textContent='No sign-in tokens found. Open the link from your email again, or request a new one.';
     return;
   }
-  // The CSRF cookie is intentionally readable here: forwarding the tokens to
-  // POST /auth/session requires the same double-submit proof as every form.
-  var csrf=(document.cookie.match(/(?:^|; )athleto_csrf=([^;]+)/)||[])[1]||'';
   var f=document.createElement('form'); f.method='POST'; f.action='/auth/session';
-  [['access_token',access],['refresh_token',refresh],['csrf_token',csrf]].forEach(function(pair){
+  [['access_token',access],['refresh_token',refresh]].forEach(function(pair){
     var i=document.createElement('input'); i.type='hidden'; i.name=pair[0]; i.value=pair[1];
     f.appendChild(i);
   });
@@ -103,26 +100,19 @@ pub const CALLBACK_JS: &str = r#"
 "#;
 
 /// Cart-hold countdown: ticks locally every second and re-syncs against
-/// GET /cart/hold at random 25-55s intervals (lease-poll semantics). When the
-/// /ws socket replaces #hold-banner out-of-band, the fresh data-seconds is
-/// adopted (elements are re-queried per render, so swapped nodes stay live).
+/// GET /cart/hold at random 25-55s intervals (lease-poll semantics).
 pub const CART_HOLD_JS: &str = r#"
 (function(){
-  var first=document.getElementById('hold-banner'); if(!first) return;
-  var secs=parseInt(first.getAttribute('data-seconds')||'0',10);
+  var el=document.getElementById('hold-banner'); if(!el) return;
+  var left=document.getElementById('hold-left');
+  var secs=parseInt(el.getAttribute('data-seconds')||'0',10);
   function fmt(s){ var m=Math.floor(s/60); return m+'m '+(s%60)+'s'; }
   function render(){
-    var el=document.getElementById('hold-banner'); if(!el) return;
-    var left=document.getElementById('hold-left');
     if(secs>0){ if(left) left.textContent=fmt(secs); el.classList.remove('expired'); }
     else { el.classList.add('expired'); if(left) left.textContent='expired - items may go back on sale'; }
   }
   render();
   setInterval(function(){ if(secs>0){ secs-=1; render(); } },1000);
-  document.body.addEventListener('htmx:oobAfterSwap', function(){
-    var el=document.getElementById('hold-banner');
-    if(el){ secs=parseInt(el.getAttribute('data-seconds')||'0',10); render(); }
-  });
   function schedule(){ setTimeout(poll, 25000+Math.floor(Math.random()*30000)); }
   function poll(){
     fetch('/cart/hold',{credentials:'same-origin'})
@@ -876,10 +866,6 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
 /// Layout variant that knows which storefront host served the request:
 /// biz.athleto.store gets the business chrome.
 pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Markup) -> Markup {
-    let nonce = security::csp_nonce();
-    // Stamped on <body> so htmx attaches the CSRF token to every request it
-    // makes (buttons with hx-post have no form field to carry it).
-    let csrf_headers = format!("{{\"x-csrf-token\":\"{}\"}}", security::csrf_token());
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -889,11 +875,10 @@ pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Marku
                 meta name="theme-color" content="#f8fbff";
                 meta name="referrer" content="no-referrer";
                 title { (title) }
-                style nonce=(nonce) { (PreEscaped(APP_CSS)) }
-                script defer="defer" src=(assets::HTMX_JS_PATH) {}
-                script defer="defer" src=(assets::HTMX_WS_JS_PATH) {}
+                style { (PreEscaped(APP_CSS)) }
+                script defer="defer" src="https://unpkg.com/htmx.org@2.0.4" {}
             }
-            body hx-headers=(csrf_headers) {
+            body {
                 header .site-header {
                     a .brand-lockup href="/" {
                         span .brand-mark { "AO" }
@@ -911,7 +896,6 @@ pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Marku
                                 a href="/account" { "Account" }
                                 span .nav-user { (user.email.as_deref().unwrap_or("signed in")) }
                                 form method="post" action="/logout" {
-                                    (csrf_field())
                                     button type="submit" { "Log out" }
                                 }
                             }
@@ -928,14 +912,6 @@ pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Marku
                 }
             }
         }
-    }
-}
-
-/// Hidden CSRF input for server-rendered POST forms; pairs with the
-/// double-submit cookie checked by `security::apply`.
-pub fn csrf_field() -> Markup {
-    html! {
-        input type="hidden" name=(security::CSRF_FORM_FIELD) value=(security::csrf_token());
     }
 }
 
@@ -1004,7 +980,6 @@ fn product_card(product: &Product) -> Markup {
             div .card-buy {
                 span .price { (format_price(product.price_cents.into())) }
                 form hx-post="/cart/items" hx-target="find .card-status" hx-swap="innerHTML" action="/cart/items" method="post" {
-                    (csrf_field())
                     input type="hidden" name="product_id" value=(product.id);
                     input type="hidden" name="qty" value="1";
                     button .buy type="submit" { "Add to cart" }
