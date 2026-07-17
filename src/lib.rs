@@ -85,6 +85,9 @@ pub struct AppState {
     pub config: Config,
     /// Per-IP / per-email throttle for the magic-link login endpoint.
     pub login_limiter: security::RateLimiter,
+    /// Per-IP throttle for `POST /cart/items`, which reserves stock holds and
+    /// is reachable anonymously; keeps a script from mass-reserving inventory.
+    pub cart_limiter: security::RateLimiter,
     /// Cart mutations broadcast the affected cart id; /ws connections push a
     /// fresh hold-countdown fragment to their owner.
     pub cart_events: tokio::sync::broadcast::Sender<uuid::Uuid>,
