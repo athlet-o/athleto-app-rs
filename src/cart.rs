@@ -467,4 +467,17 @@ mod tests {
         let expired = hold_banner(0).into_string();
         assert!(expired.contains("hold-banner expired"));
     }
+
+    #[test]
+    fn clamp_line_qty_bounds_hold_quantity() {
+        assert_eq!(clamp_line_qty(1), 1);
+        assert_eq!(clamp_line_qty(24), 24);
+        assert_eq!(clamp_line_qty(MAX_QTY_PER_LINE), MAX_QTY_PER_LINE);
+        // Zero/negative fold up to 1; a stock-DoS-sized request folds down to
+        // the ceiling so one add can never reserve a whole product's inventory.
+        assert_eq!(clamp_line_qty(0), 1);
+        assert_eq!(clamp_line_qty(-5), 1);
+        assert_eq!(clamp_line_qty(1_000_000), MAX_QTY_PER_LINE);
+        assert_eq!(clamp_line_qty(i32::MAX), MAX_QTY_PER_LINE);
+    }
 }
