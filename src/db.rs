@@ -418,13 +418,21 @@ impl OrderKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Deserialize,
+    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
+)]
 #[sqlx(type_name = "order_frequency", rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "order_frequency")]
 #[serde(rename_all = "lowercase")]
 pub enum OrderFrequency {
+    #[sea_orm(string_value = "weekly")]
     Weekly,
+    #[sea_orm(string_value = "biweekly")]
     Biweekly,
+    #[sea_orm(string_value = "monthly")]
     Monthly,
+    #[sea_orm(string_value = "quarterly")]
     Quarterly,
 }
 
