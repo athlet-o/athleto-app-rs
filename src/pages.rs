@@ -912,20 +912,40 @@ fn product_card(product: &Product) -> Markup {
     }
 }
 
-/// GET / -- storefront product grid.
-pub async fn home(State(state): State<SharedState>, user: MaybeUser) -> Markup {
+/// GET / -- storefront product grid (business chrome on biz.athleto.store).
+pub async fn home(State(state): State<SharedState>, user: MaybeUser, biz: Biz) -> Markup {
     let products = load_catalog(&state).await;
-    layout(
-        "AthletO | performance gelatin protein",
+    layout_for(
+        if biz.0 {
+            "AthletO Business | wholesale performance gelatin"
+        } else {
+            "AthletO | performance gelatin protein"
+        },
         user.as_ref(),
+        biz,
         html! {
             section .hero {
-                p .eyebrow { "Performance gelatin protein" }
-                h1 { "Wobble hard. " em { "Recover clean." } }
-                p .lede {
-                    "Gelatin protein cups and powder packets built for training bags, "
-                    "bus rides, and post-lift cooldowns. Protein, fiber, vitamin C, and "
-                    "electrolytes -- no sugar rush."
+                @if biz.0 {
+                    p .eyebrow { "Wholesale & retail partners" }
+                    h1 { "Stock the wobble. " em { "By the case." } }
+                    p .lede {
+                        "Case-packed gelatin protein for retailers, clubs, and distributors: "
+                        "purchase orders, recurring replenishment, and an ERP-ready API. "
+                        "Business accounts sign in with a magic link and two-factor auth."
+                    }
+                    p {
+                        a .button href="/quick-order" { "Quick order by the case" }
+                        " "
+                        a .button .ghost href="/account" { "Business account & API keys" }
+                    }
+                } @else {
+                    p .eyebrow { "Performance gelatin protein" }
+                    h1 { "Wobble hard. " em { "Recover clean." } }
+                    p .lede {
+                        "Gelatin protein cups and powder packets built for training bags, "
+                        "bus rides, and post-lift cooldowns. Protein, fiber, vitamin C, and "
+                        "electrolytes -- no sugar rush."
+                    }
                 }
             }
             section .section {
