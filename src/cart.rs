@@ -303,6 +303,26 @@ pub async fn add_item(
         return Ok(cart_not_configured(&user, biz).into_response());
     };
 
+    // This endpoint reserves stock holds and is reachable anonymously, so an
+    // unthrottled script could mass-reserve inventory (hold everything
+    // "sold out" for HOLD_MINUTES). Throttle per client IP; the window is
+    // generous enough that real add-to-cart bursts are unaffected.
+    let ip = security::client_ip(&headers);
+    if !state
+        .cart_limiter
+        .check(&format!("cart:{ip}"), 40, std::time::Duration::from_secs(60))
+    {
+        let message = "Too many cart updates -- slow down for a moment and try again.";
+        if is_htmx(&headers) {
+            return Ok((
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                html! { span .added { (message) } },
+            )
+                .into_response());
+        }
+        return Ok((axum::http::StatusCode::TOO_MANY_REQUESTS, Redirect::to("/cart")).into_response());
+    }
+
     // Reuse the existing owner (user id or anon cookie), or mint a new
     // anonymous cart cookie on first add.
     let (owner, jar) = match cart_owner(&user, &jar) {
