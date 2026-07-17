@@ -226,7 +226,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             2,
             "athlet-o-starter-powder",
-            "Athlet-O Starter",
+            "starter",
             "Lime-citrus protein wobble for daily training. 20g gelatin protein, inulin fiber, vitamin C, and electrolytes -- just add water and chill.",
             ProductFormat::Powder,
             80,
