@@ -593,16 +593,26 @@ impl PaymentProvider {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type,
+    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
+)]
 #[sqlx(type_name = "payment_status", rename_all = "lowercase")]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_status")]
 pub enum PaymentStatus {
+    #[sea_orm(string_value = "pending")]
     Pending,
     /// Payment initiated but not settled (e.g. ACH debit clearing).
+    #[sea_orm(string_value = "processing")]
     Processing,
+    #[sea_orm(string_value = "paid")]
     Paid,
     /// Net-30 invoice sent; AR is open in the ledger.
+    #[sea_orm(string_value = "invoiced")]
     Invoiced,
+    #[sea_orm(string_value = "failed")]
     Failed,
+    #[sea_orm(string_value = "refunded")]
     Refunded,
 }
 
