@@ -113,6 +113,7 @@ pub async fn checkout(
     State(state): State<SharedState>,
     user: MaybeUser,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Form(request): Form<CheckoutRequest>,
 ) -> Result<Response, AppError> {
     let (auth_user, profile) = match auth::require_full(&state, &user).await {
