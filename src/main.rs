@@ -169,6 +169,10 @@ async fn main() -> anyhow::Result<()> {
         public_base_url: env_opt("ATHLETO_PUBLIC_BASE_URL")
             .unwrap_or_else(|| "https://app.athleto.store".to_string()),
         sms_mfa_enabled: env_opt("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
+        fiducia_url: env_opt("FIDUCIA_URL"),
+        fiducia_api_key: env_opt("FIDUCIA_API_KEY"),
+        // HOSTNAME is the pod name under Kubernetes; unique per replica.
+        replica_id: env_opt("HOSTNAME").unwrap_or_else(|| "local".to_string()),
     };
     if config.supabase().is_none() {
         tracing::warn!("SUPABASE_URL / SUPABASE_ANON_KEY not set; auth routes will show a 'not configured' notice");
