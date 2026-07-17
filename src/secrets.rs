@@ -12,14 +12,28 @@
 //! failure degrades to "not configured" exactly like a missing env var —
 //! fiducia being down must never stop the app from booting.
 //!
-//! Scope note (see docs/secrets-management.md): the fiducia KV is replicated
-//! but not yet an encrypted secrets vault — production secrets-of-record stay
-//! in AWS Secrets Manager (`dd/remote-dev/agent-secrets` -> ESO -> env, which
-//! wins by precedence). This overlay is the client-side seam that a future
-//! `/v1/secrets/*` (envelope-encrypted) fiducia API can slot into without the
-//! app changing again.
+//! **Confidentiality (see docs/secrets-management.md).** A 2026-07 security
+//! audit confirmed the fiducia KV stores values in *cleartext* on every
+//! node's disk (Raft log + snapshots) and over the plain-HTTP peer network —
+//! it is not an encrypted vault. So this overlay never trusts the KV with a
+//! usable plaintext secret: values are **client-side envelope-encrypted**
+//! (AES-256-GCM, `v1:` prefix) and decrypted here with a key
+//! (`ATHLETO_SECRETS_KEY`) that lives *outside* fiducia (AWS Secrets Manager
+//! / secrets.env). A KV-disk or peer-network compromise therefore yields only
+//! opaque ciphertext. Without that key the overlay is disabled (env-only), so
+//! we can never accidentally read a plaintext secret out of the KV. AWS
+//! Secrets Manager remains production secrets-of-record; this is a
+//! cross-provider bootstrap convenience, not a replacement.
+//!
+//! When a real encrypted `/v1/secrets/*` fiducia API ships, the seam is
+//! `FiduciaClient::kv_get` + `decrypt_envelope` — swap those two, nothing
+//! else changes.
 
 use std::collections::HashMap;
+
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
+use base64::Engine;
 
 use crate::coordinate::FiduciaClient;
 
