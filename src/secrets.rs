@@ -211,6 +211,40 @@ mod tests {
     }
 
     #[test]
+    fn envelope_seals_and_unwraps_round_trip() {
+        let key = [7u8; 32];
+        let sealed = seal_envelope(&key, "sk_test_secret_value").expect("seal");
+        assert!(sealed.starts_with("v1:"));
+        // The ciphertext must not leak the plaintext.
+        assert!(!sealed.contains("sk_test_secret_value"));
+        assert_eq!(
+            decrypt_envelope(&key, &sealed).as_deref(),
+            Some("sk_test_secret_value")
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_wrong_key_tamper_and_plaintext() {
+        let key = [7u8; 32];
+        let other = [9u8; 32];
+        let sealed = seal_envelope(&key, "top-secret").unwrap();
+        // Wrong key: GCM auth fails → None (treated as absent, not accepted).
+        assert!(decrypt_envelope(&other, &sealed).is_none());
+        // Plaintext value (no v1: envelope) is never accepted as a secret.
+        assert!(decrypt_envelope(&key, "sk_live_plaintext").is_none());
+        // Tampered ciphertext fails the GCM tag.
+        let mut tampered = sealed.clone();
+        tampered.push('A');
+        assert!(decrypt_envelope(&key, &tampered).is_none());
+        // Too-short blob (no room for nonce+tag) is rejected.
+        let short = format!(
+            "v1:{}",
+            base64::engine::general_purpose::STANDARD.encode([0u8; 8])
+        );
+        assert!(decrypt_envelope(&key, &short).is_none());
+    }
+
+    #[test]
     fn managed_keys_cover_every_payment_and_billing_var() {
         for name in [
             "ATHLETO_STRIPE_SECRET_KEY",
