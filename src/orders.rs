@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::auth::{self, Biz, MaybeUser};
 use crate::db::{self, CartOwner, CustomerProfile, OrderFrequency, OrderKind};
-use crate::{pages, AppError, SharedState};
+use crate::{pages, payments, AppError, SharedState};
 
 fn parse_kind(kind: &str) -> OrderKind {
     match kind {
