@@ -950,7 +950,7 @@ pub async fn paypal_webhook(
                 let sale_id = resource["id"].as_str().unwrap_or_default();
                 let amount = resource["amount"]["total"]
                     .as_str()
-                    .and_then(|value| value.replace('.', "").parse::<i64>().ok())
+                    .and_then(decimal_to_cents)
                     .unwrap_or_default();
                 if let Some(subscription) = resource["billing_agreement_id"].as_str() {
                     record_subscription_cycle(&state, &orm, PaymentProvider::Paypal, subscription, sale_id, amount)
