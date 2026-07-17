@@ -110,15 +110,16 @@ struct Posting<'a> {
     amount_cents: i64,
 }
 
-async fn post_transaction(
-    state: &SharedState,
-    cfg: &BillingConfig,
+/// The ledger's `DraftTransaction` wire shape, built pure so it can be
+/// tested: every transaction must balance (debits == credits) per currency —
+/// the ledger enforces it with a deferred trigger, we assert it in tests.
+fn transaction_body(
     kind: &str,
     idempotency_key: &str,
     description: &str,
     source_event_id: &str,
     postings: &[Posting<'_>],
-) -> anyhow::Result<()> {
+) -> serde_json::Value {
     let postings: Vec<_> = postings
         .iter()
         .map(|posting| {
@@ -132,18 +133,36 @@ async fn post_transaction(
             })
         })
         .collect();
+    json!({
+        "kind": kind,
+        "idempotency_key": idempotency_key,
+        "description": description,
+        "postings": postings,
+    })
+}
+
+async fn post_transaction(
+    state: &SharedState,
+    cfg: &BillingConfig,
+    kind: &str,
+    idempotency_key: &str,
+    description: &str,
+    source_event_id: &str,
+    postings: &[Posting<'_>],
+) -> anyhow::Result<()> {
     let response = request(
         state,
         cfg,
         reqwest::Method::POST,
         &format!("/v1/tenants/{}/transactions", cfg.tenant_id),
     )
-    .json(&json!({
-        "kind": kind,
-        "idempotency_key": idempotency_key,
-        "description": description,
-        "postings": postings,
-    }))
+    .json(&transaction_body(
+        kind,
+        idempotency_key,
+        description,
+        source_event_id,
+        postings,
+    ))
     .send()
     .await?;
     if !response.status().is_success() {
