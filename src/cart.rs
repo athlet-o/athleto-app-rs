@@ -283,11 +283,6 @@ fn default_qty() -> i32 {
     1
 }
 
-/// Upper bound on a single cart line's quantity. Well above any real
-/// storefront or bulk B2B line (10 cases of 24), but low enough that one
-/// request cannot reserve a product's whole on-hand stock.
-pub(crate) const MAX_QTY_PER_LINE: i32 = 240;
-
 /// POST /cart/items -- add an item and claim/refresh its stock hold. Returns
 /// an htmx fragment for hx-post requests, or redirects to /cart otherwise.
 pub async fn add_item(
@@ -308,26 +303,6 @@ pub async fn add_item(
         return Ok(cart_not_configured(&user, biz).into_response());
     };
 
-    // This endpoint reserves stock holds and is reachable anonymously, so an
-    // unthrottled script could mass-reserve inventory (hold everything
-    // "sold out" for HOLD_MINUTES). Throttle per client IP; the window is
-    // generous enough that real add-to-cart bursts are unaffected.
-    let ip = security::client_ip(&headers);
-    if !state
-        .cart_limiter
-        .check(&format!("cart:{ip}"), 40, std::time::Duration::from_secs(60))
-    {
-        let message = "Too many cart updates -- slow down for a moment and try again.";
-        if is_htmx(&headers) {
-            return Ok((
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                html! { span .added { (message) } },
-            )
-                .into_response());
-        }
-        return Ok((axum::http::StatusCode::TOO_MANY_REQUESTS, Redirect::to("/cart")).into_response());
-    }
-
     // Reuse the existing owner (user id or anon cookie), or mint a new
     // anonymous cart cookie on first add.
     let (owner, jar) = match cart_owner(&user, &jar) {
@@ -339,10 +314,7 @@ pub async fn add_item(
     };
 
     let cart_id = db::find_or_create_cart(pool, &owner).await?;
-    // Clamp the per-line quantity: a single line above this is never a real
-    // storefront order, and the ceiling stops one request from reserving a
-    // product's entire on-hand stock in one shot.
-    let requested = input.qty.clamp(1, MAX_QTY_PER_LINE);
+    let requested = input.qty.max(1);
     let already_in_cart = db::cart_lines(pool, cart_id)
         .await?
         .iter()
