@@ -739,7 +739,7 @@ pub async fn login_2fa_send(
     ) {
         return two_fa_form(
             user,
-            biz,
+            Biz(false),
             false,
             Some(html! { div .notice .error {
                 "Too many code requests. Wait a few minutes and try again."
