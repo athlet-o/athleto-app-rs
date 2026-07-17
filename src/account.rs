@@ -825,4 +825,96 @@ mod tests {
         assert_eq!(urlencoding_light("PO#1&2"), "PO%231%262");
         assert_eq!(urlencoding_light("plain.Text_1-2"), "plain.Text_1-2");
     }
+
+    use crate::auth::{AuthUser, Factor, MaybeUser};
+    use crate::{AppState, Config, SharedState};
+    use axum::extract::State;
+    use axum::http::{header, StatusCode};
+    use std::sync::Arc;
+
+    fn state() -> SharedState {
+        Arc::new(AppState::new(None, reqwest::Client::new(), Config::default()))
+    }
+
+    fn aal1_user_with_verified_totp() -> AuthUser {
+        AuthUser {
+            id: uuid::Uuid::nil(),
+            email: Some("victim@club.example".into()),
+            aal: "aal1".into(),
+            factors: vec![Factor {
+                id: "existing".into(),
+                factor_type: "totp".into(),
+                status: "verified".into(),
+                friendly_name: None,
+            }],
+            access_token: "t".into(),
+        }
+    }
+
+    fn location(response: &axum::response::Response) -> &str {
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+    }
+
+    // Regression test for the 2FA step-up bypass: a session that already has a
+    // verified factor but is still AAL1 (post-magic-link, pre-2FA) must not be
+    // able to enroll or verify a *new* factor. The guard returns before any
+    // GoTrue call, so this is exercisable in degraded mode.
+    #[tokio::test]
+    async fn factor_enroll_and_verify_reject_a_pre_2fa_session() {
+        let user = MaybeUser(Some(aal1_user_with_verified_totp()));
+
+        let enroll = totp_enroll(State(state()), user.clone(), Biz(false)).await;
+        assert_eq!(enroll.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&enroll), "/login/2fa");
+
+        let verify = totp_verify(
+            State(state()),
+            user.clone(),
+            Biz(false),
+            axum_extra::extract::cookie::CookieJar::new(),
+            axum::extract::Form(TotpVerifyRequest {
+                factor_id: "attacker".into(),
+                code: "000000".into(),
+                qr: String::new(),
+                secret: String::new(),
+            }),
+        )
+        .await;
+        assert_eq!(verify.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&verify), "/login/2fa");
+
+        let phone = phone_enroll(
+            State(state()),
+            user,
+            axum::extract::Form(PhoneEnrollRequest {
+                phone: "+15550000000".into(),
+            }),
+        )
+        .await;
+        assert_eq!(phone.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&phone), "/login/2fa");
+    }
+
+    // A first-time enroller (no verified factor yet) must still be allowed
+    // through the guard -- otherwise nobody could ever turn 2FA on.
+    #[tokio::test]
+    async fn first_time_enroll_is_not_blocked_by_the_step_up_guard() {
+        let fresh = MaybeUser(Some(AuthUser {
+            id: uuid::Uuid::nil(),
+            email: Some("new@club.example".into()),
+            aal: "aal1".into(),
+            factors: vec![],
+            access_token: "t".into(),
+        }));
+        // No Supabase configured, so enrollment fails downstream and redirects
+        // to /account with an error -- crucially NOT to /login/2fa, proving the
+        // step-up guard did not fire for a factorless session.
+        let enroll = totp_enroll(State(state()), fresh, Biz(false)).await;
+        assert_eq!(enroll.status(), StatusCode::SEE_OTHER);
+        assert_ne!(location(&enroll), "/login/2fa");
+    }
 }
