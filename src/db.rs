@@ -474,6 +474,16 @@ impl OrderStatus {
             Self::Cancelled => "cancelled",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "placed" => Some(Self::Placed),
+            "processing" => Some(Self::Processing),
+            "fulfilled" => Some(Self::Fulfilled),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
