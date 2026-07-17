@@ -958,7 +958,7 @@ mod tests {
         assert!(rendered.contains("ACH bank debit"));
         assert!(rendered.contains("Net 30"));
         assert!(rendered.contains("name=\"pay_method\""));
-        // Freight-only shipping for B2B: no ship_method选择 selector.
+        // Freight-only shipping for B2B: no ship_method selector.
         assert!(!rendered.contains("name=\"ship_method\""));
 
         // B2C with the same config: card only, ship-method picker present.
