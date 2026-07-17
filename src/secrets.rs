@@ -72,6 +72,48 @@ fn env_opt(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The 32-byte AES-256 key that unwraps KV envelopes, base64 in
+/// `ATHLETO_SECRETS_KEY`. Sourced from env only (AWS SM / secrets.env) — the
+/// root of trust must never live in fiducia, since fiducia is what we're
+/// protecting the values from.
+fn secrets_key() -> Option<[u8; 32]> {
+    let raw = env_opt("ATHLETO_SECRETS_KEY")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw.as_bytes())
+        .ok()?;
+    bytes.try_into().ok()
+}
+
+/// Wrap plaintext into a `v1:` envelope: `v1:` + base64(nonce[12] ‖ ciphertext
+/// ‖ tag), AES-256-GCM. Used to publish values into the fiducia KV (and by
+/// tests); operators call an equivalent to seed `secrets/athleto/*`.
+pub fn seal_envelope(key: &[u8; 32], plaintext: &str) -> Option<String> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher.encrypt(&nonce, plaintext.as_bytes()).ok()?;
+    let mut blob = nonce.to_vec();
+    blob.extend_from_slice(&ciphertext);
+    Some(format!("v1:{}", base64::engine::general_purpose::STANDARD.encode(blob)))
+}
+
+/// Unwrap a `v1:` envelope. Returns `None` on any format/auth failure — an
+/// unparseable, unauthenticated, or plaintext value is treated as *absent*,
+/// never accepted as a secret. This is what stops a plaintext (or tampered)
+/// KV value from ever reaching the app as config.
+fn decrypt_envelope(key: &[u8; 32], value: &str) -> Option<String> {
+    let b64 = value.strip_prefix("v1:")?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .ok()?;
+    if raw.len() < 12 + 16 {
+        return None; // need at least a nonce and a GCM tag
+    }
+    let (nonce, ciphertext) = raw.split_at(12);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let plaintext = cipher.decrypt(Nonce::from_slice(nonce), ciphertext).ok()?;
+    String::from_utf8(plaintext).ok()
+}
+
 /// Env-first configuration lookup with an optional fiducia-KV overlay behind
 /// it. Built once at boot; `get` is then cheap and deterministic.
 pub struct SecretSource {
@@ -89,29 +131,48 @@ impl SecretSource {
         Self { overlay }
     }
 
-    /// Fetch every managed key that the environment does NOT already set from
-    /// the fiducia config KV. Failures are logged and skipped.
+    /// Fetch every managed key the environment does NOT set from the fiducia
+    /// KV, decrypting each `v1:` envelope with `ATHLETO_SECRETS_KEY`. Disabled
+    /// (env-only) when that key is absent, because the KV holds ciphertext we
+    /// couldn't read — and must never hold usable plaintext. All failures
+    /// degrade to "unset".
     pub async fn load(client: Option<&FiduciaClient>) -> Self {
         let mut overlay = HashMap::new();
         let Some(client) = client else {
+            return Self { overlay };
+        };
+        let Some(key) = secrets_key() else {
+            tracing::warn!(
+                "fiducia KV secret overlay disabled: ATHLETO_SECRETS_KEY is unset. The fiducia \
+                 KV stores values in cleartext, so secrets must be envelope-encrypted and this \
+                 app refuses to read plaintext from it; using environment only. See \
+                 docs/secrets-management.md"
+            );
             return Self { overlay };
         };
         for name in MANAGED_KEYS {
             if env_opt(name).is_some() {
                 continue; // env wins; don't even ask
             }
-            if let Some(value) = client.kv_get(&kv_key(name)).await {
-                let value = value.trim().to_string();
-                if !value.is_empty() {
-                    overlay.insert((*name).to_string(), value);
+            let Some(value) = client.kv_get(&kv_key(name)).await else {
+                continue;
+            };
+            match decrypt_envelope(&key, value.trim()) {
+                Some(plaintext) if !plaintext.is_empty() => {
+                    overlay.insert((*name).to_string(), plaintext);
                 }
+                _ => tracing::warn!(
+                    key = *name,
+                    "fiducia KV value is not a decryptable v1 envelope; ignoring (plaintext \
+                     values are never accepted as secrets)"
+                ),
             }
         }
         if !overlay.is_empty() {
             // Names only — never values.
             let mut names: Vec<&str> = overlay.keys().map(String::as_str).collect();
             names.sort_unstable();
-            tracing::info!(keys = ?names, "config filled from fiducia KV overlay");
+            tracing::info!(keys = ?names, "config filled from fiducia KV overlay (decrypted)");
         }
         Self { overlay }
     }
