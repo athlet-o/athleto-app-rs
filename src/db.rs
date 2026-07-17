@@ -540,6 +540,80 @@ impl ShipMethod {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "payment_provider", rename_all = "lowercase")]
+pub enum PaymentProvider {
+    Stripe,
+    Paypal,
+    Square,
+    /// B2B open account: ships against a PO, settled via a hosted Net-30
+    /// Stripe invoice (card / ACH / bank transfer).
+    Invoice,
+}
+
+impl PaymentProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stripe => "stripe",
+            Self::Paypal => "paypal",
+            Self::Square => "square",
+            Self::Invoice => "invoice",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stripe => "Card / bank (Stripe)",
+            Self::Paypal => "PayPal",
+            Self::Square => "Square",
+            Self::Invoice => "Invoice (Net 30)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "payment_status", rename_all = "lowercase")]
+pub enum PaymentStatus {
+    Pending,
+    /// Payment initiated but not settled (e.g. ACH debit clearing).
+    Processing,
+    Paid,
+    /// Net-30 invoice sent; AR is open in the ledger.
+    Invoiced,
+    Failed,
+    Refunded,
+}
+
+impl PaymentStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "payment pending",
+            Self::Processing => "payment processing",
+            Self::Paid => "paid",
+            Self::Invoiced => "invoiced net 30",
+            Self::Failed => "payment failed",
+            Self::Refunded => "refunded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "payment_kind", rename_all = "snake_case")]
+pub enum PaymentKind {
+    Charge,
+    SubscriptionCycle,
+    Refund,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "subscription_status", rename_all = "snake_case")]
+pub enum SubscriptionStatus {
+    Pending,
+    Active,
+    PastDue,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct OrderRow {
     pub id: Uuid,
@@ -555,10 +629,15 @@ pub struct OrderRow {
     pub total_cents: i64,
     pub next_run_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub payment_provider: Option<PaymentProvider>,
+    pub payment_status: PaymentStatus,
+    pub payment_ref: Option<String>,
+    pub paid_at: Option<DateTime<Utc>>,
 }
 
 const ORDER_COLUMNS: &str = "id, kind, frequency, status, channel, ship_method, po_number, \
-     subtotal_cents, shipping_cents, tax_cents, total_cents, next_run_at, created_at";
+     subtotal_cents, shipping_cents, tax_cents, total_cents, next_run_at, created_at, \
+     payment_provider, payment_status, payment_ref, paid_at";
 
 impl OrderRow {
     /// Estimated delivery window (earliest, latest) as calendar dates,
