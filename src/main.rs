@@ -319,8 +319,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let orm = pool
+        .clone()
+        .map(sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool);
     let state: SharedState = Arc::new(AppState {
         pool,
+        orm,
         http: reqwest::Client::new(),
         config,
     });
