@@ -117,7 +117,33 @@ pub enum StartOutcome {
 // Small shared helpers.
 
 fn dollars(cents: i64) -> String {
-    format!("{}.{:02}", cents / 100, cents % 100)
+    let sign = if cents < 0 { "-" } else { "" };
+    let cents = cents.abs();
+    format!("{sign}{}.{:02}", cents / 100, cents % 100)
+}
+
+/// Parse a provider decimal-string amount ("12.34", "5", "12.3") into cents.
+/// Refuses sub-cent precision outright — better to drop an amount (callers
+/// fall back to the order total) than to book a wrong one.
+fn decimal_to_cents(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (negative, value) = match value.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, value),
+    };
+    let (whole, frac) = match value.split_once('.') {
+        Some((whole, frac)) => (whole, frac),
+        None => (value, ""),
+    };
+    let whole: i64 = if whole.is_empty() { 0 } else { whole.parse().ok()? };
+    let frac: i64 = match frac.len() {
+        0 => 0,
+        1 => frac.parse::<i64>().ok()? * 10,
+        2 => frac.parse().ok()?,
+        _ => return None,
+    };
+    let cents = whole.checked_mul(100)?.checked_add(frac)?;
+    Some(if negative { -cents } else { cents })
 }
 
 /// Stripe `price_data[recurring]` mapping.
