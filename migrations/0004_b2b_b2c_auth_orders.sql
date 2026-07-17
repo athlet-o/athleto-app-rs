@@ -83,6 +83,33 @@ CREATE TABLE b2b_api_keys (
 CREATE INDEX b2b_api_keys_user_idx ON b2b_api_keys (user_id);
 
 -- ---------------------------------------------------------------------------
+-- Inventory + 90-minute cart holds. A hold is business data, not a lock: a
+-- row with an expiry, claimed under a milliseconds-long row lock on the
+-- inventory row. Availability = on_hand - SUM(active holds); expiry is lazy
+-- (queries ignore stale rows) and the in-process sweeper is hygiene only.
+CREATE TABLE inventory (
+    product_id BIGINT PRIMARY KEY REFERENCES products (id) ON DELETE CASCADE,
+    on_hand INT NOT NULL DEFAULT 0 CHECK (on_hand >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO inventory (product_id, on_hand)
+SELECT id, 500 FROM products
+ON CONFLICT (product_id) DO NOTHING;
+
+CREATE TABLE stock_holds (
+    id BIGSERIAL PRIMARY KEY,
+    cart_id UUID NOT NULL REFERENCES carts (id) ON DELETE CASCADE,
+    product_id BIGINT NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+    qty INT NOT NULL CHECK (qty > 0),
+    held_until TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (cart_id, product_id)
+);
+
+CREATE INDEX stock_holds_active_idx ON stock_holds (product_id, held_until);
+
+-- ---------------------------------------------------------------------------
 -- Item master: retail trade-item hierarchy. Each sellable product has one row
 -- per packaging level (each -> case -> pallet); GTINs stay NULL until a GS1
 -- company prefix is licensed. `ti`/`hi` (cases per layer / layers per pallet)
