@@ -131,6 +131,7 @@ pub struct CartPageParams {
 }
 
 fn cart_page_markup(
+    config: &crate::Config,
     user: &MaybeUser,
     biz: Biz,
     profile: Option<&CustomerProfile>,
