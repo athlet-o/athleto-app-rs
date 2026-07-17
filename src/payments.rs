@@ -582,14 +582,19 @@ pub async fn stripe_webhook(
     let Some(cfg) = &state.config.stripe else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    if let Some(secret) = &cfg.webhook_secret {
-        let header = headers
-            .get("stripe-signature")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        if !stripe_signature_valid(secret, header, &body) {
-            return StatusCode::BAD_REQUEST.into_response();
-        }
+    // Fail closed: an unverifiable webhook can mark orders paid, so no
+    // signing secret means no webhook processing (return-URL verification
+    // still settles payments in the meantime).
+    let Some(secret) = &cfg.webhook_secret else {
+        tracing::warn!("stripe webhook received but ATHLETO_STRIPE_WEBHOOK_SECRET is unset; rejecting");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let header = headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !stripe_signature_valid(secret, header, &body, now_unix()) {
+        return StatusCode::BAD_REQUEST.into_response();
     }
     let Some(orm) = state.orm.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
