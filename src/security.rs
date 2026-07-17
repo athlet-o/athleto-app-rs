@@ -148,7 +148,14 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
                 let (parts, body) = request.into_parts();
                 let bytes = match axum::body::to_bytes(body, MAX_FORM_BYTES).await {
                     Ok(bytes) => bytes,
-                    Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+                    Err(_) => {
+                        return finish(
+                            StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+                            &token,
+                            is_new_token,
+                            Some((nonce, hsts)),
+                        )
+                    }
                 };
                 let provided = std::str::from_utf8(&bytes)
                     .ok()
