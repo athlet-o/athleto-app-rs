@@ -42,6 +42,69 @@ pub struct CheckoutRequest {
     po_number: String,
     #[serde(default)]
     ship_method: String,
+    #[serde(default)]
+    pay_method: String,
+}
+
+/// The payment methods this deployment can actually offer, per cohort. B2B
+/// additionally gets ACH inside the Stripe option and Net-30 invoicing
+/// (which rides Stripe hosted invoices, hence the stripe-config gate).
+fn payment_method_options(
+    config: &crate::Config,
+    is_b2b: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut options = Vec::new();
+    if config.stripe.is_some() {
+        options.push((
+            "stripe",
+            if is_b2b { "Card or ACH bank debit (Stripe)" } else { "Card (Stripe)" },
+        ));
+    }
+    if config.paypal.is_some() {
+        options.push(("paypal", "PayPal"));
+    }
+    if config.square.is_some() {
+        options.push(("square", "Square"));
+    }
+    if is_b2b && config.stripe.is_some() {
+        options.push(("invoice", "Invoice my account \u{2014} Net 30 (PO)"));
+    }
+    options
+}
+
+/// Kick off the chosen payment for a just-placed (or retried) order and say
+/// where to send the browser.
+async fn dispatch_payment(
+    state: &SharedState,
+    headers: &axum::http::HeaderMap,
+    auth_user: &crate::auth::AuthUser,
+    order_id: Uuid,
+    method: payments::PayMethod,
+    is_b2b: bool,
+    po_number: Option<&str>,
+) -> Redirect {
+    let base = auth::request_base(headers, state);
+    match payments::start_payment(
+        state,
+        &base,
+        auth_user.id,
+        auth_user.email.as_deref(),
+        order_id,
+        method,
+        is_b2b,
+        po_number,
+    )
+    .await
+    {
+        Ok(payments::StartOutcome::Redirect(url)) => Redirect::to(&url),
+        Ok(payments::StartOutcome::Invoiced) => Redirect::to("/orders?invoiced=1"),
+        Ok(payments::StartOutcome::NotConfigured) => Redirect::to("/orders?placed=1"),
+        Err(err) => {
+            tracing::error!(error = %err, %order_id, "payment start failed");
+            // The order is placed; /orders offers a Pay-now retry.
+            Redirect::to("/orders?payerror=1")
+        }
+    }
 }
 
 /// POST /checkout -- turn the cart into an order (stock + holds resolved in

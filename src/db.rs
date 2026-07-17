@@ -1687,3 +1687,64 @@ pub async fn latest_email_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result
     .fetch_optional(pool)
     .await
 }
+
+#[cfg(test)]
+mod order_fulfillment_tests {
+    use super::*;
+
+    #[test]
+    fn business_days_skip_weekends() {
+        // Fri 2026-07-17 + 1 business day = Mon 2026-07-20 (skips Sat/Sun).
+        let fri = chrono::NaiveDate::from_ymd_opt(2026, 7, 17).unwrap();
+        assert_eq!(
+            add_business_days(fri, 1),
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap()
+        );
+        // + 5 business days = next Fri.
+        assert_eq!(
+            add_business_days(fri, 5),
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 24).unwrap()
+        );
+    }
+
+    #[test]
+    fn ship_method_windows_and_shipping_are_ordered() {
+        assert_eq!(ShipMethod::Standard.shipping_cents(), 599);
+        assert_eq!(ShipMethod::Freight.shipping_cents(), 0);
+        assert_eq!(ShipMethod::Expedited.eta_business_days(), (1, 2));
+        assert_eq!(ShipMethod::Standard.eta_business_days(), (3, 5));
+        assert_eq!(ShipMethod::parse("expedited"), Some(ShipMethod::Expedited));
+        assert_eq!(ShipMethod::parse("nonsense"), None);
+    }
+
+    fn shipment(carrier: &str, number: &str) -> Shipment {
+        Shipment {
+            id: Uuid::nil(),
+            status: ShipmentStatus::Shipped,
+            carrier: Some(carrier.into()),
+            tracking_number: Some(number.into()),
+            ship_date: None,
+            eta_earliest: None,
+            eta_latest: None,
+            delivered_at: None,
+        }
+    }
+
+    #[test]
+    fn tracking_url_matches_major_carriers_only() {
+        assert!(shipment("UPS", "1Z999")
+            .tracking_url()
+            .unwrap()
+            .contains("ups.com/track?tracknum=1Z999"));
+        assert!(shipment("FedEx", "7712")
+            .tracking_url()
+            .unwrap()
+            .contains("fedex.com"));
+        // Unknown carrier -> no deep link (UI falls back to plain text).
+        assert!(shipment("Regional Freight Co", "ABC").tracking_url().is_none());
+        // No number -> no link.
+        let mut s = shipment("UPS", "x");
+        s.tracking_number = None;
+        assert!(s.tracking_url().is_none());
+    }
+}
