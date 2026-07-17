@@ -284,13 +284,17 @@ impl RateLimiter {
     }
 }
 
-/// Best-effort client address for throttling: first hop of x-forwarded-for
-/// (the ingress sets it), else a shared bucket.
+/// Best-effort client address for throttling: the **last** (right-most) hop of
+/// x-forwarded-for. Only the trusted proxy directly in front of us (the
+/// ingress) can control the value it appends; a client can forge additional
+/// left-most hops, so taking the first entry would let an attacker mint a fresh
+/// throttle bucket per request. With a single trusted proxy the right-most
+/// entry is the real client address.
 pub fn client_ip(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.split(',').next_back())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "local".to_string())
