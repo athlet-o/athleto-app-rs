@@ -30,6 +30,10 @@ pub struct Product {
     pub id: i64,
     pub slug: String,
     pub name: String,
+    /// Line sub-name rendered under the AthletO wordmark
+    /// ("starter" / "recover" / "pre-game"). Nullable in the database until
+    /// the rebrand migration has run, hence the Option.
+    pub subname: Option<String>,
     pub description: String,
     pub format: ProductFormat,
     pub calories: i32,
