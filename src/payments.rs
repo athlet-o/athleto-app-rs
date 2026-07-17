@@ -97,6 +97,8 @@ pub enum PaymentError {
     Http(#[from] reqwest::Error),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+    #[error(transparent)]
+    Orm(#[from] sea_orm::DbErr),
 }
 
 /// What `start_payment` decided; the checkout handler turns this into a
