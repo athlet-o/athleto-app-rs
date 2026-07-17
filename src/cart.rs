@@ -283,6 +283,11 @@ fn default_qty() -> i32 {
     1
 }
 
+/// Upper bound on a single cart line's quantity. Well above any real
+/// storefront or bulk B2B line (10 cases of 24), but low enough that one
+/// request cannot reserve a product's whole on-hand stock.
+const MAX_QTY_PER_LINE: i32 = 240;
+
 /// POST /cart/items -- add an item and claim/refresh its stock hold. Returns
 /// an htmx fragment for hx-post requests, or redirects to /cart otherwise.
 pub async fn add_item(
