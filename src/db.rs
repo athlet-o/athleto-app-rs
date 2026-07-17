@@ -480,6 +480,64 @@ impl OrderChannel {
             Self::Edi => "edi",
         }
     }
+
+    pub fn is_b2b(self) -> bool {
+        !matches!(self, Self::D2cWeb)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "ship_method", rename_all = "lowercase")]
+pub enum ShipMethod {
+    Standard,
+    Expedited,
+    Freight,
+}
+
+impl ShipMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Expedited => "expedited",
+            Self::Freight => "freight",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard shipping",
+            Self::Expedited => "Expedited shipping",
+            Self::Freight => "Freight (LTL)",
+        }
+    }
+
+    /// Flat shipping charged at checkout, in cents. Freight is billed on the
+    /// business account after weigh/routing, so it books at 0 here.
+    pub fn shipping_cents(self) -> i64 {
+        match self {
+            Self::Standard => 599,
+            Self::Expedited => 1499,
+            Self::Freight => 0,
+        }
+    }
+
+    /// Estimated delivery window in business days (min, max) from order date.
+    pub fn eta_business_days(self) -> (i64, i64) {
+        match self {
+            Self::Standard => (3, 5),
+            Self::Expedited => (1, 2),
+            Self::Freight => (5, 10),
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "standard" => Some(Self::Standard),
+            "expedited" => Some(Self::Expedited),
+            "freight" => Some(Self::Freight),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -489,10 +547,44 @@ pub struct OrderRow {
     pub frequency: Option<OrderFrequency>,
     pub status: OrderStatus,
     pub channel: OrderChannel,
+    pub ship_method: ShipMethod,
     pub po_number: Option<String>,
+    pub subtotal_cents: i64,
+    pub shipping_cents: i64,
+    pub tax_cents: i64,
     pub total_cents: i64,
     pub next_run_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+const ORDER_COLUMNS: &str = "id, kind, frequency, status, channel, ship_method, po_number, \
+     subtotal_cents, shipping_cents, tax_cents, total_cents, next_run_at, created_at";
+
+impl OrderRow {
+    /// Estimated delivery window (earliest, latest) as calendar dates,
+    /// counting business days forward from the order date.
+    pub fn delivery_window(&self) -> (chrono::NaiveDate, chrono::NaiveDate) {
+        let (min, max) = self.ship_method.eta_business_days();
+        let start = self.created_at.date_naive();
+        (add_business_days(start, min), add_business_days(start, max))
+    }
+
+    pub fn short_id(&self) -> String {
+        self.id.simple().to_string()[..8].to_uppercase()
+    }
+}
+
+/// Add `n` business days (skipping Sat/Sun) to a date.
+pub fn add_business_days(mut date: chrono::NaiveDate, n: i64) -> chrono::NaiveDate {
+    use chrono::Datelike;
+    let mut added = 0;
+    while added < n {
+        date += chrono::Duration::days(1);
+        if !matches!(date.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
+            added += 1;
+        }
+    }
+    date
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
