@@ -1293,7 +1293,7 @@ async fn settle_order(
 /// invoice+payment postings for the cycle into the ledger.
 async fn record_subscription_cycle(
     state: &SharedState,
-    pool: &sqlx::PgPool,
+    orm: &sea_orm::DatabaseConnection,
     provider: PaymentProvider,
     subscription_ref: &str,
     payment_ref: &str,
