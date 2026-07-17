@@ -629,20 +629,35 @@ impl PaymentStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type,
+    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
+)]
 #[sqlx(type_name = "payment_kind", rename_all = "snake_case")]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_kind")]
 pub enum PaymentKind {
+    #[sea_orm(string_value = "charge")]
     Charge,
+    #[sea_orm(string_value = "subscription_cycle")]
     SubscriptionCycle,
+    #[sea_orm(string_value = "refund")]
     Refund,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, sqlx::Type,
+    sea_orm::EnumIter, sea_orm::DeriveActiveEnum,
+)]
 #[sqlx(type_name = "subscription_status", rename_all = "snake_case")]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "subscription_status")]
 pub enum SubscriptionStatus {
+    #[sea_orm(string_value = "pending")]
     Pending,
+    #[sea_orm(string_value = "active")]
     Active,
+    #[sea_orm(string_value = "past_due")]
     PastDue,
+    #[sea_orm(string_value = "cancelled")]
     Cancelled,
 }
 
