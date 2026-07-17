@@ -85,8 +85,10 @@ fn secrets_key() -> Option<[u8; 32]> {
 }
 
 /// Wrap plaintext into a `v1:` envelope: `v1:` + base64(nonce[12] ‖ ciphertext
-/// ‖ tag), AES-256-GCM. Used to publish values into the fiducia KV (and by
-/// tests); operators call an equivalent to seed `secrets/athleto/*`.
+/// ‖ tag), AES-256-GCM. The seal side of the overlay: operators (or a future
+/// `athleto secrets put` subcommand) call this to produce the ciphertext they
+/// PUT into `secrets/athleto/*`. Exercised by the round-trip tests.
+#[allow(dead_code)] // publish-side helper / tooling seam; consumed by tests + ops
 pub fn seal_envelope(key: &[u8; 32], plaintext: &str) -> Option<String> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
