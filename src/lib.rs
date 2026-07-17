@@ -197,7 +197,10 @@ pub fn router(state: SharedState) -> Router {
         // Innermost first: bound request bodies and total handler time. These
         // sit *inside* the security layer so their 413/408 responses still flow
         // back through `security::apply` and pick up the security headers.
-        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         // CSRF enforcement + security headers on every route (incl. the 404
         // fallback); /api/v1 is CSRF-exempt inside the middleware.
