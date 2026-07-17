@@ -160,7 +160,22 @@ fn router(state: SharedState) -> Router {
         .route("/orders", get(orders::orders_page))
         .route("/orders/{id}", get(orders::order_detail_page))
         .route("/orders/{id}/reorder", post(orders::reorder))
+        .route("/orders/{id}/pay", post(orders::pay_now))
         .route("/quick-order", get(orders::quick_order_page).post(orders::quick_order_submit))
+        // Payments: hosted-checkout returns + signed provider webhooks. The
+        // webhook routes get a tight body cap (provider events are small; an
+        // oversized body is either a bug or an attempt to exhaust memory)
+        // applied as its own merged sub-router.
+        .route("/pay/success", get(payments::pay_success))
+        .route("/pay/cancel", get(payments::pay_cancel))
+        .merge(
+            Router::new()
+                .route("/webhooks/stripe", post(payments::stripe_webhook))
+                .route("/webhooks/paypal", post(payments::paypal_webhook))
+                .route("/webhooks/square", post(payments::square_webhook))
+                .layer(tower_http::limit::RequestBodyLimitLayer::new(WEBHOOK_BODY_LIMIT))
+                .with_state(state.clone()),
+        )
         // B2B ERP API.
         .route("/api/v1/products", get(api::products))
         .route("/api/v1/orders", get(api::orders_list).post(api::orders_create))
