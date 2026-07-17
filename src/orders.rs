@@ -85,6 +85,12 @@ pub async fn checkout(
     } else {
         db::OrderChannel::D2cWeb
     };
+    // B2B ships freight (billed on account); B2C picks standard/expedited.
+    let ship_method = if is_b2b {
+        db::ShipMethod::Freight
+    } else {
+        db::ShipMethod::parse(&request.ship_method).unwrap_or(db::ShipMethod::Standard)
+    };
 
     let order_lines: Vec<db::NewOrderLine> = lines
         .iter()
@@ -101,6 +107,7 @@ pub async fn checkout(
         kind,
         frequency,
         channel,
+        ship_method,
         po_number,
         &order_lines,
         Some(cart_id),
