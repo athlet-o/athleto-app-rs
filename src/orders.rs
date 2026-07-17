@@ -638,8 +638,20 @@ pub fn checkout_form(profile: Option<&CustomerProfile>, has_2fa: bool) -> Markup
             }
             @if is_b2b {
                 label {
+                    "Shipping"
+                    select disabled { option selected { "Freight (LTL) \u{2014} billed on account" } }
+                }
+                label {
                     "PO number " span .muted-inline { "(optional)" }
                     input type="text" name="po_number" maxlength="60" placeholder="PO-2026-0417";
+                }
+            } @else {
+                label {
+                    "Shipping"
+                    select name="ship_method" {
+                        option value="standard" selected { "Standard \u{2014} $5.99 (3\u{2013}5 business days)" }
+                        option value="expedited" { "Expedited \u{2014} $14.99 (1\u{2013}2 business days)" }
+                    }
                 }
             }
             button .primary type="submit" { "Place order" }
