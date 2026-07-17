@@ -178,6 +178,7 @@ pub async fn checkout(
     )
     .await
     {
+<<<<<<< HEAD
         Ok(order_id) => {
             let redirect = match payments::PayMethod::parse(request.pay_method.trim()) {
                 Some(method) => {
@@ -189,6 +190,12 @@ pub async fn checkout(
                 None => Redirect::to("/orders?placed=1"),
             };
             Ok((jar, redirect).into_response())
+=======
+        Ok(_) => {
+            // Holds were consumed with the order; refresh any /ws listeners.
+            let _ = state.cart_events.send(cart_id);
+            Ok((jar, Redirect::to("/orders?placed=1")).into_response())
+>>>>>>> origin/main
         }
         Err(db::OrderError::Insufficient(shortages)) => {
             let names: HashMap<i64, String> = lines
@@ -620,6 +627,7 @@ pub async fn quick_order_page(
                     "powders 24. Prefer machines? Use the " a href="/account#api-keys" { "ERP API" } "."
                 }
                 form method="post" action="/quick-order" {
+                    (pages::csrf_field())
                     table .cart-table {
                         thead {
                             tr { th { "Product" } th { "Format" } th { "Unit price" } th { "Quantity (units)" } }
@@ -690,6 +698,7 @@ pub async fn quick_order_submit(
             tracing::warn!(error = %err, "hold claim failed during quick order");
         }
     }
+    let _ = state.cart_events.send(cart_id);
     Ok(Redirect::to("/cart").into_response())
 }
 
@@ -712,6 +721,7 @@ pub fn checkout_form(
     }
     html! {
         form .checkout-form method="post" action="/checkout" {
+            (pages::csrf_field())
             h3 { "Place this order" }
             label {
                 "Order type"

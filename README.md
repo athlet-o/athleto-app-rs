@@ -7,13 +7,15 @@ deployment and Git history stay stable.
 The AthletO shop app serves performance gelatin protein cups. *Wobble hard.
 Recover clean.*
 
-A self-contained Rust web app on the "mash" stack:
+A self-contained Rust web app on the "MASH" stack:
 
 - **M**aud — server-rendered HTML (inline dark athletic theme, no asset pipeline)
-- **A**xum — HTTP server and routing
-- **S**QLx — runtime Postgres queries + embedded migrations (Supabase pooled Postgres)
-- Supabase — GoTrue email/password auth via its REST API
-- **H**TMX — add-to-cart / remove-from-cart fragment swaps
+- **A**xum — HTTP server and routing (plus a websocket endpoint pushing HTML fragments)
+- **S**eaORM — entity query builders over the Supabase pooled Postgres (raw SQL kept
+  for the transactional hold/checkout paths; SQLx remains underneath for the
+  embedded migrations)
+- Supabase — GoTrue passwordless (magic link + MFA) auth via its REST API
+- **H**TMX — add-to-cart / remove-from-cart fragment swaps (vendored, served same-origin)
 
 Products: **Athlet-O Starter** (20g gelatin protein, inulin fiber, vitamin C, electrolytes),
 **Recover-O**, and **Pre-Game-O** — each as a ready cup (just add water was already done for you)
@@ -27,6 +29,8 @@ and a powder packet (just add water).
 | `GET /product/{slug}` | Product detail |
 | `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase GoTrue auth; session tokens in HttpOnly Secure SameSite=Lax cookies |
 | `GET /cart`, `POST /cart/items`, `POST /cart/items/{id}/delete` | Cart pages + htmx fragments; keyed by Supabase user id or anonymous cart cookie |
+| `GET /ws` | Authenticated websocket pushing HTML fragments (htmx ws extension, `hx-swap-oob`): live cart-hold countdown; `GET /cart/hold` polling remains the fallback |
+| `GET /static/...` | Vendored htmx + ws extension, served same-origin with immutable caching |
 | `GET /healthz` | Liveness/readiness — always `ok`, no dependencies |
 
 ## Environment
@@ -38,6 +42,7 @@ and a powder packet (just add water).
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
+<<<<<<< HEAD
 | `ATHLETO_STRIPE_SECRET_KEY` | *(unset)* | Stripe API secret key (`sk_test_…` / `sk_live_…`); enables card checkout, B2B ACH debit, and Net-30 hosted invoices |
 | `ATHLETO_STRIPE_PUBLISHABLE_KEY` | *(unset)* | Stripe publishable key (`pk_…`); reserved for client-side elements — hosted checkout doesn't need it server-side |
 | `ATHLETO_STRIPE_WEBHOOK_SECRET` | *(unset)* | Stripe webhook signing secret (`whsec_…`) for `POST /webhooks/stripe` |
@@ -50,6 +55,9 @@ and a powder packet (just add water).
 | `ATHLETO_BILLING_URL` | *(unset)* | Quaestor billing-server base URL (observer AR/AP ledger) |
 | `ATHLETO_BILLING_API_KEY` | *(unset)* | Bearer token for the billing-server API |
 | `ATHLETO_BILLING_TENANT_ID` | *(unset)* | AthletO tenant UUID in the multi-tenant ledger |
+=======
+| `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
+>>>>>>> origin/main
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a
@@ -116,6 +124,7 @@ inserts the 3 products x 2 formats.
 To run them manually instead: `cargo install sqlx-cli --no-default-features --features rustls,postgres`
 then `sqlx migrate run`.
 
+<<<<<<< HEAD
 All queries are runtime `sqlx::query`/`query_as` calls (no compile-time `query!`
 macros), so the crate builds without a live `DATABASE_URL`. **New data access is
 written with SeaORM** (`src/entities.rs`, over the same pool via
@@ -152,6 +161,12 @@ collide with other projects). The shared schema contract lives in
 `~/codes/ores/k8s-cluster/remote/libs/pg-defs`, vendored into `k8s-cluster` as
 `remote/libs`); porting this app's commerce schema there is an agreed follow-up
 (currently blocked on Supabase `auth.uid()` RLS references).
+=======
+Application queries go through SeaORM (`src/entities/` + `src/db.rs`); the
+hold-claim and checkout transactions stay hand-written SQL executed via
+`sea_orm::Statement` to preserve their locking semantics. Everything runs at
+runtime against the pool, so the crate builds without a live `DATABASE_URL`.
+>>>>>>> origin/main
 
 ## Deploy
 

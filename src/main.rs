@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 mod account;
 mod api;
 mod auth;
@@ -10,10 +11,13 @@ mod orders;
 mod pages;
 mod payments;
 
+=======
+>>>>>>> origin/main
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+<<<<<<< HEAD
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -112,6 +116,9 @@ impl IntoResponse for AppError {
             .into_response()
     }
 }
+=======
+use athleto_app_rs::{db, router, AppState, Config, SharedState};
+>>>>>>> origin/main
 
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name)
@@ -120,6 +127,7 @@ fn env_opt(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+<<<<<<< HEAD
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -169,6 +177,8 @@ fn router(state: SharedState) -> Router {
         .with_state(state)
 }
 
+=======
+>>>>>>> origin/main
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -188,6 +198,13 @@ async fn main() -> anyhow::Result<()> {
         supabase_anon_key: env_opt("SUPABASE_ANON_KEY"),
         public_base_url: env_opt("ATHLETO_PUBLIC_BASE_URL")
             .unwrap_or_else(|| "https://app.athleto.store".to_string()),
+        allowed_hosts: env_opt("ALLOWED_HOSTS").map(|hosts| {
+            hosts
+                .split(',')
+                .map(|host| host.trim().to_string())
+                .filter(|host| !host.is_empty())
+                .collect()
+        }),
         sms_mfa_enabled: env_opt("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
         fiducia_url: env_opt("FIDUCIA_URL"),
         fiducia_api_key: env_opt("FIDUCIA_API_KEY"),
@@ -236,13 +253,19 @@ async fn main() -> anyhow::Result<()> {
     if config.supabase().is_none() {
         tracing::warn!("SUPABASE_URL / SUPABASE_ANON_KEY not set; auth routes will show a 'not configured' notice");
     }
+    if config.allowed_hosts.is_none() {
+        tracing::warn!(
+            "ALLOWED_HOSTS not set; trusting any inbound Host header (fine for dev, set it in production)"
+        );
+    }
 
     let pool = env_opt("DATABASE_URL").and_then(|url| db::build_pool(&url));
     match &pool {
         Some(pool) => {
             // Run migrations in the background so startup (and /healthz) never
-            // blocks on database availability.
-            let migrate_pool = pool.clone();
+            // blocks on database availability. `sqlx::migrate!` runs on the
+            // sqlx pool underneath the SeaORM connection.
+            let migrate_pool = pool.get_postgres_connection_pool().clone();
             tokio::spawn(async move {
                 match sqlx::migrate!().run(&migrate_pool).await {
                     Ok(()) => tracing::info!("database migrations applied"),
@@ -319,6 +342,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+<<<<<<< HEAD
     let orm = pool
         .clone()
         .map(sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool);
@@ -328,6 +352,9 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         config,
     });
+=======
+    let state: SharedState = Arc::new(AppState::new(pool, reqwest::Client::new(), config));
+>>>>>>> origin/main
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;

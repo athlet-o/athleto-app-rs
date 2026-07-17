@@ -27,7 +27,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::db::{self, CustomerProfile};
-use crate::{pages, SharedState};
+use crate::{pages, security, SharedState};
 
 pub const ACCESS_COOKIE: &str = "sb_access_token";
 pub const REFRESH_COOKIE: &str = "sb_refresh_token";
@@ -165,20 +165,26 @@ impl FromRequestParts<SharedState> for MaybeUser {
 }
 
 /// Host-aware flag: true when the request came in on the B2B storefront host
-/// (biz.athleto.store or a `biz.` prefix in general).
+/// (biz.athleto.store or a `biz.` prefix in general). Hosts outside the
+/// ALLOWED_HOSTS allowlist never get the biz chrome.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Biz(pub bool);
 
-impl<S: Send + Sync> FromRequestParts<S> for Biz {
+impl FromRequestParts<SharedState> for Biz {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &SharedState,
+    ) -> Result<Self, Self::Rejection> {
         let host = parts
             .headers
             .get(HOST)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
-        Ok(Self(host.starts_with("biz.")))
+        Ok(Self(
+            host.starts_with("biz.") && state.config.host_allowed(host),
+        ))
     }
 }
 
@@ -219,14 +225,21 @@ async fn gotrue_error_message(response: reqwest::Response) -> String {
 }
 
 /// Scheme + host to build same-site redirect URLs from, derived from the Host
+<<<<<<< HEAD
 /// header so app./biz./localhost all round-trip to themselves. Also used by
 /// checkout to build payment success/cancel return URLs on the same host.
 pub fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
+=======
+/// header so app./biz./localhost all round-trip to themselves. Hosts outside
+/// the ALLOWED_HOSTS allowlist fall back to the configured public base so a
+/// spoofed Host header cannot steer auth redirects off-site.
+fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
+>>>>>>> origin/main
     let host = headers
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if host.is_empty() {
+    if host.is_empty() || !state.config.host_allowed(host) {
         return state.config.public_base_url.clone();
     }
     let scheme = if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
@@ -285,6 +298,7 @@ fn login_form(biz: Biz, notice: Option<Markup>) -> Markup {
                     @if let Some(notice) = notice { (notice) }
                     div #past-logins .past-logins {}
                     form method="post" action="/login" {
+                        (pages::csrf_field())
                         label {
                             "Email"
                             input #login-email type="email" name="email" required
@@ -300,7 +314,7 @@ fn login_form(biz: Biz, notice: Option<Markup>) -> Markup {
                         }
                     }
                 }
-                script { (PreEscaped(pages::LOGIN_CHIPS_JS)) }
+                script nonce=(security::csp_nonce()) { (PreEscaped(pages::LOGIN_CHIPS_JS)) }
             }
         },
     )
@@ -318,12 +332,40 @@ pub async fn login_submit(
     headers: HeaderMap,
     Form(request): Form<LoginRequest>,
 ) -> Response {
+    let email = request.email.trim().to_lowercase();
+
+    // Throttle before anything touches GoTrue: each accepted submit sends an
+    // email (and `create_user: true` mints an account for unknown addresses),
+    // so this endpoint must not be free to hammer.
+    let ip = security::client_ip(&headers);
+    let ip_ok = state
+        .login_limiter
+        .check(&format!("ip:{ip}"), 5, std::time::Duration::from_secs(60));
+    let email_ok = state.login_limiter.check(
+        &format!("email:{email}"),
+        3,
+        std::time::Duration::from_secs(5 * 60),
+    );
+    if !ip_ok || !email_ok {
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            login_form(
+                biz,
+                Some(html! { div .notice .error {
+                    "Too many sign-in attempts. Wait a few minutes and try again."
+                } }),
+            ),
+        )
+            .into_response();
+    }
+
     let Some((base, key)) = state.config.supabase() else {
         return not_configured_page(&MaybeUser(None), "Sign in | AthletO", "Sign in")
             .into_response();
     };
 
-    let email = request.email.trim().to_lowercase();
+    // `create_user: true` stays: magic-link login doubling as signup is the
+    // product's only signup path, so removing it would strand new users.
     let redirect_to = format!("{}/auth/callback", request_base(&headers, &state));
     let response = state
         .http
@@ -398,7 +440,7 @@ pub async fn auth_callback(biz: Biz) -> Markup {
                         }
                     }
                 }
-                script { (PreEscaped(pages::CALLBACK_JS)) }
+                script nonce=(security::csp_nonce()) { (PreEscaped(pages::CALLBACK_JS)) }
             }
         },
     )
@@ -579,7 +621,7 @@ pub async fn remembered_page(biz: Biz) -> Markup {
                     h2 { "You're in" }
                     p .auth-lede { "Taking you to the store..." }
                 }
-                script { (PreEscaped(pages::REMEMBER_JS)) }
+                script nonce=(security::csp_nonce()) { (PreEscaped(pages::REMEMBER_JS)) }
             }
         },
     )
@@ -635,6 +677,7 @@ fn two_fa_form(user: &AuthUser, biz: Biz, sms_sent: bool, notice: Option<Markup>
                     }
                     @for factor in &totp {
                         form method="post" action="/login/2fa" {
+                            (pages::csrf_field())
                             input type="hidden" name="factor_id" value=(factor.id);
                             label {
                                 "Authenticator app code"
@@ -648,11 +691,13 @@ fn two_fa_form(user: &AuthUser, biz: Biz, sms_sent: bool, notice: Option<Markup>
                     @for factor in &phone {
                         div .factor-alt {
                             form method="post" action="/login/2fa/send" {
+                                (pages::csrf_field())
                                 input type="hidden" name="factor_id" value=(factor.id);
                                 button type="submit" { "Text a code to my phone" }
                             }
                             @if sms_sent {
                                 form method="post" action="/login/2fa" {
+                                    (pages::csrf_field())
                                     input type="hidden" name="factor_id" value=(factor.id);
                                     label {
                                         "SMS code"
@@ -666,6 +711,7 @@ fn two_fa_form(user: &AuthUser, biz: Biz, sms_sent: bool, notice: Option<Markup>
                         }
                     }
                     form method="post" action="/logout" {
+                        (pages::csrf_field())
                         button .linklike type="submit" { "Cancel and sign out" }
                     }
                 }
