@@ -67,6 +67,7 @@ impl CartOwner {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct CartLine {
     pub item_id: i64,
+    pub product_id: i64,
     pub name: String,
     pub subname: Option<String>,
     pub format: ProductFormat,
