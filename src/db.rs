@@ -1407,52 +1407,64 @@ pub async fn place_order(
 // ---------------------------------------------------------------------------
 // Payments: provider handles on orders, settled payments, provider-billed
 // subscriptions, and the webhook idempotency ledger (see 0006_payments.sql).
+// All of this goes through SeaORM (`crate::entities`) — the data-access
+// convention for new code; the sqlx queries above are legacy to be ported.
+
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::NotSet, ActiveValue::Set, ColumnTrait, DatabaseConnection,
+    DbErr, EntityTrait, QueryFilter, QueryOrder, TryInsertResult,
+};
+
+use crate::entities::{order, payment, payment_event, payment_subscription};
+
+fn now_tz() -> chrono::DateTime<chrono::FixedOffset> {
+    Utc::now().fixed_offset()
+}
 
 /// Attach the provider checkout handle to an order right after the hosted
 /// session / approval link / invoice is created.
 pub async fn set_order_payment(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     order_id: Uuid,
     provider: PaymentProvider,
     payment_ref: &str,
     status: PaymentStatus,
-) -> sqlx::Result<()> {
-    sqlx::query(
-        "UPDATE orders SET payment_provider = $2, payment_ref = $3, payment_status = $4 \
-         WHERE id = $1",
-    )
-    .bind(order_id)
-    .bind(provider)
-    .bind(payment_ref)
-    .bind(status)
-    .execute(pool)
-    .await?;
+) -> Result<(), DbErr> {
+    let Some(row) = order::Entity::find_by_id(order_id).one(db).await? else {
+        return Ok(());
+    };
+    let mut active: order::ActiveModel = row.into();
+    active.payment_provider = Set(Some(provider));
+    active.payment_ref = Set(Some(payment_ref.to_string()));
+    active.payment_status = Set(status);
+    active.update(db).await?;
     Ok(())
 }
 
 /// Advance an order's payment status. `paid_at` is stamped once, on the
 /// first transition into `Paid`.
 pub async fn set_order_payment_status(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     order_id: Uuid,
     status: PaymentStatus,
-) -> sqlx::Result<()> {
-    sqlx::query(
-        "UPDATE orders SET payment_status = $2, \
-         paid_at = CASE WHEN $2 = 'paid'::payment_status THEN COALESCE(paid_at, now()) \
-                        ELSE paid_at END \
-         WHERE id = $1",
-    )
-    .bind(order_id)
-    .bind(status)
-    .execute(pool)
-    .await?;
+) -> Result<(), DbErr> {
+    let Some(row) = order::Entity::find_by_id(order_id).one(db).await? else {
+        return Ok(());
+    };
+    let stamp_paid = status == PaymentStatus::Paid && row.paid_at.is_none();
+    let mut active: order::ActiveModel = row.into();
+    active.payment_status = Set(status);
+    if stamp_paid {
+        active.paid_at = Set(Some(now_tz()));
+    }
+    active.update(db).await?;
     Ok(())
 }
 
 /// Minimal order facts for webhook / return-URL handlers, which act on
 /// behalf of the provider rather than a logged-in user.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct OrderPaymentFacts {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -1464,26 +1476,53 @@ pub struct OrderPaymentFacts {
     pub payment_ref: Option<String>,
 }
 
+impl From<order::Model> for OrderPaymentFacts {
+    fn from(row: order::Model) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+            total_cents: row.total_cents,
+            kind: row.kind,
+            frequency: row.frequency,
+            payment_provider: row.payment_provider,
+            payment_status: row.payment_status,
+            payment_ref: row.payment_ref,
+        }
+    }
+}
+
 pub async fn order_payment_facts(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     order_id: Uuid,
-) -> sqlx::Result<Option<OrderPaymentFacts>> {
-    sqlx::query_as(
-        "SELECT id, user_id, total_cents, kind, frequency, payment_provider, payment_status, \
-                payment_ref \
-         FROM orders WHERE id = $1",
-    )
-    .bind(order_id)
-    .fetch_optional(pool)
-    .await
+) -> Result<Option<OrderPaymentFacts>, DbErr> {
+    Ok(order::Entity::find_by_id(order_id)
+        .one(db)
+        .await?
+        .map(OrderPaymentFacts::from))
+}
+
+/// Find the shop order a provider-side reference points at (e.g. Square's
+/// checkout order id stored at link creation).
+pub async fn find_order_by_payment_ref(
+    db: &DatabaseConnection,
+    provider: PaymentProvider,
+    payment_ref: &str,
+) -> Result<Option<Uuid>, DbErr> {
+    Ok(order::Entity::find()
+        .filter(order::Column::PaymentProvider.eq(provider))
+        .filter(order::Column::PaymentRef.eq(payment_ref))
+        .one(db)
+        .await?
+        .map(|row| row.id))
 }
 
 /// Record a settled (or failed/refunded) money movement. Returns `true` when
 /// the row is new; a repeat of the same (provider, provider_ref) only
 /// refreshes the status, so callers can skip double-posting to the ledger.
+/// (Cross-process races are already serialized by `payment_events` dedup.)
 #[allow(clippy::too_many_arguments)]
 pub async fn record_payment(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     order_id: Option<Uuid>,
     user_id: Uuid,
     provider: PaymentProvider,
@@ -1491,86 +1530,150 @@ pub async fn record_payment(
     provider_ref: &str,
     amount_cents: i64,
     status: PaymentStatus,
-) -> sqlx::Result<bool> {
-    let (inserted,): (bool,) = sqlx::query_as(
-        "INSERT INTO payments (order_id, user_id, provider, kind, provider_ref, amount_cents, status) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
-         ON CONFLICT (provider, provider_ref) \
-         DO UPDATE SET status = EXCLUDED.status, updated_at = now() \
-         RETURNING (xmax = 0)",
-    )
-    .bind(order_id)
-    .bind(user_id)
-    .bind(provider)
-    .bind(kind)
-    .bind(provider_ref)
-    .bind(amount_cents)
-    .bind(status)
-    .fetch_one(pool)
-    .await?;
-    Ok(inserted)
+) -> Result<bool, DbErr> {
+    let existing = payment::Entity::find()
+        .filter(payment::Column::Provider.eq(provider))
+        .filter(payment::Column::ProviderRef.eq(provider_ref))
+        .one(db)
+        .await?;
+    match existing {
+        Some(row) => {
+            let mut active: payment::ActiveModel = row.into();
+            active.status = Set(status);
+            active.updated_at = Set(now_tz());
+            active.update(db).await?;
+            Ok(false)
+        }
+        None => {
+            payment::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                order_id: Set(order_id),
+                user_id: Set(user_id),
+                provider: Set(provider),
+                kind: Set(kind),
+                provider_ref: Set(provider_ref.to_string()),
+                amount_cents: Set(amount_cents),
+                currency: Set("USD".to_string()),
+                status: Set(status),
+                created_at: NotSet,
+                updated_at: NotSet,
+            }
+            .insert(db)
+            .await?;
+            Ok(true)
+        }
+    }
 }
 
 pub async fn upsert_subscription(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     user_id: Uuid,
     order_id: Option<Uuid>,
     provider: PaymentProvider,
     provider_ref: &str,
     status: SubscriptionStatus,
     frequency: OrderFrequency,
-) -> sqlx::Result<()> {
-    sqlx::query(
-        "INSERT INTO payment_subscriptions (user_id, order_id, provider, provider_ref, status, frequency) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         ON CONFLICT (provider, provider_ref) \
-         DO UPDATE SET status = EXCLUDED.status, updated_at = now()",
-    )
-    .bind(user_id)
-    .bind(order_id)
-    .bind(provider)
-    .bind(provider_ref)
-    .bind(status)
-    .bind(frequency)
-    .execute(pool)
-    .await?;
+) -> Result<(), DbErr> {
+    let existing = payment_subscription::Entity::find()
+        .filter(payment_subscription::Column::Provider.eq(provider))
+        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
+        .one(db)
+        .await?;
+    match existing {
+        Some(row) => {
+            let mut active: payment_subscription::ActiveModel = row.into();
+            active.status = Set(status);
+            active.updated_at = Set(now_tz());
+            active.update(db).await?;
+        }
+        None => {
+            payment_subscription::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                user_id: Set(user_id),
+                order_id: Set(order_id),
+                provider: Set(provider),
+                provider_ref: Set(provider_ref.to_string()),
+                status: Set(status),
+                frequency: Set(frequency),
+                created_at: NotSet,
+                updated_at: NotSet,
+            }
+            .insert(db)
+            .await?;
+        }
+    }
     Ok(())
 }
 
 pub async fn set_subscription_status(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     provider: PaymentProvider,
     provider_ref: &str,
     status: SubscriptionStatus,
-) -> sqlx::Result<()> {
-    sqlx::query(
-        "UPDATE payment_subscriptions SET status = $3, updated_at = now() \
-         WHERE provider = $1 AND provider_ref = $2",
-    )
-    .bind(provider)
-    .bind(provider_ref)
-    .bind(status)
-    .execute(pool)
-    .await?;
+) -> Result<(), DbErr> {
+    let existing = payment_subscription::Entity::find()
+        .filter(payment_subscription::Column::Provider.eq(provider))
+        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
+        .one(db)
+        .await?;
+    if let Some(row) = existing {
+        let mut active: payment_subscription::ActiveModel = row.into();
+        active.status = Set(status);
+        active.updated_at = Set(now_tz());
+        active.update(db).await?;
+    }
     Ok(())
+}
+
+/// Who owns a provider-billed subscription (for crediting cycle payments).
+pub async fn subscription_owner(
+    db: &DatabaseConnection,
+    provider: PaymentProvider,
+    provider_ref: &str,
+) -> Result<Option<(Uuid, Option<Uuid>)>, DbErr> {
+    Ok(payment_subscription::Entity::find()
+        .filter(payment_subscription::Column::Provider.eq(provider))
+        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
+        .one(db)
+        .await?
+        .map(|row| (row.user_id, row.order_id)))
 }
 
 /// Webhook idempotency: returns `true` the first time an event id is seen.
 /// Handlers bail out on `false` so provider retries can't double-apply.
 pub async fn record_payment_event(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     provider: PaymentProvider,
     event_id: &str,
     payload: &serde_json::Value,
-) -> sqlx::Result<bool> {
-    let result = sqlx::query(
-        "INSERT INTO payment_events (provider, event_id, payload) VALUES ($1, $2, $3) \
-         ON CONFLICT DO NOTHING",
+) -> Result<bool, DbErr> {
+    let outcome = payment_event::Entity::insert(payment_event::ActiveModel {
+        provider: Set(provider),
+        event_id: Set(event_id.to_string()),
+        payload: Set(payload.clone()),
+        received_at: NotSet,
+    })
+    .on_conflict(
+        OnConflict::columns([
+            payment_event::Column::Provider,
+            payment_event::Column::EventId,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .bind(provider)
-    .bind(event_id)
-    .bind(payload)
-    .execute(pool)
+    .do_nothing()
+    .exec(db)
     .await?;
-    Ok(result.rows_affected() == 1)
+    Ok(matches!(outcome, TryInsertResult::Inserted(_)))
+}
+
+/// Most recent login email for a user — the observer ledger identifies
+/// customers by email. (login_events is a legacy sqlx table.)
+pub async fn latest_email_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT email FROM login_events WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
 }
