@@ -6,9 +6,124 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
-use crate::auth::{AuthUser, MaybeUser};
+use crate::auth::{AuthUser, Biz, MaybeUser};
 use crate::db::{self, Product};
 use crate::SharedState;
+
+/// Reads the three most recent successful-login emails from IndexedDB and
+/// renders them as tap-to-fill chips on the login form.
+pub const LOGIN_CHIPS_JS: &str = r#"
+(function(){
+  function open(cb){ try{ var r=indexedDB.open('athleto-auth',1);
+    r.onupgradeneeded=function(){ r.result.createObjectStore('past_logins',{keyPath:'email'}); };
+    r.onsuccess=function(){ cb(r.result); }; r.onerror=function(){};
+  }catch(e){} }
+  open(function(db){
+    try{
+      var req=db.transaction('past_logins','readonly').objectStore('past_logins').getAll();
+      req.onsuccess=function(){
+        var rows=(req.result||[]).sort(function(a,b){return (b.at||0)-(a.at||0)}).slice(0,3);
+        if(!rows.length) return;
+        var box=document.getElementById('past-logins'); if(!box) return;
+        var label=document.createElement('div'); label.className='chips-label';
+        label.textContent='Welcome back - pick an email:';
+        box.appendChild(label);
+        rows.forEach(function(row){
+          var b=document.createElement('button'); b.type='button'; b.className='chip';
+          b.textContent=row.email;
+          b.onclick=function(){ var i=document.getElementById('login-email');
+            if(i){ i.value=row.email; i.focus(); } };
+          box.appendChild(b);
+        });
+      };
+    }catch(e){}
+  });
+})();
+"#;
+
+/// Interstitial after a successful login: stores the email (capped at the 3
+/// most recent) in IndexedDB, then forwards to the fragment's `next` path.
+pub const REMEMBER_JS: &str = r#"
+(function(){
+  var p=new URLSearchParams(location.hash.slice(1));
+  var email=p.get('email')||''; var next=p.get('next')||'/';
+  if(next.charAt(0)!=='/'||next.charAt(1)==='/') next='/';
+  function go(){ location.replace(next); }
+  if(!email||!window.indexedDB) return go();
+  try{
+    var r=indexedDB.open('athleto-auth',1);
+    r.onupgradeneeded=function(){ r.result.createObjectStore('past_logins',{keyPath:'email'}); };
+    r.onerror=go;
+    r.onsuccess=function(){
+      try{
+        var store=r.result.transaction('past_logins','readwrite').objectStore('past_logins');
+        store.put({email:email, at:Date.now()});
+        var all=store.getAll();
+        all.onsuccess=function(){
+          (all.result||[]).sort(function(a,b){return (b.at||0)-(a.at||0)})
+            .slice(3).forEach(function(row){ store.delete(row.email); });
+          setTimeout(go,60);
+        };
+        all.onerror=go;
+      }catch(e){ go(); }
+    };
+  }catch(e){ go(); }
+})();
+"#;
+
+/// Magic-link landing: GoTrue puts the session in the URL fragment, which
+/// only the browser can see; forward it to POST /auth/session and scrub the
+/// tokens from the address bar/history.
+pub const CALLBACK_JS: &str = r#"
+(function(){
+  var p=new URLSearchParams(location.hash.slice(1));
+  var status=document.getElementById('callback-status');
+  var err=p.get('error_description')||p.get('error');
+  if(err){
+    if(status) status.textContent='Sign-in failed: '+err.replace(/\+/g,' ')+'. Request a fresh link from the login page.';
+    return;
+  }
+  var access=p.get('access_token'), refresh=p.get('refresh_token');
+  if(!access||!refresh){
+    if(status) status.textContent='No sign-in tokens found. Open the link from your email again, or request a new one.';
+    return;
+  }
+  var f=document.createElement('form'); f.method='POST'; f.action='/auth/session';
+  [['access_token',access],['refresh_token',refresh]].forEach(function(pair){
+    var i=document.createElement('input'); i.type='hidden'; i.name=pair[0]; i.value=pair[1];
+    f.appendChild(i);
+  });
+  document.body.appendChild(f);
+  history.replaceState(null,'',location.pathname);
+  f.submit();
+})();
+"#;
+
+/// Cart-hold countdown: ticks locally every second and re-syncs against
+/// GET /cart/hold at random 25-55s intervals (lease-poll semantics).
+pub const CART_HOLD_JS: &str = r#"
+(function(){
+  var el=document.getElementById('hold-banner'); if(!el) return;
+  var left=document.getElementById('hold-left');
+  var secs=parseInt(el.getAttribute('data-seconds')||'0',10);
+  function fmt(s){ var m=Math.floor(s/60); return m+'m '+(s%60)+'s'; }
+  function render(){
+    if(secs>0){ if(left) left.textContent=fmt(secs); el.classList.remove('expired'); }
+    else { el.classList.add('expired'); if(left) left.textContent='expired - items may go back on sale'; }
+  }
+  render();
+  setInterval(function(){ if(secs>0){ secs-=1; render(); } },1000);
+  function schedule(){ setTimeout(poll, 25000+Math.floor(Math.random()*30000)); }
+  function poll(){
+    fetch('/cart/hold',{credentials:'same-origin'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){ if(d&&typeof d.seconds_left==='number'){ secs=Math.max(0,d.seconds_left); if(!d.active) secs=0; render(); } })
+      .catch(function(){})
+      .then(schedule);
+  }
+  schedule();
+})();
+"#;
 
 pub const APP_CSS: &str = r###"
 :root {
