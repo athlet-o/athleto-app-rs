@@ -178,7 +178,18 @@ pub async fn checkout(
     )
     .await
     {
-        Ok(_) => Ok((jar, Redirect::to("/orders?placed=1")).into_response()),
+        Ok(order_id) => {
+            let redirect = match payments::PayMethod::parse(request.pay_method.trim()) {
+                Some(method) => {
+                    dispatch_payment(&state, &headers, &auth_user, order_id, method, is_b2b, po_number)
+                        .await
+                }
+                // No (or unknown) method chosen — order stays payment-pending
+                // and /orders offers Pay now.
+                None => Redirect::to("/orders?placed=1"),
+            };
+            Ok((jar, redirect).into_response())
+        }
         Err(db::OrderError::Insufficient(shortages)) => {
             let names: HashMap<i64, String> = lines
                 .iter()
