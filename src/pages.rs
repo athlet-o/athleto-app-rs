@@ -8,7 +8,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 use crate::auth::{AuthUser, Biz, MaybeUser};
 use crate::db::{self, Product};
-use crate::SharedState;
+use crate::{assets, security, SharedState};
 
 /// Reads the three most recent successful-login emails from IndexedDB and
 /// renders them as tap-to-fill chips on the login form.
@@ -88,8 +88,11 @@ pub const CALLBACK_JS: &str = r#"
     if(status) status.textContent='No sign-in tokens found. Open the link from your email again, or request a new one.';
     return;
   }
+  // The CSRF cookie is intentionally readable here: forwarding the tokens to
+  // POST /auth/session requires the same double-submit proof as every form.
+  var csrf=(document.cookie.match(/(?:^|; )athleto_csrf=([^;]+)/)||[])[1]||'';
   var f=document.createElement('form'); f.method='POST'; f.action='/auth/session';
-  [['access_token',access],['refresh_token',refresh]].forEach(function(pair){
+  [['access_token',access],['refresh_token',refresh],['csrf_token',csrf]].forEach(function(pair){
     var i=document.createElement('input'); i.type='hidden'; i.name=pair[0]; i.value=pair[1];
     f.appendChild(i);
   });
@@ -100,19 +103,26 @@ pub const CALLBACK_JS: &str = r#"
 "#;
 
 /// Cart-hold countdown: ticks locally every second and re-syncs against
-/// GET /cart/hold at random 25-55s intervals (lease-poll semantics).
+/// GET /cart/hold at random 25-55s intervals (lease-poll semantics). When the
+/// /ws socket replaces #hold-banner out-of-band, the fresh data-seconds is
+/// adopted (elements are re-queried per render, so swapped nodes stay live).
 pub const CART_HOLD_JS: &str = r#"
 (function(){
-  var el=document.getElementById('hold-banner'); if(!el) return;
-  var left=document.getElementById('hold-left');
-  var secs=parseInt(el.getAttribute('data-seconds')||'0',10);
+  var first=document.getElementById('hold-banner'); if(!first) return;
+  var secs=parseInt(first.getAttribute('data-seconds')||'0',10);
   function fmt(s){ var m=Math.floor(s/60); return m+'m '+(s%60)+'s'; }
   function render(){
+    var el=document.getElementById('hold-banner'); if(!el) return;
+    var left=document.getElementById('hold-left');
     if(secs>0){ if(left) left.textContent=fmt(secs); el.classList.remove('expired'); }
     else { el.classList.add('expired'); if(left) left.textContent='expired - items may go back on sale'; }
   }
   render();
   setInterval(function(){ if(secs>0){ secs-=1; render(); } },1000);
+  document.body.addEventListener('htmx:oobAfterSwap', function(){
+    var el=document.getElementById('hold-banner');
+    if(el){ secs=parseInt(el.getAttribute('data-seconds')||'0',10); render(); }
+  });
   function schedule(){ setTimeout(poll, 25000+Math.floor(Math.random()*30000)); }
   function poll(){
     fetch('/cart/hold',{credentials:'same-origin'})
@@ -456,7 +466,6 @@ h1, h2, h3, p { margin-top: 0; }
 
 button.buy,
 a.button,
-button.button,
 button.primary {
   display: inline-flex;
   min-height: 44px;
@@ -477,14 +486,12 @@ button.primary {
 
 button.buy:hover,
 a.button:hover,
-button.button:hover,
 button.primary:hover {
   transform: translate(2px, 2px);
   box-shadow: 2px 2px 0 var(--ink);
 }
 
-a.button.ghost,
-button.button.ghost { background: var(--paper-2); }
+a.button.ghost { background: var(--paper-2); }
 
 button.danger { background: var(--coral); color: #ffffff; }
 
@@ -736,9 +743,6 @@ button.linklike.danger-link { color: var(--coral); }
   box-shadow: 5px 5px 0 var(--ink);
 }
 .checkout-form label { display: flex; flex-direction: column; gap: 6px; font-weight: 800; font-size: 0.92rem; }
-.pay-methods { border: 1px solid var(--line, #2a2a2a); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
-.pay-methods legend { font-weight: 800; font-size: 0.92rem; padding: 0 6px; }
-.pay-methods .pay-method { display: flex; flex-direction: row; align-items: center; gap: 8px; font-weight: 600; }
 .checkout-form select, .checkout-form input {
   min-height: 42px;
   padding: 8px 12px;
@@ -766,78 +770,6 @@ button.linklike.danger-link { color: var(--coral); }
 .hold-banner.expired { border-left-color: var(--coral); }
 .hold-banner strong { color: var(--green-dark); }
 .qty-input { width: 90px; min-height: 38px; padding: 6px 10px; border: 2px solid rgba(18,50,58,0.3); border-radius: 10px; font: inherit; }
-
-.orders-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-
-.order-filters {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px;
-  margin: 4px 0 20px;
-  padding: 16px;
-  border: 2px solid var(--ink);
-  border-radius: 8px;
-  background: var(--paper-2);
-  box-shadow: 4px 4px 0 var(--ink);
-}
-.order-filters label { display: flex; flex-direction: column; gap: 6px; font-weight: 800; font-size: 0.85rem; }
-.order-filters select, .order-filters input {
-  min-height: 40px; padding: 8px 12px; border: 2px solid rgba(18,50,58,0.3);
-  border-radius: 10px; background: var(--paper); font: inherit;
-}
-
-.order-id { font-weight: 950; text-decoration: none; }
-.order-id:hover { color: var(--green-dark); }
-.order-meta { margin: 2px 0 6px; font-weight: 700; }
-.order-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-.order-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-.order-actions .button, .order-actions .inline-form { margin: 0; }
-.track-link { color: var(--blue); font-weight: 800; }
-
-.status-badge {
-  display: inline-flex; align-items: center; padding: 4px 11px;
-  border: 2px solid var(--ink); border-radius: 999px;
-  font-size: 0.72rem; font-weight: 950; text-transform: uppercase; letter-spacing: 0.04em;
-}
-.status-badge.st-placed { background: var(--aqua); }
-.status-badge.st-processing { background: var(--yellow); }
-.status-badge.st-fulfilled { background: var(--green); }
-.status-badge.st-cancelled { background: #e7edf0; color: var(--muted); }
-.status-badge.st-sub { background: var(--berry); color: #fff; }
-
-.receipt {
-  max-width: 720px;
-  padding: 28px clamp(18px, 4%, 34px);
-  border: 2px solid var(--ink);
-  border-radius: 10px;
-  background: var(--paper-2);
-  box-shadow: 6px 6px 0 var(--ink), 0 26px 44px -18px rgba(18, 50, 58, 0.35);
-}
-.receipt-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; border-bottom: 2px solid var(--line); padding-bottom: 16px; }
-.receipt-top .wordmark { font-size: 1.5rem; }
-.receipt-id { text-align: right; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
-.receipt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin: 18px 0; }
-.receipt-grid h3, .receipt-shipments h3 { margin: 0 0 6px; font-size: 1rem; }
-.receipt-grid p { margin: 2px 0; }
-.receipt-shipments { margin: 8px 0 18px; padding: 14px; border: 2px dashed var(--line); border-radius: 8px; }
-.shipment-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 4px 0; }
-
-.receipt-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-.receipt-table th, .receipt-table td { padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--line); }
-.receipt-table th.num, .receipt-table td.num { text-align: right; white-space: nowrap; }
-.receipt-table thead th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
-.receipt-table tfoot td { border-bottom: none; padding: 4px 8px; }
-.receipt-table tfoot tr.receipt-total td { border-top: 2px solid var(--ink); font-size: 1.15rem; font-weight: 950; padding-top: 10px; }
-.receipt-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
-.receipt-actions .button, .receipt-actions .inline-form { margin: 0; }
-
-@media print {
-  .site-header, .site-footer, .receipt-actions { display: none !important; }
-  body { background: #fff; }
-  .receipt { border: none; box-shadow: none; max-width: 100%; padding: 0; }
-  .section { padding: 0; }
-}
 "###;
 
 pub fn format_price(cents: i64) -> String {
@@ -866,6 +798,10 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
 /// Layout variant that knows which storefront host served the request:
 /// biz.athleto.store gets the business chrome.
 pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Markup) -> Markup {
+    let nonce = security::csp_nonce();
+    // Stamped on <body> so htmx attaches the CSRF token to every request it
+    // makes (buttons with hx-post have no form field to carry it).
+    let csrf_headers = format!("{{\"x-csrf-token\":\"{}\"}}", security::csrf_token());
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -875,10 +811,11 @@ pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Marku
                 meta name="theme-color" content="#f8fbff";
                 meta name="referrer" content="no-referrer";
                 title { (title) }
-                style { (PreEscaped(APP_CSS)) }
-                script defer="defer" src="https://unpkg.com/htmx.org@2.0.4" {}
+                style nonce=(nonce) { (PreEscaped(APP_CSS)) }
+                script defer="defer" src=(assets::HTMX_JS_PATH) {}
+                script defer="defer" src=(assets::HTMX_WS_JS_PATH) {}
             }
-            body {
+            body hx-headers=(csrf_headers) {
                 header .site-header {
                     a .brand-lockup href="/" {
                         span .brand-mark { "AO" }
@@ -896,6 +833,7 @@ pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Marku
                                 a href="/account" { "Account" }
                                 span .nav-user { (user.email.as_deref().unwrap_or("signed in")) }
                                 form method="post" action="/logout" {
+                                    (csrf_field())
                                     button type="submit" { "Log out" }
                                 }
                             }
@@ -912,6 +850,14 @@ pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Marku
                 }
             }
         }
+    }
+}
+
+/// Hidden CSRF input for server-rendered POST forms; pairs with the
+/// double-submit cookie checked by `security::apply`.
+pub fn csrf_field() -> Markup {
+    html! {
+        input type="hidden" name=(security::CSRF_FORM_FIELD) value=(security::csrf_token());
     }
 }
 
@@ -980,6 +926,7 @@ fn product_card(product: &Product) -> Markup {
             div .card-buy {
                 span .price { (format_price(product.price_cents.into())) }
                 form hx-post="/cart/items" hx-target="find .card-status" hx-swap="innerHTML" action="/cart/items" method="post" {
+                    (csrf_field())
                     input type="hidden" name="product_id" value=(product.id);
                     input type="hidden" name="qty" value="1";
                     button .buy type="submit" { "Add to cart" }
