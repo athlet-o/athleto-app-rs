@@ -336,6 +336,167 @@ pub struct OrderFilter {
     po: Option<String>,
 }
 
+/// GET /orders/{id} -- order detail + printable receipt (both cohorts).
+pub async fn order_detail_page(
+    State(state): State<SharedState>,
+    user: MaybeUser,
+    biz: Biz,
+    Path(order_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let (auth_user, _profile) = match auth::require_full(&state, &user).await {
+        Ok(pair) => pair,
+        Err(redirect) => return Ok(redirect),
+    };
+    let Some(pool) = &state.pool else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+
+    let Some(order) = db::get_order(pool, auth_user.id, order_id).await? else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+    let items = db::order_items(pool, order_id).await?;
+    let shipments = db::shipments_for_order(pool, order_id).await?;
+    let primary_shipment = shipments.first();
+
+    Ok(pages::layout_for(
+        &format!("Receipt {} | AthletO", order.short_id()),
+        Some(&auth_user),
+        biz,
+        html! {
+            section .section {
+                div .receipt {
+                    div .receipt-top {
+                        div {
+                            span .wordmark { "Athlet" span .o { "O" } }
+                            p .muted-inline { "Order receipt" }
+                        }
+                        div .receipt-id {
+                            strong { "Order " (order.short_id()) }
+                            div .muted-inline { (order.created_at.format("%B %-d, %Y")) }
+                            span .status-badge .(status_class(order.status)) { (order.status.label()) }
+                        }
+                    }
+
+                    div .receipt-grid {
+                        div {
+                            h3 { "Fulfillment" }
+                            p { (order.ship_method.label()) }
+                            p { (delivery_estimate(&order, primary_shipment)) }
+                            @if order.kind == db::OrderKind::Recurring {
+                                p .auth-alt {
+                                    "Subscription \u{00b7} " (order.frequency.map(|f| f.label()).unwrap_or("recurring"))
+                                    @if let Some(next) = order.next_run_at { " \u{00b7} next " (next.format("%b %-d, %Y")) }
+                                }
+                            }
+                        }
+                        div {
+                            h3 { "Details" }
+                            @if let Some(po) = order.po_number.as_deref() { p { "PO number: " code { (po) } } }
+                            p .muted-inline { "Channel: " (order.channel.as_str()) }
+                        }
+                    }
+
+                    @if !shipments.is_empty() {
+                        div .receipt-shipments {
+                            h3 { "Shipments & tracking" }
+                            @for s in &shipments {
+                                div .shipment-row {
+                                    span .status-badge .(shipment_status_class(s.status)) { (s.status.label()) }
+                                    @if let Some(date) = s.ship_date { span .muted-inline { "Shipped " (date.format("%b %-d")) } }
+                                    span { (tracking_snippet(s)) }
+                                }
+                            }
+                        }
+                    }
+
+                    table .receipt-table {
+                        thead { tr { th { "Item" } th { "Qty" } th { "Unit" } th .num { "Amount" } } }
+                        tbody {
+                            @for item in &items {
+                                tr {
+                                    td {
+                                        @if let Some(subname) = item.subname.as_deref() { "AthletO " (subname) }
+                                        @else { (item.name) }
+                                        " " span .muted-inline { "(" (item.format.label()) ")" }
+                                    }
+                                    td { (item.qty) }
+                                    td { (pages::format_price(item.unit_price_cents.into())) }
+                                    td .num { (pages::format_price(i64::from(item.unit_price_cents) * i64::from(item.qty))) }
+                                }
+                            }
+                        }
+                        tfoot {
+                            tr { td colspan="3" { "Subtotal" } td .num { (pages::format_price(order.subtotal_cents)) } }
+                            tr { td colspan="3" { (order.ship_method.label()) } td .num {
+                                @if order.shipping_cents == 0 { "billed on account" }
+                                @else { (pages::format_price(order.shipping_cents)) }
+                            } }
+                            tr { td colspan="3" { "Tax" } td .num {
+                                @if order.tax_cents == 0 { span .muted-inline { "at fulfillment" } }
+                                @else { (pages::format_price(order.tax_cents)) }
+                            } }
+                            tr .receipt-total { td colspan="3" { "Total" } td .num { (pages::format_price(order.total_cents)) } }
+                        }
+                    }
+
+                    div .receipt-actions {
+                        button .button type="button" onclick="window.print()" { "Print / Save PDF" }
+                        form .inline-form method="post" action=(format!("/orders/{}/reorder", order.id)) {
+                            button .button .ghost type="submit" { "Reorder" }
+                        }
+                        a .button .ghost href="/orders" { "All orders" }
+                    }
+                }
+            }
+        },
+    )
+    .into_response())
+}
+
+fn shipment_status_class(status: db::ShipmentStatus) -> &'static str {
+    match status {
+        db::ShipmentStatus::Packing => "st-processing",
+        db::ShipmentStatus::Shipped => "st-placed",
+        db::ShipmentStatus::Delivered => "st-fulfilled",
+    }
+}
+
+/// POST /orders/{id}/reorder -- re-add a past order's lines to the cart with
+/// fresh stock holds, then send the shopper to the cart.
+pub async fn reorder(
+    State(state): State<SharedState>,
+    user: MaybeUser,
+    Path(order_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let (auth_user, profile) = match auth::require_full(&state, &user).await {
+        Ok(pair) => pair,
+        Err(redirect) => return Ok(redirect),
+    };
+    if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
+        return Ok(redirect);
+    }
+    let Some(pool) = &state.pool else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+
+    let lines = db::order_reorder_lines(pool, auth_user.id, order_id).await?;
+    if lines.is_empty() {
+        return Ok(Redirect::to("/orders").into_response());
+    }
+    let cart_id = db::find_or_create_cart(pool, &CartOwner::User(auth_user.id)).await?;
+    for (product_id, qty) in lines {
+        db::add_cart_item(pool, cart_id, product_id, qty).await?;
+        let total = db::cart_lines(pool, cart_id)
+            .await?
+            .iter()
+            .find(|l| l.product_id == product_id)
+            .map(|l| l.qty)
+            .unwrap_or(qty);
+        let _ = db::ensure_hold(pool, cart_id, product_id, total).await;
+    }
+    Ok(Redirect::to("/cart").into_response())
+}
+
 /// GET /quick-order -- B2B grid: every SKU with a qty box, one submit.
 pub async fn quick_order_page(
     State(state): State<SharedState>,
