@@ -680,8 +680,13 @@ pub async fn quick_order_submit(
 }
 
 /// Shared checkout form fragment rendered on the cart page.
-pub fn checkout_form(profile: Option<&CustomerProfile>, has_2fa: bool) -> Markup {
+pub fn checkout_form(
+    config: &crate::Config,
+    profile: Option<&CustomerProfile>,
+    has_2fa: bool,
+) -> Markup {
     let is_b2b = profile.map(CustomerProfile::is_b2b).unwrap_or(false);
+    let pay_options = payment_method_options(config, is_b2b);
     if is_b2b && !has_2fa {
         return html! {
             div .notice .error {
