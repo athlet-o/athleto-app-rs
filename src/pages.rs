@@ -12,14 +12,12 @@ use crate::SharedState;
 
 pub const APP_CSS: &str = r###"
 :root {
-  color-scheme: dark;
-  --bg: #0b1519;
-  --bg-2: #10222a;
-  --card: #132831;
-  --ink: #eef7f4;
-  --muted: #93abb0;
-  --line: rgba(238, 247, 244, 0.16);
-  --edge: #061013;
+  color-scheme: light;
+  --ink: #12323a;
+  --muted: #516872;
+  --paper: #f8fbff;
+  --paper-2: #ffffff;
+  --line: rgba(18, 50, 58, 0.16);
   --green: #53d86a;
   --green-dark: #168943;
   --aqua: #27c9c3;
@@ -27,7 +25,7 @@ pub const APP_CSS: &str = r###"
   --coral: #ff6f61;
   --yellow: #ffd84d;
   --berry: #d9498b;
-  --shadow: 0 22px 55px rgba(0, 0, 0, 0.45);
+  --shadow: 0 22px 55px rgba(18, 50, 58, 0.16);
 }
 
 * { box-sizing: border-box; }
@@ -40,7 +38,7 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  background: var(--paper);
   color: var(--ink);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -49,6 +47,21 @@ a { color: inherit; }
 
 main { flex: 1; }
 
+.wordmark { font-weight: 950; }
+
+.wordmark .o { position: relative; font-size: 1.16em; }
+
+.wordmark .o::after {
+  content: "";
+  position: absolute;
+  left: 4%;
+  right: 4%;
+  bottom: -0.06em;
+  height: 0.1em;
+  border-radius: 999px;
+  background: var(--green-dark);
+}
+
 .site-header {
   display: flex;
   flex-wrap: wrap;
@@ -56,14 +69,15 @@ main { flex: 1; }
   justify-content: space-between;
   gap: 14px;
   padding: 16px clamp(18px, 4%, 56px);
-  border-bottom: 2px solid var(--line);
-  background: var(--bg-2);
+  border-bottom: 2px solid var(--ink);
+  background: var(--paper-2);
 }
 
 .brand-lockup {
   display: inline-flex;
   align-items: center;
   gap: 12px;
+  color: var(--ink);
   text-decoration: none;
 }
 
@@ -72,19 +86,19 @@ main { flex: 1; }
   width: 44px;
   height: 44px;
   place-items: center;
-  border: 3px solid var(--edge);
+  border: 3px solid var(--ink);
   border-radius: 13px;
   background: var(--yellow);
-  color: var(--edge);
+  color: var(--ink);
   font-weight: 950;
   font-size: 1.15rem;
-  box-shadow: 5px 5px 0 var(--edge);
+  box-shadow: 5px 5px 0 var(--ink);
 }
 
 .brand-name {
   font-weight: 950;
   font-size: 1.4rem;
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
 }
 
 .site-nav {
@@ -100,25 +114,25 @@ main { flex: 1; }
   min-height: 38px;
   align-items: center;
   padding: 6px 16px;
-  border: 2px solid var(--edge);
+  border: 2px solid var(--ink);
   border-radius: 999px;
-  background: var(--card);
+  background: var(--paper-2);
   color: var(--ink);
   font: inherit;
-  font-weight: 800;
+  font-weight: 900;
   text-decoration: none;
   cursor: pointer;
-  box-shadow: 3px 3px 0 var(--edge);
+  box-shadow: 3px 3px 0 var(--ink);
   transition: transform 120ms ease, box-shadow 120ms ease;
 }
 
 .site-nav a:hover,
 .site-nav button:hover {
   transform: translate(2px, 2px);
-  box-shadow: 1px 1px 0 var(--edge);
+  box-shadow: 1px 1px 0 var(--ink);
 }
 
-.site-nav a.accent { background: var(--green); color: var(--edge); }
+.site-nav a.accent { background: var(--green); }
 
 .nav-user {
   color: var(--muted);
@@ -128,26 +142,42 @@ main { flex: 1; }
 
 .hero {
   padding: 56px clamp(18px, 4%, 56px) 40px;
-  background:
-    radial-gradient(120% 130% at 85% -20%, rgba(39, 201, 195, 0.18) 0%, transparent 55%),
-    radial-gradient(110% 120% at 5% 110%, rgba(83, 216, 106, 0.14) 0%, transparent 55%),
-    var(--bg);
-  border-bottom: 2px solid var(--line);
+  background: var(--paper);
+  border-bottom: 2px solid var(--ink);
+  position: relative;
+  overflow: hidden;
 }
+
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 26px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 216, 77, 0.52) 0 56px,
+      rgba(83, 216, 106, 0.34) 56px 112px,
+      rgba(39, 201, 195, 0.32) 112px 168px,
+      rgba(255, 111, 97, 0.34) 168px 224px
+    );
+  opacity: 0.72;
+}
+
+.hero > * { position: relative; z-index: 1; }
 
 .eyebrow {
   width: fit-content;
   margin: 0 0 16px;
-  padding: 7px 14px;
-  border: 2px solid var(--edge);
+  padding: 8px 14px;
+  border: 2px solid var(--ink);
   border-radius: 999px;
-  background: var(--yellow);
-  color: var(--edge);
+  background: var(--paper-2);
+  color: var(--green-dark);
   font-weight: 900;
   font-size: 0.82rem;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  box-shadow: 3px 3px 0 var(--edge);
+  letter-spacing: 0;
 }
 
 h1, h2, h3, p { margin-top: 0; }
@@ -162,7 +192,7 @@ h1, h2, h3, p { margin-top: 0; }
 
 .hero h1 em {
   font-style: normal;
-  color: var(--green);
+  color: var(--green-dark);
 }
 
 .lede {
@@ -194,44 +224,77 @@ h1, h2, h3, p { margin-top: 0; }
   flex-direction: column;
   gap: 12px;
   padding: 20px;
-  border: 2px solid var(--edge);
-  border-radius: 18px;
-  background: var(--card);
-  box-shadow: 7px 7px 0 var(--edge);
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 6px 6px 0 var(--ink), 0 26px 44px -18px rgba(18, 50, 58, 0.35);
 }
 
 .product-card.detail { max-width: 640px; }
 
 .card-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
 }
 
 .product-card h3 {
   margin: 0;
-  font-size: 1.3rem;
+  font-size: 1.55rem;
   font-weight: 950;
+  line-height: 1;
 }
 
 .product-card h3 a { text-decoration: none; }
-.product-card h3 a:hover { color: var(--green); }
+.product-card h3 a:hover { color: var(--green-dark); }
+
+.subname {
+  margin-top: 6px;
+  color: var(--green-dark);
+  font-weight: 900;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.card-chips {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.cal-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 11px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper-2);
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-weight: 900;
+  box-shadow: 0 6px 14px rgba(18, 50, 58, 0.15);
+  white-space: nowrap;
+}
 
 .format-badge {
   flex-shrink: 0;
   padding: 5px 12px;
-  border: 2px solid var(--edge);
+  border: 2px solid var(--ink);
   border-radius: 999px;
   font-weight: 900;
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--edge);
+  color: var(--ink);
+  white-space: nowrap;
 }
 
 .format-badge.cup { background: var(--aqua); }
-.format-badge.powder { background: var(--coral); }
+.format-badge.powder { background: var(--coral); color: #ffffff; }
 
 .product-desc {
   margin: 0;
@@ -247,14 +310,20 @@ h1, h2, h3, p { margin-top: 0; }
 }
 
 .stat-row span {
-  padding: 5px 11px;
-  border: 2px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid rgba(18, 50, 58, 0.2);
   border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
   font-weight: 800;
   font-size: 0.85rem;
-  color: var(--ink);
-  background: var(--bg-2);
+  line-height: 1.1;
 }
+
+.stat-row span.stat-protein { color: var(--green-dark); font-weight: 900; }
 
 .card-buy {
   display: flex;
@@ -267,26 +336,26 @@ h1, h2, h3, p { margin-top: 0; }
 .price {
   font-size: 1.35rem;
   font-weight: 950;
-  color: var(--yellow);
+  color: var(--ink);
 }
 
 button.buy,
 a.button,
 button.primary {
   display: inline-flex;
-  min-height: 42px;
+  min-height: 44px;
   align-items: center;
   justify-content: center;
-  padding: 8px 18px;
-  border: 2px solid var(--edge);
+  padding: 10px 18px;
+  border: 2px solid var(--ink);
   border-radius: 999px;
   background: var(--green);
-  color: var(--edge);
+  color: var(--ink);
   font: inherit;
   font-weight: 900;
   text-decoration: none;
   cursor: pointer;
-  box-shadow: 4px 4px 0 var(--edge);
+  box-shadow: 4px 4px 0 var(--ink);
   transition: transform 120ms ease, box-shadow 120ms ease;
 }
 
@@ -294,25 +363,25 @@ button.buy:hover,
 a.button:hover,
 button.primary:hover {
   transform: translate(2px, 2px);
-  box-shadow: 2px 2px 0 var(--edge);
+  box-shadow: 2px 2px 0 var(--ink);
 }
 
-a.button.ghost { background: var(--card); color: var(--ink); }
+a.button.ghost { background: var(--paper-2); }
 
-button.danger { background: var(--coral); }
+button.danger { background: var(--coral); color: #ffffff; }
 
 .card-status { min-height: 1.4em; font-weight: 800; font-size: 0.92rem; }
-.card-status .added { color: var(--green); }
-.card-status a { color: var(--aqua); }
+.card-status .added { color: var(--green-dark); }
+.card-status a { color: var(--blue); }
 
 .notice {
   max-width: 640px;
   padding: 16px 18px;
-  border: 2px solid var(--edge);
+  border: 2px solid var(--ink);
   border-left: 10px solid var(--yellow);
-  border-radius: 14px;
-  background: var(--card);
-  box-shadow: 5px 5px 0 var(--edge);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 4px 4px 0 var(--ink), 0 18px 34px -18px rgba(18, 50, 58, 0.35);
   color: var(--ink);
   line-height: 1.55;
 }
@@ -326,10 +395,10 @@ button.danger { background: var(--coral); }
   flex-direction: column;
   gap: 14px;
   padding: 24px;
-  border: 2px solid var(--edge);
-  border-radius: 18px;
-  background: var(--card);
-  box-shadow: 7px 7px 0 var(--edge);
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 6px 6px 0 var(--ink), 0 26px 44px -18px rgba(18, 50, 58, 0.35);
 }
 
 .auth-card label {
@@ -343,28 +412,28 @@ button.danger { background: var(--coral); }
 .auth-card input {
   min-height: 42px;
   padding: 8px 12px;
-  border: 2px solid var(--line);
+  border: 2px solid rgba(18, 50, 58, 0.3);
   border-radius: 10px;
-  background: var(--bg-2);
+  background: var(--paper);
   color: var(--ink);
   font: inherit;
 }
 
 .auth-card input:focus {
   outline: none;
-  border-color: var(--aqua);
+  border-color: var(--green-dark);
 }
 
 .auth-alt { color: var(--muted); font-size: 0.92rem; }
-.auth-alt a { color: var(--aqua); }
+.auth-alt a { color: var(--green-dark); font-weight: 800; }
 
 .cart-table {
   width: 100%;
   border-collapse: collapse;
-  border: 2px solid var(--edge);
-  background: var(--card);
-  box-shadow: 7px 7px 0 var(--edge);
-  border-radius: 14px;
+  border: 2px solid var(--ink);
+  background: var(--paper-2);
+  box-shadow: 6px 6px 0 var(--ink), 0 26px 44px -18px rgba(18, 50, 58, 0.35);
+  border-radius: 8px;
   overflow: hidden;
 }
 
@@ -376,7 +445,7 @@ button.danger { background: var(--coral); }
 }
 
 .cart-table th {
-  background: var(--bg-2);
+  background: var(--paper);
   font-size: 0.82rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -385,33 +454,56 @@ button.danger { background: var(--coral); }
 
 .cart-table tr:last-child td { border-bottom: none; }
 
+.cart-product .subname { margin-top: 2px; }
+
+.cart-cal {
+  color: var(--muted);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .cart-total {
   margin-top: 18px;
   font-size: 1.25rem;
   font-weight: 950;
 }
 
-.cart-total strong { color: var(--yellow); }
+.cart-total strong { color: var(--green-dark); }
 
 .cart-actions { margin-top: 18px; display: flex; gap: 12px; flex-wrap: wrap; }
 
 .site-footer {
   padding: 26px clamp(18px, 4%, 56px);
-  border-top: 2px solid var(--line);
-  background: var(--bg-2);
+  border-top: 2px solid var(--ink);
+  background: var(--paper);
   color: var(--muted);
   font-weight: 700;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   justify-content: space-between;
+  line-height: 1.55;
 }
 
-.site-footer .tagline { color: var(--green); font-weight: 900; }
+.site-footer .tagline { color: var(--green-dark); font-weight: 900; }
 "###;
 
 pub fn format_price(cents: i64) -> String {
     format!("${}.{:02}", cents / 100, cents % 100)
+}
+
+fn wordmark() -> Markup {
+    html! {
+        span .wordmark { "Athlet" span .o { "O" } }
+    }
+}
+
+fn product_display_name(product: &Product) -> String {
+    product
+        .subname
+        .as_deref()
+        .map(|subname| format!("AthletO {subname}"))
+        .unwrap_or_else(|| product.name.clone())
 }
 
 /// Shared document shell: dark athletic theme, htmx, header nav, footer.
@@ -422,7 +514,7 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover";
-                meta name="theme-color" content="#0b1519";
+                meta name="theme-color" content="#f8fbff";
                 title { (title) }
                 style { (PreEscaped(APP_CSS)) }
                 script defer="defer" src="https://unpkg.com/htmx.org@2.0.4" {}
@@ -430,8 +522,8 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
             body {
                 header .site-header {
                     a .brand-lockup href="/" {
-                        span .brand-mark { "A-O" }
-                        span .brand-name { "Athlet-O" }
+                        span .brand-mark { "AO" }
+                        span .brand-name { (wordmark()) }
                     }
                     nav .site-nav {
                         a href="/" { "Shop" }
@@ -453,7 +545,7 @@ pub fn layout(title: &str, user: Option<&AuthUser>, content: Markup) -> Markup {
                 main { (content) }
                 footer .site-footer {
                     span .tagline { "Wobble hard. Recover clean." }
-                    span { "Athlet-O performance gelatin protein" }
+                    span { (wordmark()) " performance gelatin protein" }
                 }
             }
         }
@@ -472,7 +564,7 @@ pub fn not_configured_notice(what: &str) -> Markup {
 
 pub fn error_page(message: &str) -> Markup {
     layout(
-        "Something wobbled wrong | Athlet-O",
+        "Something wobbled wrong | AthletO",
         None,
         html! {
             section .section {
@@ -492,13 +584,20 @@ fn product_card(product: &Product) -> Markup {
     html! {
         article .product-card {
             div .card-top {
-                h3 { a href=(format!("/product/{}", product.slug)) { (product.name) } }
-                span .format-badge.(format_class) { (product.format.label()) }
+                div {
+                    h3 { a href=(format!("/product/{}", product.slug)) { (wordmark()) } }
+                    @if let Some(subname) = product.subname.as_deref() {
+                        div .subname { (subname) }
+                    }
+                }
+                div .card-chips {
+                    span .cal-chip { (product.calories) " cal" }
+                    span .format-badge.(format_class) { (product.format.label()) }
+                }
             }
             p .product-desc { (product.description) }
             div .stat-row {
-                span { (product.protein_g) "g protein" }
-                span { (product.calories) " kcal" }
+                span .stat-protein { (product.protein_g) "g protein" }
                 @if product.format == db::ProductFormat::Powder { span { "just add water" } }
             }
             div .card-buy {
@@ -518,7 +617,7 @@ fn product_card(product: &Product) -> Markup {
 pub async fn home(State(state): State<SharedState>, user: MaybeUser) -> Markup {
     let products = load_catalog(&state).await;
     layout(
-        "Athlet-O | performance gelatin protein",
+        "AthletO | performance gelatin protein",
         user.as_ref(),
         html! {
             section .hero {
@@ -563,7 +662,7 @@ pub async fn product_page(
         return (
             StatusCode::NOT_FOUND,
             layout(
-                "Not found | Athlet-O",
+                "Not found | AthletO",
                 user.as_ref(),
                 html! {
                     section .section {
@@ -587,7 +686,11 @@ pub async fn product_page(
     };
 
     layout(
-        &format!("{} ({}) | Athlet-O", product.name, product.format.label()),
+        &format!(
+            "{} ({}) | AthletO",
+            product_display_name(&product),
+            product.format.label()
+        ),
         user.as_ref(),
         html! {
             section .section {
@@ -623,4 +726,21 @@ fn fallback_by_slug(slug: &str) -> Option<Product> {
     db::fallback_products()
         .into_iter()
         .find(|product| product.slug == slug)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn product_card_preserves_brand_subname_and_format_details() {
+        let product = db::fallback_products().remove(0);
+        let rendered = product_card(&product).into_string();
+
+        assert!(rendered.contains("Athlet"));
+        assert!(rendered.contains("starter"));
+        assert!(rendered.contains("90 cal"));
+        assert!(rendered.contains("20g protein"));
+        assert!(rendered.contains("Add to cart"));
+    }
 }

@@ -1,6 +1,11 @@
-# athleto-app-rs
+# jello-ws / athleto-app-rs
 
-The Athlet-O shop app — performance gelatin protein cups. *Wobble hard. Recover clean.*
+`jello-ws` is the cluster service identity for the AthletO shop app. The
+canonical Rust repository and binary remain `athleto-app-rs` so the existing
+deployment and Git history stay stable.
+
+The AthletO shop app serves performance gelatin protein cups. *Wobble hard.
+Recover clean.*
 
 A self-contained Rust web app on the "mash" stack:
 
@@ -70,9 +75,11 @@ macros), so the crate builds without a live `DATABASE_URL`.
 
 ## Deploy
 
-Deployed at **https://app.athleto.store** from the ORESoftware `k8s-cluster` repo
-as service **`dd-athleto-app-rs`**; this repo is vendored there as a git submodule
-at `remote/deployments/athleto-app-rs`. The container image is the multi-stage
+Deployed at **https://app.athleto.store** from the ORESoftware `k8s-cluster`
+repo. The public Ingress routes to the **`jello-ws`** ClusterIP Service, which
+selects the existing **`dd-athleto-app-rs`** deployment pods. This repo is
+vendored there as a git submodule at `remote/deployments/athleto-app-rs`. The
+container image is the multi-stage
 `Dockerfile` here (rust:1.90-bookworm build → debian:bookworm-slim, non-root
 UID 10001, port 8080). `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `DATABASE_URL` are
 injected from cluster secrets; probes hit `/healthz`.

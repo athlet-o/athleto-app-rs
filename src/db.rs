@@ -30,6 +30,10 @@ pub struct Product {
     pub id: i64,
     pub slug: String,
     pub name: String,
+    /// Line sub-name rendered under the AthletO wordmark
+    /// ("starter" / "recover" / "pre-game"). Nullable in the database until
+    /// the rebrand migration has run, hence the Option.
+    pub subname: Option<String>,
     pub description: String,
     pub format: ProductFormat,
     pub calories: i32,
@@ -64,7 +68,9 @@ impl CartOwner {
 pub struct CartLine {
     pub item_id: i64,
     pub name: String,
+    pub subname: Option<String>,
     pub format: ProductFormat,
+    pub calories: i32,
     pub price_cents: i32,
     pub qty: i32,
 }
@@ -91,7 +97,8 @@ pub fn build_pool(database_url: &str) -> Option<PgPool> {
     }
 }
 
-const PRODUCT_COLUMNS: &str = "id, slug, name, description, format, calories, protein_g, price_cents";
+const PRODUCT_COLUMNS: &str =
+    "id, slug, name, subname, description, format, calories, protein_g, price_cents";
 
 pub async fn list_products(pool: &PgPool) -> sqlx::Result<Vec<Product>> {
     sqlx::query_as::<_, Product>(&format!(
@@ -113,7 +120,10 @@ pub async fn product_by_slug(pool: &PgPool, slug: &str) -> sqlx::Result<Option<P
 /// Find the owner's cart id if one exists.
 pub async fn find_cart(pool: &PgPool, owner: &CartOwner) -> sqlx::Result<Option<Uuid>> {
     let sql = format!("SELECT id FROM carts WHERE {} = $1", owner.column());
-    let row: Option<(Uuid,)> = sqlx::query_as(&sql).bind(owner.id()).fetch_optional(pool).await?;
+    let row: Option<(Uuid,)> = sqlx::query_as(&sql)
+        .bind(owner.id())
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(|(id,)| id))
 }
 
@@ -126,7 +136,10 @@ pub async fn find_or_create_cart(pool: &PgPool, owner: &CartOwner) -> sqlx::Resu
          ON CONFLICT ({col}) DO UPDATE SET {col} = EXCLUDED.{col} \
          RETURNING id"
     );
-    let (id,): (Uuid,) = sqlx::query_as(&sql).bind(owner.id()).fetch_one(pool).await?;
+    let (id,): (Uuid,) = sqlx::query_as(&sql)
+        .bind(owner.id())
+        .fetch_one(pool)
+        .await?;
     Ok(id)
 }
 
@@ -159,7 +172,7 @@ pub async fn delete_cart_item(pool: &PgPool, cart_id: Uuid, item_id: i64) -> sql
 
 pub async fn cart_lines(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<Vec<CartLine>> {
     sqlx::query_as::<_, CartLine>(
-        "SELECT ci.id AS item_id, p.name, p.format, p.price_cents, ci.qty \
+        "SELECT ci.id AS item_id, p.name, p.subname, p.format, p.calories, p.price_cents, ci.qty \
          FROM cart_items ci \
          JOIN products p ON p.id = ci.product_id \
          WHERE ci.cart_id = $1 \
@@ -182,10 +195,13 @@ pub async fn cart_count(pool: &PgPool, cart_id: Uuid) -> sqlx::Result<i64> {
 /// Built-in catalog mirroring the seed migration, used so the storefront still
 /// renders when the database is not configured or not yet migrated.
 pub fn fallback_products() -> Vec<Product> {
+    // The built-in catalog mirrors the database columns explicitly; keeping
+    // each seed in one call makes the six fallback SKUs easy to compare.
+    #[allow(clippy::too_many_arguments)]
     fn product(
         id: i64,
         slug: &str,
-        name: &str,
+        subname: &str,
         description: &str,
         format: ProductFormat,
         calories: i32,
@@ -195,7 +211,8 @@ pub fn fallback_products() -> Vec<Product> {
         Product {
             id,
             slug: slug.to_string(),
-            name: name.to_string(),
+            name: "AthletO".to_string(),
+            subname: Some(subname.to_string()),
             description: description.to_string(),
             format,
             calories,
@@ -208,7 +225,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             1,
             "athlet-o-starter-cup",
-            "Athlet-O Starter",
+            "starter",
             "Lime-citrus protein wobble for daily training. 20g gelatin protein, inulin fiber, vitamin C, and electrolytes in a grab-and-go ready cup.",
             ProductFormat::Cup,
             90,
@@ -218,7 +235,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             2,
             "athlet-o-starter-powder",
-            "Athlet-O Starter",
+            "starter",
             "Lime-citrus protein wobble for daily training. 20g gelatin protein, inulin fiber, vitamin C, and electrolytes -- just add water and chill.",
             ProductFormat::Powder,
             80,
@@ -228,7 +245,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             3,
             "recover-o-cup",
-            "Recover-O",
+            "recover",
             "Berry-orange recovery wobble for the ride home. Gelatin protein plus magnesium, potassium, vitamin C, fiber, and live cultures in a ready cup.",
             ProductFormat::Cup,
             90,
@@ -238,7 +255,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             4,
             "recover-o-powder",
-            "Recover-O",
+            "recover",
             "Berry-orange recovery wobble for the ride home. Gelatin protein plus magnesium, potassium, vitamin C, fiber, and live cultures -- just add water and chill.",
             ProductFormat::Powder,
             80,
@@ -248,7 +265,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             5,
             "pre-game-o-cup",
-            "Pre-Game-O",
+            "pre-game",
             "Citrus-punch prep cup for pre-game rituals. Sodium, potassium, and vitamin C with gelatin protein and no sugar rush, ready to eat.",
             ProductFormat::Cup,
             85,
@@ -258,7 +275,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             6,
             "pre-game-o-powder",
-            "Pre-Game-O",
+            "pre-game",
             "Citrus-punch prep for pre-game rituals. Sodium, potassium, and vitamin C with gelatin protein and no sugar rush -- just add water and chill.",
             ProductFormat::Powder,
             75,
