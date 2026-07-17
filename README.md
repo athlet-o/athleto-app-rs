@@ -50,6 +50,8 @@ and a powder packet (just add water).
 | `ATHLETO_BILLING_URL` | *(unset)* | Quaestor billing-server base URL (observer AR/AP ledger) |
 | `ATHLETO_BILLING_API_KEY` | *(unset)* | Bearer token for the billing-server API |
 | `ATHLETO_BILLING_TENANT_ID` | *(unset)* | AthletO tenant UUID in the multi-tenant ledger |
+| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(unset)* | fiducia.cloud endpoint + key; enables job-leadership leases and the KV secret overlay |
+| `ATHLETO_SECRETS_KEY` | *(unset)* | base64 of a 32-byte AES-256 key; decrypts `v1:` envelopes read from the fiducia KV overlay. Unset ⇒ overlay disabled (env-only) |
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a
