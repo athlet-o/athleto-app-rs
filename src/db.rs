@@ -266,7 +266,7 @@ pub fn fallback_products() -> Vec<Product> {
         product(
             6,
             "pre-game-o-powder",
-            "Pre-Game-O",
+            "pre-game",
             "Citrus-punch prep for pre-game rituals. Sodium, potassium, and vitamin C with gelatin protein and no sugar rush -- just add water and chill.",
             ProductFormat::Powder,
             75,
