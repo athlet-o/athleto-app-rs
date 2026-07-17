@@ -191,6 +191,14 @@ fn session_cookie(name: &'static str, value: String) -> Cookie<'static> {
         .build()
 }
 
+pub fn auth_session_cookie(value: String) -> Cookie<'static> {
+    session_cookie(ACCESS_COOKIE, value)
+}
+
+pub fn refresh_session_cookie(value: String) -> Cookie<'static> {
+    session_cookie(REFRESH_COOKIE, value)
+}
+
 fn clear_session(jar: CookieJar) -> CookieJar {
     jar.remove(Cookie::build(ACCESS_COOKIE).path("/"))
         .remove(Cookie::build(REFRESH_COOKIE).path("/"))
