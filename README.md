@@ -42,11 +42,60 @@ and a powder packet (just add water).
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
+<<<<<<< HEAD
+| `ATHLETO_STRIPE_SECRET_KEY` | *(unset)* | Stripe API secret key (`sk_test_…` / `sk_live_…`); enables card checkout, B2B ACH debit, and Net-30 hosted invoices |
+| `ATHLETO_STRIPE_PUBLISHABLE_KEY` | *(unset)* | Stripe publishable key (`pk_…`); reserved for client-side elements — hosted checkout doesn't need it server-side |
+| `ATHLETO_STRIPE_WEBHOOK_SECRET` | *(unset)* | Stripe webhook signing secret (`whsec_…`) for `POST /webhooks/stripe` |
+| `ATHLETO_PAYPAL_CLIENT_ID` / `ATHLETO_PAYPAL_CLIENT_SECRET` | *(unset)* | PayPal REST app credentials; enables PayPal one-time + subscriptions |
+| `ATHLETO_PAYPAL_WEBHOOK_ID` | *(unset)* | PayPal webhook id used to verify `POST /webhooks/paypal` |
+| `ATHLETO_PAYPAL_ENV` | `sandbox` | `sandbox` or `live` |
+| `ATHLETO_SQUARE_ACCESS_TOKEN` / `ATHLETO_SQUARE_LOCATION_ID` | *(unset)* | Square access token + location; enables Square hosted checkout + subscription plans |
+| `ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY` | *(unset)* | Square webhook signature key for `POST /webhooks/square` |
+| `ATHLETO_SQUARE_ENV` | `sandbox` | `sandbox` or `production` |
+| `ATHLETO_BILLING_URL` | *(unset)* | Quaestor billing-server base URL (observer AR/AP ledger) |
+| `ATHLETO_BILLING_API_KEY` | *(unset)* | Bearer token for the billing-server API |
+| `ATHLETO_BILLING_TENANT_ID` | *(unset)* | AthletO tenant UUID in the multi-tenant ledger |
+=======
 | `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
+>>>>>>> origin/main
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a
 "not configured" notice. Set all three variables to enable auth and cart persistence.
+Payment processors are each independently optional — checkout only offers the ones
+with keys present, and with none configured orders are placed as payment-pending.
+
+## Payments
+
+Checkout accepts **one-time, subscription, and recurring** payments through three
+processors, all hosted/redirect flows (no card data touches this server — PCI
+SAQ-A):
+
+- **Stripe** — Checkout Sessions (cards; `mode=subscription` for recurring
+  orders). B2B sessions additionally offer **ACH bank debit** (`us_bank_account`),
+  and B2B can instead choose **Invoice my account (Net 30)**: the order ships
+  against the PO and a hosted Stripe invoice (card / ACH / bank transfer) is
+  emailed, due in 30 days.
+- **PayPal** — Orders v2 for one-time; catalog product → billing plan →
+  subscription for recurring.
+- **Square** — hosted payment links; catalog subscription plans for recurring
+  (weekly / every-two-weeks / monthly / quarterly cadences).
+
+Every payment is confirmed twice: server-side verification on the browser
+return (`/pay/success`) and signed provider webhooks
+(`/webhooks/{stripe,paypal,square}`), deduplicated via the `payment_events`
+table. Orders carry `payment_status` (`pending → processing → paid`, or
+`invoiced` for Net-30), and `/orders` offers **Pay now** retry for pending or
+failed payments.
+
+Settled money is mirrored into the **Quaestor billing-server**
+([quaestor-ledger/billing-server.rs](https://github.com/quaestor-ledger/billing-server.rs)),
+a Model-A *observer* AR/AP ledger — it records, reconciles, and proves; it never
+moves money. Per settled order the app posts an invoice transaction (debit
+`ar/<user>`, credit `revenue/athleto`) and a payment transaction (debit
+`cash/<provider>`, credit `ar/<user>`), idempotency-keyed so webhook replays are
+safe. The account page shows the customer's outstanding balance and credits from
+`GET /v1/tenants/{tenant}/customers/by-email/{email}/billing-state`.
 
 ## Local run
 
@@ -75,10 +124,49 @@ inserts the 3 products x 2 formats.
 To run them manually instead: `cargo install sqlx-cli --no-default-features --features rustls,postgres`
 then `sqlx migrate run`.
 
+<<<<<<< HEAD
+All queries are runtime `sqlx::query`/`query_as` calls (no compile-time `query!`
+macros), so the crate builds without a live `DATABASE_URL`. **New data access is
+written with SeaORM** (`src/entities.rs`, over the same pool via
+`AppState::orm`); the legacy sqlx queries in `db.rs` are being ported
+incrementally.
+
+### Go-forward: declarative migrations (dpm)
+
+We can keep generating numbered SQL files in `migrations/` for now, but the
+target workflow is **declarative migrations** via
+[dpm](https://github.com/declarative-migrations/declarative-postgres-migrate.rs)
+(github.com/declarative-migrations): a single `schema/schema.sql` is the source
+of truth and the live database *converges* onto it — dpm materializes the schema
+on a shadow server, introspects both sides, and emits ordered, reviewable SQL.
+The Quaestor billing-server and the shared pg-defs contract already work this
+way (its `migrations/` dir is frozen as an audit trail).
+
+```sh
+brew install declarative-migrations/tap/dpm
+
+export SHADOW_DATABASE_URL=postgres://…   # server where dpm may create throwaway DBs
+export TARGET_DATABASE_URL=postgres://…   # or DATABASE_URL
+
+dpm diff      # print the migration SQL (never executes)
+dpm verify    # rehearse on a shadow replica, prove convergence
+dpm apply     # generate + execute (interactive confirm; destructive SQL gated)
+```
+
+When this app's schema moves to the **shared dd-platform Amazon RDS Postgres**,
+it gets its **own database named `athleto`** (per-project database namespace —
+never a shared `public` schema, so table names like `orders`/`payments` can't
+collide with other projects). The shared schema contract lives in
+`k8s-libs-and-shared-defs` → `pg-defs/` (checked out locally at
+`~/codes/ores/k8s-cluster/remote/libs/pg-defs`, vendored into `k8s-cluster` as
+`remote/libs`); porting this app's commerce schema there is an agreed follow-up
+(currently blocked on Supabase `auth.uid()` RLS references).
+=======
 Application queries go through SeaORM (`src/entities/` + `src/db.rs`); the
 hold-claim and checkout transactions stay hand-written SQL executed via
 `sea_orm::Statement` to preserve their locking semantics. Everything runs at
 runtime against the pool, so the crate builds without a live `DATABASE_URL`.
+>>>>>>> origin/main
 
 ## Deploy
 
