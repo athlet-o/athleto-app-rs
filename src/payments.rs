@@ -1549,7 +1549,8 @@ pub async fn pay_success(
                         .json()
                         .await?;
                     if matches!(subscription["status"].as_str(), Some("ACTIVE") | Some("APPROVED")) {
-                        settle_order(&state, &orm, order_id, PaymentProvider::Paypal, subscription_id, PaymentKind::Charge)
+                        // Approval carries no charge amount; cycle webhooks verify money.
+                        settle_order(&state, &orm, order_id, PaymentProvider::Paypal, subscription_id, PaymentKind::Charge, None)
                             .await?;
                         return Ok(PaymentStatus::Paid);
                     }
