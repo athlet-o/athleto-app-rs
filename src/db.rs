@@ -1748,3 +1748,43 @@ mod order_fulfillment_tests {
         assert!(s.tracking_url().is_none());
     }
 }
+
+#[cfg(test)]
+mod payment_enum_tests {
+    use sea_orm::ActiveEnum;
+
+    use super::*;
+
+    /// Guard against drift between the Postgres enum values created in
+    /// 0006_payments.sql and the SeaORM string_value mappings (sqlx's
+    /// rename_all derives are exercised at runtime; these are compile-in).
+    #[test]
+    fn sea_orm_string_values_match_the_migration_enums() {
+        assert_eq!(PaymentProvider::Stripe.to_value(), "stripe");
+        assert_eq!(PaymentProvider::Paypal.to_value(), "paypal");
+        assert_eq!(PaymentProvider::Square.to_value(), "square");
+        assert_eq!(PaymentProvider::Invoice.to_value(), "invoice");
+
+        assert_eq!(PaymentStatus::Pending.to_value(), "pending");
+        assert_eq!(PaymentStatus::Processing.to_value(), "processing");
+        assert_eq!(PaymentStatus::Paid.to_value(), "paid");
+        assert_eq!(PaymentStatus::Invoiced.to_value(), "invoiced");
+        assert_eq!(PaymentStatus::Failed.to_value(), "failed");
+        assert_eq!(PaymentStatus::Refunded.to_value(), "refunded");
+
+        assert_eq!(PaymentKind::Charge.to_value(), "charge");
+        assert_eq!(PaymentKind::SubscriptionCycle.to_value(), "subscription_cycle");
+        assert_eq!(PaymentKind::Refund.to_value(), "refund");
+
+        assert_eq!(SubscriptionStatus::Pending.to_value(), "pending");
+        assert_eq!(SubscriptionStatus::Active.to_value(), "active");
+        assert_eq!(SubscriptionStatus::PastDue.to_value(), "past_due");
+        assert_eq!(SubscriptionStatus::Cancelled.to_value(), "cancelled");
+
+        // And the order enums shared with the legacy sqlx layer (0004).
+        assert_eq!(OrderKind::OneTime.to_value(), "one_time");
+        assert_eq!(OrderKind::Recurring.to_value(), "recurring");
+        assert_eq!(OrderFrequency::Biweekly.to_value(), "biweekly");
+        assert_eq!(OrderFrequency::Quarterly.to_value(), "quarterly");
+    }
+}

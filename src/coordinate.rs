@@ -124,14 +124,53 @@ pub struct FiduciaClient {
 }
 
 impl FiduciaClient {
-    pub fn from_config(config: &Config) -> Option<Self> {
-        let base = config.fiducia_url.clone()?;
-        let api_key = config.fiducia_api_key.clone()?;
-        Some(Self {
+    pub fn new(base: String, api_key: String) -> Self {
+        Self {
             http: reqwest::Client::new(),
             base: base.trim_end_matches('/').to_string(),
             api_key,
-        })
+        }
+    }
+
+    pub fn from_config(config: &Config) -> Option<Self> {
+        let base = config.fiducia_url.clone()?;
+        let api_key = config.fiducia_api_key.clone()?;
+        Some(Self::new(base, api_key))
+    }
+
+    /// Read one key from the fiducia config KV (`GET /v1/kv?key=K`); the org
+    /// namespace comes from the API key on the fiducia side. Returns `None`
+    /// for missing keys and for any transport/auth failure — callers treat
+    /// both as "not configured". Used by `crate::secrets` at boot.
+    pub async fn kv_get(&self, key: &str) -> Option<String> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/kv", self.base))
+            .query(&[("key", key)])
+            .bearer_auth(&self.api_key)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
+        match resp {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await.ok()?;
+                if body.get("found").and_then(|v| v.as_bool()) != Some(true) {
+                    return None;
+                }
+                body.get("entry")
+                    .and_then(|entry| entry.get("value"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            }
+            Ok(resp) => {
+                tracing::warn!(status = %resp.status(), key, "fiducia kv_get rejected");
+                None
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, key, "fiducia kv_get unreachable");
+                None
+            }
+        }
     }
 
     /// Acquire (non-blocking) a lease on `key` held by `holder` for `ttl_ms`.

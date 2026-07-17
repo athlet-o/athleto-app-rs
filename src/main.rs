@@ -9,6 +9,7 @@ mod entities;
 mod orders;
 mod pages;
 mod payments;
+mod secrets;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -183,38 +184,60 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(8080);
 
+    // Secrets: env always wins; the fiducia config KV fills anything the
+    // environment leaves unset (cross-provider bootstrap from just
+    // FIDUCIA_URL + FIDUCIA_API_KEY). See src/secrets.rs and
+    // docs/secrets-management.md.
+    let fiducia_url = env_opt("FIDUCIA_URL");
+    let fiducia_api_key = env_opt("FIDUCIA_API_KEY");
+    let fiducia_client = match (fiducia_url.clone(), fiducia_api_key.clone()) {
+        (Some(url), Some(key)) => Some(coordinate::FiduciaClient::new(url, key)),
+        _ => None,
+    };
+    let secret = secrets::SecretSource::load(fiducia_client.as_ref()).await;
+
     let config = Config {
-        supabase_url: env_opt("SUPABASE_URL").map(|url| url.trim_end_matches('/').to_string()),
-        supabase_anon_key: env_opt("SUPABASE_ANON_KEY"),
+        supabase_url: secret
+            .get("SUPABASE_URL")
+            .map(|url| url.trim_end_matches('/').to_string()),
+        supabase_anon_key: secret.get("SUPABASE_ANON_KEY"),
         public_base_url: env_opt("ATHLETO_PUBLIC_BASE_URL")
             .unwrap_or_else(|| "https://app.athleto.store".to_string()),
         sms_mfa_enabled: env_opt("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
-        fiducia_url: env_opt("FIDUCIA_URL"),
-        fiducia_api_key: env_opt("FIDUCIA_API_KEY"),
+        fiducia_url,
+        fiducia_api_key,
         // HOSTNAME is the pod name under Kubernetes; unique per replica.
         replica_id: env_opt("HOSTNAME").unwrap_or_else(|| "local".to_string()),
-        stripe: env_opt("ATHLETO_STRIPE_SECRET_KEY").map(|secret_key| payments::StripeConfig {
-            secret_key,
-            webhook_secret: env_opt("ATHLETO_STRIPE_WEBHOOK_SECRET"),
+        stripe: secret.get("ATHLETO_STRIPE_SECRET_KEY").map(|secret_key| {
+            payments::StripeConfig {
+                secret_key,
+                webhook_secret: secret.get("ATHLETO_STRIPE_WEBHOOK_SECRET"),
+            }
         }),
-        paypal: match (env_opt("ATHLETO_PAYPAL_CLIENT_ID"), env_opt("ATHLETO_PAYPAL_CLIENT_SECRET")) {
+        paypal: match (
+            secret.get("ATHLETO_PAYPAL_CLIENT_ID"),
+            secret.get("ATHLETO_PAYPAL_CLIENT_SECRET"),
+        ) {
             (Some(client_id), Some(client_secret)) => Some(payments::PayPalConfig {
                 client_id,
                 client_secret,
-                webhook_id: env_opt("ATHLETO_PAYPAL_WEBHOOK_ID"),
-                api_base: match env_opt("ATHLETO_PAYPAL_ENV").as_deref() {
+                webhook_id: secret.get("ATHLETO_PAYPAL_WEBHOOK_ID"),
+                api_base: match secret.get("ATHLETO_PAYPAL_ENV").as_deref() {
                     Some("live") => "https://api-m.paypal.com".to_string(),
                     _ => "https://api-m.sandbox.paypal.com".to_string(),
                 },
             }),
             _ => None,
         },
-        square: match (env_opt("ATHLETO_SQUARE_ACCESS_TOKEN"), env_opt("ATHLETO_SQUARE_LOCATION_ID")) {
+        square: match (
+            secret.get("ATHLETO_SQUARE_ACCESS_TOKEN"),
+            secret.get("ATHLETO_SQUARE_LOCATION_ID"),
+        ) {
             (Some(access_token), Some(location_id)) => Some(payments::SquareConfig {
                 access_token,
                 location_id,
-                webhook_signature_key: env_opt("ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY"),
-                api_base: match env_opt("ATHLETO_SQUARE_ENV").as_deref() {
+                webhook_signature_key: secret.get("ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY"),
+                api_base: match secret.get("ATHLETO_SQUARE_ENV").as_deref() {
                     Some("production") => "https://connect.squareup.com".to_string(),
                     _ => "https://connect.squareupsandbox.com".to_string(),
                 },
@@ -222,12 +245,12 @@ async fn main() -> anyhow::Result<()> {
             _ => None,
         },
         billing: match (
-            env_opt("ATHLETO_BILLING_URL"),
-            env_opt("ATHLETO_BILLING_TENANT_ID").and_then(|id| id.parse().ok()),
+            secret.get("ATHLETO_BILLING_URL"),
+            secret.get("ATHLETO_BILLING_TENANT_ID").and_then(|id| id.parse().ok()),
         ) {
             (Some(url), Some(tenant_id)) => Some(billing::BillingConfig {
                 url: url.trim_end_matches('/').to_string(),
-                api_key: env_opt("ATHLETO_BILLING_API_KEY"),
+                api_key: secret.get("ATHLETO_BILLING_API_KEY"),
                 tenant_id,
             }),
             _ => None,
@@ -237,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("SUPABASE_URL / SUPABASE_ANON_KEY not set; auth routes will show a 'not configured' notice");
     }
 
-    let pool = env_opt("DATABASE_URL").and_then(|url| db::build_pool(&url));
+    let pool = secret.get("DATABASE_URL").and_then(|url| db::build_pool(&url));
     match &pool {
         Some(pool) => {
             // Run migrations in the background so startup (and /healthz) never

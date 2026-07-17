@@ -110,15 +110,16 @@ struct Posting<'a> {
     amount_cents: i64,
 }
 
-async fn post_transaction(
-    state: &SharedState,
-    cfg: &BillingConfig,
+/// The ledger's `DraftTransaction` wire shape, built pure so it can be
+/// tested: every transaction must balance (debits == credits) per currency —
+/// the ledger enforces it with a deferred trigger, we assert it in tests.
+fn transaction_body(
     kind: &str,
     idempotency_key: &str,
     description: &str,
     source_event_id: &str,
     postings: &[Posting<'_>],
-) -> anyhow::Result<()> {
+) -> serde_json::Value {
     let postings: Vec<_> = postings
         .iter()
         .map(|posting| {
@@ -132,18 +133,36 @@ async fn post_transaction(
             })
         })
         .collect();
+    json!({
+        "kind": kind,
+        "idempotency_key": idempotency_key,
+        "description": description,
+        "postings": postings,
+    })
+}
+
+async fn post_transaction(
+    state: &SharedState,
+    cfg: &BillingConfig,
+    kind: &str,
+    idempotency_key: &str,
+    description: &str,
+    source_event_id: &str,
+    postings: &[Posting<'_>],
+) -> anyhow::Result<()> {
     let response = request(
         state,
         cfg,
         reqwest::Method::POST,
         &format!("/v1/tenants/{}/transactions", cfg.tenant_id),
     )
-    .json(&json!({
-        "kind": kind,
-        "idempotency_key": idempotency_key,
-        "description": description,
-        "postings": postings,
-    }))
+    .json(&transaction_body(
+        kind,
+        idempotency_key,
+        description,
+        source_event_id,
+        postings,
+    ))
     .send()
     .await?;
     if !response.status().is_success() {
@@ -384,5 +403,94 @@ mod tests {
             "dev%2Bathleto%40example.com"
         );
         assert_eq!(urlencoding_component("plain-user_99"), "plain-user_99");
+    }
+
+    /// Sum debits minus credits across a body's postings; the ledger rejects
+    /// anything non-zero, so our builders must always produce zero.
+    fn imbalance(body: &serde_json::Value) -> i64 {
+        body["postings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|posting| {
+                let amount = posting["amount_minor"].as_i64().unwrap();
+                match posting["direction"].as_str().unwrap() {
+                    "debit" => amount,
+                    "credit" => -amount,
+                    other => panic!("unexpected direction {other}"),
+                }
+            })
+            .sum()
+    }
+
+    #[test]
+    fn invoice_and_payment_transactions_balance_to_zero() {
+        let user = Uuid::nil();
+        let ar = format!("ar/{user}");
+        let invoice = transaction_body(
+            "invoice",
+            "athleto:order:x:invoice",
+            "AthletO order x",
+            "x",
+            &[
+                Posting { account_code: &ar, direction: "debit", amount_cents: 12345 },
+                Posting { account_code: "revenue/athleto", direction: "credit", amount_cents: 12345 },
+            ],
+        );
+        assert_eq!(imbalance(&invoice), 0);
+        assert_eq!(invoice["kind"], "invoice");
+        assert_eq!(invoice["idempotency_key"], "athleto:order:x:invoice");
+
+        let payment = transaction_body(
+            "payment",
+            "athleto:payment:stripe:pi_1",
+            "AthletO payment",
+            "pi_1",
+            &[
+                Posting { account_code: "cash/stripe", direction: "debit", amount_cents: 12345 },
+                Posting { account_code: &ar, direction: "credit", amount_cents: 12345 },
+            ],
+        );
+        assert_eq!(imbalance(&payment), 0);
+        // Ledger contract: every posting names its source event for replay
+        // tracing.
+        for posting in payment["postings"].as_array().unwrap() {
+            assert_eq!(posting["source"], "athleto-app");
+            assert_eq!(posting["source_event_id"], "pi_1");
+            assert_eq!(posting["currency"], "USD");
+        }
+    }
+
+    #[test]
+    fn billing_summary_deserializes_ledger_billing_state() {
+        // A trimmed real-shape billing-state payload; unknown fields (aging,
+        // snapshot_lock, ...) must be ignored, last_payment may be absent.
+        let full: BillingSummary = serde_json::from_str(
+            r#"{
+                "user_id": "6dd8ec81-0000-0000-0000-000000000000",
+                "email": "buyer@example.com",
+                "currency": "USD",
+                "outstanding_balance_minor": 4500,
+                "credit_memos_minor": 1000,
+                "unallocated_cash_minor": 250,
+                "aging": {"current_minor": 4500, "d1_30_minor": 0},
+                "last_payment": {"amount_minor": 8999, "via": "stripe", "external_id": "pi_9"}
+            }"#,
+        )
+        .expect("full payload");
+        assert_eq!(full.outstanding_balance_minor, 4500);
+        assert_eq!(full.credit_memos_minor + full.unallocated_cash_minor, 1250);
+        assert_eq!(full.last_payment.as_ref().map(|p| p.amount_minor), Some(8999));
+
+        let minimal: BillingSummary = serde_json::from_str(
+            r#"{
+                "currency": "USD",
+                "outstanding_balance_minor": 0,
+                "credit_memos_minor": 0,
+                "unallocated_cash_minor": 0
+            }"#,
+        )
+        .expect("minimal payload");
+        assert!(minimal.last_payment.is_none());
     }
 }
