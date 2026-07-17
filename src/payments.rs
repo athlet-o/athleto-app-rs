@@ -1299,15 +1299,15 @@ async fn record_subscription_cycle(
     payment_ref: &str,
     amount_cents: i64,
 ) -> Result<(), PaymentError> {
-    let Some((user_id, order_id)) = db::subscription_owner(pool, provider, subscription_ref).await?
+    let Some((user_id, order_id)) = db::subscription_owner(orm, provider, subscription_ref).await?
     else {
         return Ok(());
     };
-    db::set_subscription_status(pool, provider, subscription_ref, SubscriptionStatus::Active).await?;
+    db::set_subscription_status(orm, provider, subscription_ref, SubscriptionStatus::Active).await?;
     let amount = if amount_cents > 0 {
         amount_cents
     } else if let Some(order_id) = order_id {
-        db::order_payment_facts(pool, order_id)
+        db::order_payment_facts(orm, order_id)
             .await?
             .map(|facts| facts.total_cents)
             .unwrap_or_default()
@@ -1315,7 +1315,7 @@ async fn record_subscription_cycle(
         0
     };
     let newly_recorded = db::record_payment(
-        pool,
+        orm,
         order_id,
         user_id,
         provider,
