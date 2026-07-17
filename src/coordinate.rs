@@ -10,8 +10,7 @@
 //! * **Postgres advisory locks** give cross-replica mutual exclusion for a
 //!   *short critical section* without a table: `pg_try_advisory_lock` picks the
 //!   one replica that runs a periodic job this tick, then unlocks. This is the
-//!   built-in, dependency-free leader mechanism. (Session-scoped, so it runs on
-//!   the SeaORM connection exactly like every other query.)
+//!   built-in, dependency-free leader mechanism.
 //! * **fiducia.cloud leases** are the same idea at the infrastructure layer:
 //!   a seconds-long, fenced, crash-safe lease, useful when leadership must be
 //!   coordinated across clusters (not just replicas in one Postgres). When
@@ -24,16 +23,9 @@
 //! never an advisory lock (session-scoped, breaks through poolers) and never a
 //! fiducia lease (liveness-coupled, wrong layer). See docs/cart-holds.md.
 
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Value};
+use sqlx::PgPool;
 
 use crate::Config;
-
-fn stmt<I>(sql: &str, values: I) -> Statement
-where
-    I: IntoIterator<Item = Value>,
-{
-    Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
-}
 
 /// Stable 64-bit key for a named advisory lock. FNV-1a over the job name keeps
 /// it deterministic across replicas and releases.
@@ -50,21 +42,18 @@ fn advisory_key(name: &str) -> i64 {
 /// (async) so the advisory lock or fiducia lease is returned promptly.
 pub enum Leadership {
     /// Won via `pg_try_advisory_lock`; released with `pg_advisory_unlock`.
-    Advisory { conn: DatabaseConnection, key: i64 },
+    Advisory { pool: PgPool, key: i64 },
     /// Won via a fiducia lease; released with POST /v1/locks/release.
-    Fiducia {
-        client: FiduciaClient,
-        holder: String,
-        fencing_token: u64,
-    },
+    Fiducia { client: FiduciaClient, holder: String, fencing_token: u64 },
 }
 
 impl Leadership {
     pub async fn release(self) {
         match self {
-            Leadership::Advisory { conn, key } => {
-                if let Err(err) = conn
-                    .execute(stmt("SELECT pg_advisory_unlock($1)", [key.into()]))
+            Leadership::Advisory { pool, key } => {
+                if let Err(err) = sqlx::query("SELECT pg_advisory_unlock($1)")
+                    .bind(key)
+                    .execute(&pool)
                     .await
                 {
                     tracing::warn!(error = %err, "pg_advisory_unlock failed");
@@ -83,7 +72,7 @@ impl Leadership {
 /// hold leadership (run the job, then `release`), `None` if another replica
 /// holds it (skip this tick).
 pub async fn try_lead(
-    conn: &DatabaseConnection,
+    pool: &PgPool,
     config: &Config,
     job: &str,
     lease_secs: u64,
@@ -106,22 +95,16 @@ pub async fn try_lead(
     }
 
     let key = advisory_key(job);
-    let row = conn
-        .query_one(stmt("SELECT pg_try_advisory_lock($1) AS got", [key.into()]))
-        .await;
-    match row {
-        Ok(Some(row)) => match row.try_get::<bool>("", "got") {
-            Ok(true) => Some(Leadership::Advisory {
-                conn: conn.clone(),
-                key,
-            }),
-            Ok(false) => None, // another replica holds it
-            Err(err) => {
-                tracing::warn!(error = %err, "advisory lock result unreadable; skipping tick");
-                None
-            }
-        },
-        Ok(None) => None,
+    match sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+        .bind(key)
+        .fetch_one(pool)
+        .await
+    {
+        Ok(true) => Some(Leadership::Advisory {
+            pool: pool.clone(),
+            key,
+        }),
+        Ok(false) => None, // another replica holds it
         Err(err) => {
             tracing::warn!(error = %err, "pg_try_advisory_lock failed; skipping tick");
             None
@@ -141,14 +124,53 @@ pub struct FiduciaClient {
 }
 
 impl FiduciaClient {
-    pub fn from_config(config: &Config) -> Option<Self> {
-        let base = config.fiducia_url.clone()?;
-        let api_key = config.fiducia_api_key.clone()?;
-        Some(Self {
+    pub fn new(base: String, api_key: String) -> Self {
+        Self {
             http: reqwest::Client::new(),
             base: base.trim_end_matches('/').to_string(),
             api_key,
-        })
+        }
+    }
+
+    pub fn from_config(config: &Config) -> Option<Self> {
+        let base = config.fiducia_url.clone()?;
+        let api_key = config.fiducia_api_key.clone()?;
+        Some(Self::new(base, api_key))
+    }
+
+    /// Read one key from the fiducia config KV (`GET /v1/kv?key=K`); the org
+    /// namespace comes from the API key on the fiducia side. Returns `None`
+    /// for missing keys and for any transport/auth failure — callers treat
+    /// both as "not configured". Used by `crate::secrets` at boot.
+    pub async fn kv_get(&self, key: &str) -> Option<String> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/kv", self.base))
+            .query(&[("key", key)])
+            .bearer_auth(&self.api_key)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
+        match resp {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await.ok()?;
+                if body.get("found").and_then(|v| v.as_bool()) != Some(true) {
+                    return None;
+                }
+                body.get("entry")
+                    .and_then(|entry| entry.get("value"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            }
+            Ok(resp) => {
+                tracing::warn!(status = %resp.status(), key, "fiducia kv_get rejected");
+                None
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, key, "fiducia kv_get unreachable");
+                None
+            }
+        }
     }
 
     /// Acquire (non-blocking) a lease on `key` held by `holder` for `ttl_ms`.

@@ -58,7 +58,6 @@ fn setup_form(
                     p .auth-lede { "Signed in as " strong { (user.email_str()) } "." }
                     @if let Some(notice) = notice { (notice) }
                     form method="post" action="/account/setup" {
-                        (pages::csrf_field())
                         label .radio-row {
                             input type="radio" name="customer_type" value="b2c" checked[!is_b2b];
                             span { strong { "Personal" } " -- one-time or recurring orders for you or your squad" }
@@ -184,6 +183,18 @@ pub async fn account_page(
         _ => Vec::new(),
     };
 
+    // Balance and credits from the Quaestor observer ledger (best-effort:
+    // the panel simply doesn't render when the ledger is unconfigured,
+    // unreachable, or doesn't know this customer yet).
+    let billing_panel = match auth_user.email.as_deref() {
+        Some(email) if state.config.billing.is_some() => {
+            crate::billing::billing_summary(&state, email)
+                .await
+                .map(|summary| billing_section(&summary))
+        }
+        _ => None,
+    };
+
     account_markup(
         &state,
         &auth_user,
@@ -192,9 +203,24 @@ pub async fn account_page(
         &recent,
         &api_keys,
         &params,
-        None,
+        billing_panel,
     )
     .into_response()
+}
+
+/// "Billing & credits" panel fed by the Quaestor ledger's billing-state.
+fn billing_section(summary: &crate::billing::BillingSummary) -> Markup {
+    let credits = summary.credit_memos_minor + summary.unallocated_cash_minor;
+    html! {
+        div .notice {
+            strong { "Billing & credits. " }
+            "Outstanding balance: " strong { (pages::format_price(summary.outstanding_balance_minor)) }
+            " \u{00b7} Credits on account: " strong { (pages::format_price(credits)) }
+            @if let Some(last) = &summary.last_payment {
+                " \u{00b7} Last payment: " (pages::format_price(last.amount_minor)) " via " (last.via)
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -266,7 +292,6 @@ fn account_markup(
                                         @else { span .muted-inline { "pending" } }
                                         form .inline-form method="post"
                                             action=(format!("/account/2fa/{}/unenroll", factor.id)) {
-                                            (pages::csrf_field())
                                             button .linklike .danger-link type="submit" { "remove" }
                                         }
                                     }
@@ -277,12 +302,10 @@ fn account_markup(
                             p .auth-alt { "Business accounts must keep at least one verified factor." }
                         }
                         form method="post" action="/account/2fa/totp" {
-                            (pages::csrf_field())
                             button .primary type="submit" { "Set up authenticator app (TOTP)" }
                         }
                         @if state.config.sms_mfa_enabled {
                             form method="post" action="/account/2fa/phone" {
-                                (pages::csrf_field())
                                 label {
                                     "Phone number for SMS codes"
                                     input type="tel" name="phone" placeholder="+15551234567" required;
@@ -339,7 +362,6 @@ fn account_markup(
                                             } @else {
                                                 form .inline-form method="post"
                                                     action=(format!("/account/api-keys/{}/revoke", key.id)) {
-                                                    (pages::csrf_field())
                                                     button .linklike .danger-link type="submit" { "revoke" }
                                                 }
                                             }
@@ -348,7 +370,6 @@ fn account_markup(
                                 }
                             }
                             form method="post" action="/account/api-keys" {
-                                (pages::csrf_field())
                                 label {
                                     "Key name"
                                     input type="text" name="name" required maxlength="60"
@@ -443,7 +464,6 @@ fn totp_verify_page(
                     }
                     p .auth-alt { "Can't scan? Enter this secret manually: " code { (secret) } }
                     form method="post" action="/account/2fa/totp/verify" {
-                        (pages::csrf_field())
                         input type="hidden" name="factor_id" value=(factor_id);
                         input type="hidden" name="qr" value=(qr);
                         input type="hidden" name="secret" value=(secret);
@@ -584,7 +604,6 @@ fn phone_verify_page(
                     h2 { "Enter the code we texted" }
                     @if let Some(notice) = notice { (notice) }
                     form method="post" action="/account/2fa/phone/verify" {
-                        (pages::csrf_field())
                         input type="hidden" name="factor_id" value=(factor_id);
                         input type="hidden" name="challenge_id" value=(challenge_id);
                         label {
