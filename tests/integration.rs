@@ -176,7 +176,35 @@ async fn state_changing_post_without_token_is_rejected() {
             StatusCode::FORBIDDEN,
             "{path} must reject a POST without a CSRF token"
         );
+        // Regression: the CSRF-reject path used to skip the security headers.
+        assert!(
+            response
+                .headers()
+                .contains_key(header::CONTENT_SECURITY_POLICY),
+            "{path} CSRF rejection must still carry the CSP header"
+        );
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS).unwrap(),
+            "DENY",
+            "{path} CSRF rejection must still carry X-Frame-Options"
+        );
     }
+}
+
+#[tokio::test]
+async fn remembered_interstitial_rejects_off_origin_next_targets() {
+    let state = test_state();
+    let response = get(&state, "/login/remembered").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    // The client-side guard must reject "//host" and the "/\host" backslash
+    // bypass (browsers normalise "\" to "/"), so an attacker-controlled
+    // fragment cannot turn this into an open redirect.
+    assert!(
+        body.contains(r"next.charAt(1)==='\\'"),
+        "remembered-page redirect guard must reject a leading backslash"
+    );
+    assert!(body.contains("next.charAt(1)==='/'"));
 }
 
 #[tokio::test]
