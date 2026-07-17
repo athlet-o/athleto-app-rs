@@ -194,6 +194,14 @@ pub fn router(state: SharedState) -> Router {
         .route(assets::HTMX_JS_PATH, get(assets::htmx_js))
         .route(assets::HTMX_WS_JS_PATH, get(assets::htmx_ws_js))
         .route("/healthz", get(healthz))
+        // Innermost first: bound request bodies and total handler time. These
+        // sit *inside* the security layer so their 413/408 responses still flow
+        // back through `security::apply` and pick up the security headers.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         // CSRF enforcement + security headers on every route (incl. the 404
         // fallback); /api/v1 is CSRF-exempt inside the middleware.
         .layer(axum::middleware::from_fn(security::apply))
