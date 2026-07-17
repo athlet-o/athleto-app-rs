@@ -1,11 +1,14 @@
 mod account;
 mod api;
 mod auth;
+mod billing;
 mod cart;
 mod coordinate;
 mod db;
+mod entities;
 mod orders;
 mod pages;
+mod payments;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
