@@ -105,6 +105,7 @@ impl AppState {
             http,
             config,
             login_limiter: security::RateLimiter::new(),
+            cart_limiter: security::RateLimiter::new(),
             cart_events,
         }
     }
