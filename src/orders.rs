@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use axum_extra::extract::cookie::CookieJar;
