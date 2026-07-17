@@ -131,42 +131,17 @@ pub async fn orders_list(State(state): State<SharedState>, headers: HeaderMap) -
             "unit_price_cents": item.unit_price_cents,
         }));
     }
-    let shipments = db::shipments_for_user(pool, user_id).await.unwrap_or_default();
-    let mut ship_by_order: HashMap<Uuid, db::Shipment> = HashMap::new();
-    for row in &shipments {
-        ship_by_order.insert(row.order_id, row.shipment());
-    }
-
     let body: Vec<_> = orders
         .iter()
         .map(|order| {
-            let (eta_earliest, eta_latest) = order.delivery_window();
-            let tracking = ship_by_order.get(&order.id).map(|s| {
-                json!({
-                    "status": s.status.label(),
-                    "carrier": s.carrier,
-                    "tracking_number": s.tracking_number,
-                    "tracking_url": s.tracking_url(),
-                    "ship_date": s.ship_date,
-                    "eta_earliest": s.eta_earliest,
-                    "eta_latest": s.eta_latest,
-                    "delivered_at": s.delivered_at,
-                })
-            });
             json!({
                 "id": order.id,
                 "kind": order.kind.as_str(),
                 "frequency": order.frequency.map(|f| f.label()),
                 "status": order.status.label(),
                 "channel": order.channel.as_str(),
-                "ship_method": order.ship_method.as_str(),
                 "po_number": order.po_number,
-                "subtotal_cents": order.subtotal_cents,
-                "shipping_cents": order.shipping_cents,
-                "tax_cents": order.tax_cents,
                 "total_cents": order.total_cents,
-                "estimated_delivery": { "earliest": eta_earliest, "latest": eta_latest },
-                "shipment": tracking,
                 "next_run_at": order.next_run_at,
                 "created_at": order.created_at,
                 "items": items_by_order.remove(&order.id).unwrap_or_default(),
@@ -174,78 +149,6 @@ pub async fn orders_list(State(state): State<SharedState>, headers: HeaderMap) -
         })
         .collect();
     Json(json!({ "orders": body })).into_response()
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FulfillmentRequest {
-    pub carrier: String,
-    pub tracking_number: String,
-    /// ISO date (YYYY-MM-DD); defaults to today when omitted.
-    #[serde(default)]
-    pub ship_date: Option<String>,
-}
-
-/// POST /api/v1/orders/{id}/fulfillment -- record a shipment with carrier +
-/// tracking and mark the order fulfilled (the outbound "856 ASN" step). Only
-/// the order's owner (via their API key) can fulfill it.
-pub async fn order_fulfill(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    axum::extract::Path(order_id): axum::extract::Path<Uuid>,
-    Json(request): Json<FulfillmentRequest>,
-) -> Response {
-    let (user_id, _) = match authenticate(&state, &headers).await {
-        Ok(pair) => pair,
-        Err(response) => return response,
-    };
-    let pool = state.pool.as_ref().expect("authenticate checked pool");
-
-    if request.carrier.trim().is_empty() || request.tracking_number.trim().is_empty() {
-        return error_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "carrier and tracking_number are required",
-        );
-    }
-    let ship_date = match request.ship_date.as_deref() {
-        Some(raw) => match chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-            Ok(date) => date,
-            Err(_) => {
-                return error_response(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "ship_date must be YYYY-MM-DD",
-                )
-            }
-        },
-        None => chrono::Utc::now().date_naive(),
-    };
-
-    match db::record_fulfillment(
-        pool,
-        user_id,
-        order_id,
-        request.carrier.trim(),
-        request.tracking_number.trim(),
-        ship_date,
-    )
-    .await
-    {
-        Ok(Some(shipment_id)) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "shipment_id": shipment_id,
-                "order_id": order_id,
-                "status": "shipped",
-                "carrier": request.carrier.trim(),
-                "tracking_number": request.tracking_number.trim(),
-            })),
-        )
-            .into_response(),
-        Ok(None) => error_response(StatusCode::NOT_FOUND, "order not found"),
-        Err(err) => {
-            tracing::error!(error = %err, "fulfillment failed");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "fulfillment failed")
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,7 +237,6 @@ pub async fn orders_create(
         kind,
         request.frequency,
         db::OrderChannel::B2bApi,
-        db::ShipMethod::Freight,
         request.po_number.as_deref().map(str::trim).filter(|po| !po.is_empty()),
         &lines,
         None,
