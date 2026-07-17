@@ -395,6 +395,19 @@ pub async fn orders_page(
                                     form .inline-form method="post" action=(format!("/orders/{}/reorder", order.id)) {
                                         button .button type="submit" { "Reorder" }
                                     }
+                                    @if payment_retryable(order) {
+                                        @let retry_options = payment_method_options(&state.config, is_b2b);
+                                        @if !retry_options.is_empty() {
+                                            form .inline-form method="post" action=(format!("/orders/{}/pay", order.id)) {
+                                                select name="pay_method" {
+                                                    @for (value, label) in &retry_options {
+                                                        option value=(value) { (label) }
+                                                    }
+                                                }
+                                                button .button .primary type="submit" { "Pay now" }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
