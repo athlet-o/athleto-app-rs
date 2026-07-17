@@ -491,7 +491,7 @@ async fn stripe_net30_invoice(
 
     if let Some(orm) = &state.orm {
         db::set_order_payment(
-            pool,
+            orm,
             facts.id,
             PaymentProvider::Invoice,
             &invoice_id,
