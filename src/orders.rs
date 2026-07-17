@@ -366,3 +366,46 @@ pub fn checkout_form(profile: Option<&CustomerProfile>, has_2fa: bool) -> Markup
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_kind_and_frequency_map_form_values() {
+        assert_eq!(parse_kind("recurring"), OrderKind::Recurring);
+        assert_eq!(parse_kind("one_time"), OrderKind::OneTime);
+        assert_eq!(parse_kind("garbage"), OrderKind::OneTime);
+
+        assert_eq!(parse_frequency("weekly"), Some(OrderFrequency::Weekly));
+        assert_eq!(parse_frequency("quarterly"), Some(OrderFrequency::Quarterly));
+        assert_eq!(parse_frequency(""), None);
+    }
+
+    #[test]
+    fn b2b_checkout_form_blocks_until_2fa_then_shows_po_field() {
+        let profile = CustomerProfile {
+            customer_type: db::CustomerType::B2b,
+            company_name: Some("Wobble Co".into()),
+        };
+        // Business account without a verified factor: hard stop, no form.
+        let blocked = checkout_form(Some(&profile), false).into_string();
+        assert!(blocked.contains("Two-factor authentication required"));
+        assert!(!blocked.contains("Place order"));
+        // With 2FA satisfied: the order form renders, including the PO field.
+        let allowed = checkout_form(Some(&profile), true).into_string();
+        assert!(allowed.contains("Place order"));
+        assert!(allowed.contains("PO number"));
+    }
+
+    #[test]
+    fn b2c_checkout_form_has_no_po_field() {
+        let profile = CustomerProfile {
+            customer_type: db::CustomerType::B2c,
+            company_name: None,
+        };
+        let rendered = checkout_form(Some(&profile), false).into_string();
+        assert!(rendered.contains("Place order"));
+        assert!(!rendered.contains("PO number"));
+    }
+}

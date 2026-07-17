@@ -281,3 +281,45 @@ pub async fn orders_create(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The known SHA-256 of a fixed key; account::hash_api_key must agree with
+    // this same vector, or keys minted on /account would never authenticate
+    // here. Both tests assert the identical constant.
+    const VECTOR_INPUT: &str = "athk_test_vector_001";
+    const VECTOR_SHA256: &str =
+        "66adca3c7ae7f126ff03b7cc7daba157a1b9705447faaabd4fc1c2995c0d308a";
+
+    #[test]
+    fn hash_key_matches_shared_vector_and_is_deterministic() {
+        assert_eq!(hash_key(VECTOR_INPUT), VECTOR_SHA256);
+        assert_eq!(hash_key("abc"), hash_key("abc"));
+        assert_ne!(hash_key("abc"), hash_key("abd"));
+        assert_eq!(hash_key(VECTOR_INPUT).len(), 64);
+    }
+
+    #[test]
+    fn api_order_request_accepts_slug_or_id_forms() {
+        let by_slug: ApiOrderRequest = serde_json::from_value(serde_json::json!({
+            "po_number": "PO-1",
+            "items": [{ "slug": "recover-o-cup", "qty": 24 }]
+        }))
+        .unwrap();
+        assert_eq!(by_slug.items.len(), 1);
+        assert_eq!(by_slug.items[0].slug.as_deref(), Some("recover-o-cup"));
+        assert_eq!(by_slug.items[0].qty, 24);
+
+        let by_id: ApiOrderRequest = serde_json::from_value(serde_json::json!({
+            "kind": "recurring",
+            "frequency": "monthly",
+            "items": [{ "product_id": 3, "qty": 2 }]
+        }))
+        .unwrap();
+        assert_eq!(by_id.items[0].product_id, Some(3));
+        assert!(matches!(by_id.kind, Some(db::OrderKind::Recurring)));
+        assert!(matches!(by_id.frequency, Some(db::OrderFrequency::Monthly)));
+    }
+}
