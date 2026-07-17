@@ -1244,7 +1244,11 @@ pub async fn square_webhook(
                 if let Some(order_id) =
                     db::find_order_by_payment_ref(&orm, PaymentProvider::Square, square_order).await?
                 {
-                    settle_order(&state, &orm, order_id, PaymentProvider::Square, payment_id, PaymentKind::Charge)
+                    let charged = charged_minor(
+                        &payment["amount_money"]["amount"],
+                        &payment["amount_money"]["currency"],
+                    );
+                    settle_order(&state, &orm, order_id, PaymentProvider::Square, payment_id, PaymentKind::Charge, charged)
                         .await?;
                 }
             }
