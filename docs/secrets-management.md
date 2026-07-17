@@ -72,26 +72,50 @@ that's the end state.
   `DATABASE_URL`, all `ATHLETO_*` payment/billing vars), any name the
   **environment does not set** is fetched once from the fiducia config KV at
   `secrets/athleto/<ENV_NAME>` (org-namespaced by the API key).
+- **Client-side envelope encryption (the audit fix).** KV values are
+  AES-256-GCM ciphertext with a `v1:` prefix (`v1:` + base64(nonce‖ct‖tag)).
+  The app decrypts them with `ATHLETO_SECRETS_KEY` (base64 of a 32-byte key)
+  sourced from env only — i.e. from AWS SM / secrets.env, **never** from
+  fiducia. So fiducia only ever holds opaque ciphertext; a KV-disk or
+  peer-network compromise reveals nothing.
+- **Fail-safe on the key:** if `ATHLETO_SECRETS_KEY` is unset, the overlay is
+  disabled entirely (env-only) with a warning — the app will not read
+  plaintext out of the KV. A value that isn't a decryptable `v1:` envelope is
+  ignored, never accepted as a secret.
 - **Precedence: env always wins.** ESO/AWS-SM deployments behave exactly as
-  before; the overlay only fills gaps. Fiducia down / key missing / value
-  empty ⇒ identical to unset env (the app boots degraded, as always).
+  before; the overlay only fills gaps. Fiducia down / key missing / undecryptable
+  ⇒ identical to unset env (the app boots degraded, as always).
 - The allowlist is deliberate: nothing outside it is ever read from KV, so a
   writable KV can't inject `PATH`-style variables. Log lines name filled keys,
   never values.
 
-Publishing a value for dev/test (until the encrypted `/v1/secrets` exists,
-put only test-mode keys here):
+Publishing a value (seal client-side, then PUT the ciphertext; put only
+test-mode keys here until the fiducia scope work below lands):
 
 ```sh
+# Seal with the same AES-256 key the app decrypts with (base64 32 bytes).
+# `secrets::seal_envelope` produces the "v1:<base64>" string; store THAT:
 curl -X PUT "$FIDUCIA_URL/v1/kv?key=secrets/athleto/ATHLETO_STRIPE_SECRET_KEY" \
   -H "Authorization: Bearer $FIDUCIA_API_KEY" \
   -H 'content-type: application/json' \
-  -d '{"value": "sk_test_..."}'
+  -d '{"value": "v1:BASE64_SEALED_CIPHERTEXT"}'
 ```
 
-When `fiducia-secrets` lands, this seam switches from `/v1/kv` to
-`/v1/secrets` in one place (`kv_get`) — the app and its config code don't
-change again.
+The plaintext never leaves the machine that holds `ATHLETO_SECRETS_KEY`;
+fiducia stores only the `v1:` blob.
+
+## Remaining fiducia-side work (from the audit)
+
+1. **Narrow the read scope for secrets.** Today any credential with org-wide
+   `kv:read` can enumerate `secrets/*`. Give the secrets namespace a dedicated
+   `secrets:`-scoped grant (or per-prefix scoping) so a general KV key can't
+   read the whole set. (HIGH)
+2. **At-rest encryption + peer mTLS in fiducia-node**, so non-app-encrypted
+   coordination data (lock holders, KV used by other services) is also
+   protected. Then a true `/v1/secrets/*` API can supersede this client-side
+   scheme — at which point the seam is `kv_get` + `decrypt_envelope`. (MEDIUM)
+3. **Per-org KV quota + key validation** to remove the memory-exhaustion DoS
+   on a shared coordination dependency. (MEDIUM)
 
 ## Rotation story
 
