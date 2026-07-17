@@ -219,8 +219,9 @@ async fn gotrue_error_message(response: reqwest::Response) -> String {
 }
 
 /// Scheme + host to build same-site redirect URLs from, derived from the Host
-/// header so app./biz./localhost all round-trip to themselves.
-fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
+/// header so app./biz./localhost all round-trip to themselves. Also used by
+/// checkout to build payment success/cancel return URLs on the same host.
+pub fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
     let host = headers
         .get(HOST)
         .and_then(|value| value.to_str().ok())
