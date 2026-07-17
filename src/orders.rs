@@ -300,9 +300,27 @@ pub async fn quick_order_submit(
     if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
         return Ok(redirect);
     }
+    // Quick order is the B2B bulk entry point; `require_b2b_ready` is a no-op
+    // for B2C, so gate the endpoint on the profile explicitly rather than let a
+    // personal account drive it.
+    if !profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b)
+        .unwrap_or(false)
+    {
+        return Ok(Redirect::to("/").into_response());
+    }
     let Some(pool) = &state.pool else {
         return Ok(Redirect::to("/cart").into_response());
     };
+
+    // Validate product ids against the catalog up front: an unknown id would
+    // otherwise hit the cart_items FK and surface as a 500.
+    let valid_products: std::collections::HashSet<i64> = db::product_prices(pool)
+        .await?
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect();
 
     let owner = CartOwner::User(auth_user.id);
     let cart_id = db::find_or_create_cart(pool, &owner).await?;
@@ -311,10 +329,14 @@ pub async fn quick_order_submit(
         else {
             continue;
         };
+        if !valid_products.contains(&product_id) {
+            continue;
+        }
         let qty: i32 = value.trim().parse().unwrap_or(0);
         if qty <= 0 {
             continue;
         }
+        let qty = crate::cart::clamp_line_qty(qty);
         db::add_cart_item(pool, cart_id, product_id, qty).await?;
         let total_qty = db::cart_lines(pool, cart_id)
             .await?
