@@ -859,30 +859,61 @@ mod tests {
         assert_eq!(parse_frequency(""), None);
     }
 
+    fn config_with_stripe() -> crate::Config {
+        crate::Config {
+            stripe: Some(payments::StripeConfig {
+                secret_key: "sk_test_x".into(),
+                webhook_secret: None,
+            }),
+            ..crate::Config::default()
+        }
+    }
+
     #[test]
     fn b2b_checkout_form_blocks_until_2fa_then_shows_po_field() {
+        let config = crate::Config::default();
         let profile = CustomerProfile {
             customer_type: db::CustomerType::B2b,
             company_name: Some("Wobble Co".into()),
         };
         // Business account without a verified factor: hard stop, no form.
-        let blocked = checkout_form(Some(&profile), false).into_string();
+        let blocked = checkout_form(&config, Some(&profile), false).into_string();
         assert!(blocked.contains("Two-factor authentication required"));
         assert!(!blocked.contains("Place order"));
         // With 2FA satisfied: the order form renders, including the PO field.
-        let allowed = checkout_form(Some(&profile), true).into_string();
+        let allowed = checkout_form(&config, Some(&profile), true).into_string();
         assert!(allowed.contains("Place order"));
         assert!(allowed.contains("PO number"));
     }
 
     #[test]
     fn b2c_checkout_form_has_no_po_field() {
+        let config = crate::Config::default();
         let profile = CustomerProfile {
             customer_type: db::CustomerType::B2c,
             company_name: None,
         };
-        let rendered = checkout_form(Some(&profile), false).into_string();
+        let rendered = checkout_form(&config, Some(&profile), false).into_string();
         assert!(rendered.contains("Place order"));
         assert!(!rendered.contains("PO number"));
+    }
+
+    #[test]
+    fn payment_options_follow_configured_providers_and_cohort() {
+        // Nothing configured: no options, and the form says orders go
+        // payment-pending.
+        let bare = crate::Config::default();
+        assert!(payment_method_options(&bare, false).is_empty());
+        let rendered = checkout_form(&bare, None, false).into_string();
+        assert!(rendered.contains("payment-pending"));
+
+        // Stripe configured: B2C gets cards; B2B additionally gets ACH
+        // wording and the Net-30 invoice option.
+        let config = config_with_stripe();
+        let b2c: Vec<_> = payment_method_options(&config, false);
+        assert_eq!(b2c, vec![("stripe", "Card (Stripe)")]);
+        let b2b = payment_method_options(&config, true);
+        assert!(b2b.iter().any(|(value, _)| *value == "invoice"));
+        assert!(b2b.iter().any(|(_, label)| label.contains("ACH")));
     }
 }
