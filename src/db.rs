@@ -1042,10 +1042,13 @@ pub async fn place_order(
         return Err(OrderError::Insufficient(shortages));
     }
 
-    let total: i64 = sorted
+    let subtotal: i64 = sorted
         .iter()
         .map(|line| i64::from(line.unit_price_cents) * i64::from(line.qty))
         .sum();
+    let shipping = ship_method.shipping_cents();
+    let tax = 0; // Sales tax is calculated at fulfillment by jurisdiction.
+    let total = subtotal + shipping + tax;
     let next_run_at = match (kind, frequency) {
         (OrderKind::Recurring, Some(freq)) => {
             Some(Utc::now() + chrono::Duration::days(freq.interval_days()))
@@ -1053,14 +1056,20 @@ pub async fn place_order(
         _ => None,
     };
     let (order_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO orders (user_id, kind, frequency, channel, po_number, total_cents, next_run_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        "INSERT INTO orders \
+         (user_id, kind, frequency, channel, ship_method, po_number, \
+          subtotal_cents, shipping_cents, tax_cents, total_cents, next_run_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
     )
     .bind(user_id)
     .bind(kind)
     .bind(frequency)
     .bind(channel)
+    .bind(ship_method)
     .bind(po_number)
+    .bind(subtotal)
+    .bind(shipping)
+    .bind(tax)
     .bind(total)
     .bind(next_run_at)
     .fetch_one(&mut *tx)
