@@ -188,10 +188,10 @@ pub async fn start_payment(
     is_b2b: bool,
     po_number: Option<&str>,
 ) -> Result<StartOutcome, PaymentError> {
-    let Some(pool) = &state.pool else {
+    let (Some(pool), Some(orm)) = (&state.pool, &state.orm) else {
         return Ok(StartOutcome::NotConfigured);
     };
-    let Some(facts) = db::order_payment_facts(pool, order_id).await? else {
+    let Some(facts) = db::order_payment_facts(orm, order_id).await? else {
         return Err(PaymentError::Provider("order not found".into()));
     };
     let items = db::order_items(pool, order_id).await?;
