@@ -286,7 +286,7 @@ pub async fn orders_page(
                             div .order-head {
                                 a .order-id href=(format!("/orders/{}", order.id)) { "Order " (order.short_id()) }
                                 span .status-badge .(status_class(order.status)) { (order.status.label()) }
-                                @if order.recurs_flag() { span .status-badge .st-sub { "subscription" } }
+                                @if order.kind == db::OrderKind::Recurring { span .status-badge .st-sub { "subscription" } }
                                 span .muted-inline { (order.created_at.format("%b %-d, %Y")) }
                             }
                             p .order-meta {
