@@ -1325,6 +1325,26 @@ fn charge_matches(charged: &Charged, expected_cents: i64) -> bool {
     charged.amount_cents == expected_cents && charged.currency.eq_ignore_ascii_case("usd")
 }
 
+/// Build a `Charged` from a minor-units amount field + currency field
+/// (Stripe `amount_total`/`amount_paid` in cents, Square `amount_money`).
+/// Returns `None` when either field is absent, so the caller settles without
+/// a cross-check rather than on bogus data.
+fn charged_minor(amount: &Value, currency: &Value) -> Option<Charged> {
+    Some(Charged {
+        amount_cents: amount.as_i64()?,
+        currency: currency.as_str()?.to_string(),
+    })
+}
+
+/// Build a `Charged` from a decimal amount string + currency (PayPal
+/// `amount.value` / `amount.total`).
+fn charged_decimal(value: &Value, currency: &Value) -> Option<Charged> {
+    Some(Charged {
+        amount_cents: decimal_to_cents(value.as_str()?)?,
+        currency: currency.as_str()?.to_string(),
+    })
+}
+
 /// Mark an order paid, record the money movement once, and mirror it into
 /// the Quaestor ledger (invoice + payment postings) on first sight. When the
 /// caller can supply the provider-reported charge, it is verified against the
