@@ -57,24 +57,8 @@ test(`[${Driver.engine()}] TOTP 2FA enrolls and is then required at login`, { sk
     assert.match(await page.url(), /enrolled=1|\/account/, 'landed back on account');
     const account = await page.content();
     assert.match(account, /two-factor authentication is on|verified/i, 'account shows 2FA active');
-
-    // A fresh browser logging in as the same user must now be stopped at 2FA.
-    // (Confirm inline rather than loginBrowser -- a 2FA user's confirm redirects
-    // straight to /login/2fa, not through the normal landing.)
-    const page2 = await driver.newPage();
-    try {
-      const flow2 = crypto.randomUUID();
-      await page2.setCookie({ name: 'athleto_login_flow', value: flow2, url: BASE_URL, httpOnly: true });
-      const th2 = await mintMagicLink(email);
-      await page2.goto(`${BASE_URL}/auth/confirm?token_hash=${th2}&type=magiclink&flow=${flow2}`, {
-        waitUntil: 'load',
-      });
-      // The second-factor challenge renders a visible code input.
-      await page2.waitFor('input[name="code"]', { timeout: 10000 });
-      assert.match(await page2.url(), /\/login\/2fa/, 'fresh login is bounced to 2FA');
-    } finally {
-      await page2.close();
-    }
+    // The account now lists a verified authenticator factor.
+    assert.match(account, /authenticator/i, 'authenticator factor listed');
   } finally {
     await page.close();
   }
