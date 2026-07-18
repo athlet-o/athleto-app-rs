@@ -15,5 +15,8 @@ pub mod inventory;
 pub mod login_event;
 pub mod order;
 pub mod order_item;
+pub mod payment;
+pub mod payment_event;
+pub mod payment_subscription;
 pub mod product;
 pub mod stock_hold;

@@ -143,6 +143,7 @@ pub struct CartPageParams {
 }
 
 fn cart_page_markup(
+    config: &crate::Config,
     user: &MaybeUser,
     biz: Biz,
     profile: Option<&CustomerProfile>,
@@ -187,6 +188,7 @@ fn cart_page_markup(
                 (cart_contents(lines))
                 @if user.as_ref().is_some() && !lines.is_empty() {
                     (orders::checkout_form(
+                        config,
                         profile,
                         user.as_ref().map(|u| u.has_verified_factor()).unwrap_or(false),
                     ))
@@ -247,7 +249,15 @@ pub async fn cart_page(
         Some(auth_user) => auth::load_profile(&state, auth_user.id).await,
         None => None,
     };
-    Ok(cart_page_markup(&user, biz, profile.as_ref(), &lines, hold_seconds, &params)
+    Ok(cart_page_markup(
+        &state.config,
+        &user,
+        biz,
+        profile.as_ref(),
+        &lines,
+        hold_seconds,
+        &params,
+    )
         .into_response())
 }
 

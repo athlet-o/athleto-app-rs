@@ -6,13 +6,16 @@ pub mod account;
 pub mod api;
 pub mod assets;
 pub mod auth;
+pub mod billing;
 pub mod cart;
 pub mod coordinate;
 pub mod db;
 pub mod entities;
 pub mod orders;
 pub mod pages;
+pub mod payments;
 pub mod security;
+pub mod secrets;
 pub mod ws;
 
 use std::sync::Arc;
@@ -29,6 +32,9 @@ use tower_http::trace::TraceLayer;
 /// Hard ceiling on request bodies. Storefront forms and the JSON API are tiny;
 /// anything larger is abuse, so cap it before a handler buffers it.
 const MAX_BODY_BYTES: usize = 512 * 1024;
+/// Provider webhook payloads are tiny; cap them well below the general form
+/// limit before a handler buffers bytes for signature verification.
+const MAX_WEBHOOK_BODY_BYTES: usize = 64 * 1024;
 /// Whole-request timeout. Bounds slow-body / slow-handler resource holding.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -37,12 +43,14 @@ pub use auth::{auth_session_cookie, refresh_session_cookie};
 /// Environment-derived configuration. Every field is optional so the app can
 /// boot (and pass health checks) with no secrets present; features that need
 /// a missing value degrade to a "not configured" notice instead of failing.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub supabase_url: Option<String>,
     pub supabase_anon_key: Option<String>,
     /// Fallback origin for auth redirects when the Host header is absent.
     pub public_base_url: String,
+    /// Canonical B2B origin. Never derive this from an arbitrary Host header.
+    pub biz_public_base_url: String,
     /// Host-header allowlist (ALLOWED_HOSTS, comma-separated). `None` means
     /// permissive -- dev convenience -- with a warning logged at startup.
     pub allowed_hosts: Option<Vec<String>>,
@@ -56,6 +64,15 @@ pub struct Config {
     pub fiducia_api_key: Option<String>,
     /// Identifies this replica in fiducia lease holder strings.
     pub replica_id: String,
+    /// Dedicated warehouse/EDI credential. Customer API keys never fulfill
+    /// orders, even when they belong to an approved B2B account.
+    pub operations_api_key: Option<String>,
+    /// Hosted payment providers; absent configuration simply hides the option.
+    pub stripe: Option<payments::StripeConfig>,
+    pub paypal: Option<payments::PayPalConfig>,
+    pub square: Option<payments::SquareConfig>,
+    /// Optional observer-only AR/AP ledger integration.
+    pub billing: Option<billing::BillingConfig>,
 }
 
 impl Default for Config {
@@ -64,11 +81,17 @@ impl Default for Config {
             supabase_url: None,
             supabase_anon_key: None,
             public_base_url: "https://app.athleto.store".to_string(),
+            biz_public_base_url: "https://biz.athleto.store".to_string(),
             allowed_hosts: None,
             sms_mfa_enabled: false,
             fiducia_url: None,
             fiducia_api_key: None,
             replica_id: "local".to_string(),
+            operations_api_key: None,
+            stripe: None,
+            paypal: None,
+            square: None,
+            billing: None,
         }
     }
 }
@@ -94,6 +117,24 @@ impl Config {
         };
         let bare = host.split(':').next().unwrap_or(host);
         allowed.iter().any(|entry| entry == bare)
+    }
+
+    /// B2B chrome and redirects are controlled by the configured canonical
+    /// B2B origin, never a `biz.` prefix supplied by the requester.
+    pub fn is_biz_host(&self, host: &str) -> bool {
+        let bare = host.split(':').next().unwrap_or(host);
+        let configured = self
+            .biz_public_base_url
+            .split_once("://")
+            .map(|(_, host)| host)
+            .unwrap_or(&self.biz_public_base_url)
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .split(':')
+            .next()
+            .unwrap_or_default();
+        self.host_allowed(host) && bare.eq_ignore_ascii_case(configured)
     }
 }
 
@@ -199,7 +240,22 @@ pub fn router(state: SharedState) -> Router {
         .route("/orders", get(orders::orders_page))
         .route("/orders/{id}", get(orders::order_detail_page))
         .route("/orders/{id}/reorder", post(orders::reorder))
+        .route("/orders/{id}/pay", post(orders::pay_now))
         .route("/quick-order", get(orders::quick_order_page).post(orders::quick_order_submit))
+        .route("/pay/success", get(payments::pay_success))
+        .route("/pay/cancel", get(payments::pay_cancel))
+        .route(
+            "/webhooks/stripe",
+            post(payments::stripe_webhook).layer(RequestBodyLimitLayer::new(MAX_WEBHOOK_BODY_BYTES)),
+        )
+        .route(
+            "/webhooks/paypal",
+            post(payments::paypal_webhook).layer(RequestBodyLimitLayer::new(MAX_WEBHOOK_BODY_BYTES)),
+        )
+        .route(
+            "/webhooks/square",
+            post(payments::square_webhook).layer(RequestBodyLimitLayer::new(MAX_WEBHOOK_BODY_BYTES)),
+        )
         // B2B ERP API. The fulfillment hook is the outbound "856 ASN" step:
         // ops or an EDI provider records carrier + tracking there.
         .route("/api/v1/products", get(api::products))

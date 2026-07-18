@@ -27,9 +27,10 @@ and a powder packet (just add water).
 | --- | --- |
 | `GET /` | Storefront product grid (both formats, prices, calories) |
 | `GET /product/{slug}` | Product detail |
-| `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase GoTrue auth; session tokens in HttpOnly Secure SameSite=Lax cookies |
+| `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase GoTrue auth; browser-bound magic links and session tokens in HttpOnly Secure SameSite=Lax cookies |
 | `GET /cart`, `POST /cart/items`, `POST /cart/items/{id}/delete` | Cart pages + htmx fragments; keyed by Supabase user id or anonymous cart cookie |
-| `POST /checkout`, `GET /orders`, `GET /orders/{id}`, `POST /orders/{id}/reorder` | Checkout (one-time/recurring, ship method, B2B PO), order history with status/ETA/tracking + B2B filters, printable receipt, reorder |
+| `POST /checkout`, `GET /orders`, `GET /orders/{id}`, `POST /orders/{id}/reorder`, `POST /orders/{id}/pay` | Hosted payment checkout/retry (Stripe, PayPal, Square; approved B2B Net-30 invoices), order history with status/ETA/tracking + B2B filters, printable receipt, reorder |
+| `GET /pay/{success,cancel}`, `POST /webhooks/{stripe,paypal,square}` | Verified provider returns and signed, replay-safe payment webhooks |
 | `GET|POST /quick-order` | B2B case-quantity grid straight into the cart |
 | `GET|POST /api/v1/...` | ERP JSON API (hashed `athk_` keys): products, orders (list/create), `POST /api/v1/orders/{id}/fulfillment` records carrier + tracking (856-style) |
 | `GET /ws` | Authenticated websocket pushing HTML fragments (htmx ws extension, `hx-swap-oob`): live cart-hold countdown; `GET /cart/hold` polling remains the fallback |
@@ -45,8 +46,15 @@ and a powder packet (just add water).
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
+| `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical B2C/B2B browser origins for auth and provider returns |
 | `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
+| `ATHLETO_OPERATIONS_API_KEY` | *(unset)* | Dedicated bearer credential for warehouse-only fulfillment writes |
+| `ATHLETO_STRIPE_SECRET_KEY` / `ATHLETO_STRIPE_WEBHOOK_SECRET` | *(unset)* | Stripe hosted checkout and signed webhook verification; also enables approved B2B Net-30 invoices |
+| `ATHLETO_PAYPAL_CLIENT_ID` / `ATHLETO_PAYPAL_CLIENT_SECRET` / `ATHLETO_PAYPAL_WEBHOOK_ID` | *(unset)* | PayPal hosted checkout/subscriptions and webhook verification |
+| `ATHLETO_SQUARE_ACCESS_TOKEN` / `ATHLETO_SQUARE_LOCATION_ID` / `ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY` | *(unset)* | Square hosted checkout/subscriptions and signature verification |
+| `ATHLETO_BILLING_URL` / `ATHLETO_BILLING_API_KEY` / `ATHLETO_BILLING_TENANT_ID` | *(unset)* | Optional observer-only AR/AP ledger integration |
 | `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(unset)* | fiducia.cloud lock service for singleton-job leadership leases (sweeper / recurring runner); unset = Postgres advisory-lock fallback |
+| `ATHLETO_SECRETS_KEY` | *(unset)* | Base64 32-byte AES key used only to decrypt approved `v1:` secret envelopes from fiducia KV; unset keeps secrets environment-only |
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a

@@ -11,17 +11,19 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
+    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    DbBackend, DbErr,
     DeriveActiveEnum, EntityTrait, EnumIter, FromQueryResult, QueryFilter, QueryOrder,
-    QuerySelect, Set, SqlxPostgresConnector, Statement, TransactionTrait, Value,
+    QuerySelect, Set, SqlxPostgresConnector, Statement, TransactionTrait, TryInsertResult, Value,
 };
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 use crate::entities::{
-    b2b_api_key, cart, cart_item, customer_profile, login_event, order, product, stock_hold,
+    b2b_api_key, cart, cart_item, customer_profile, login_event, order, payment,
+    payment_event, payment_subscription, product, stock_hold,
 };
 
 pub use crate::entities::product::Model as Product;
@@ -331,11 +333,16 @@ impl CustomerType {
 pub struct CustomerProfile {
     pub customer_type: CustomerType,
     pub company_name: Option<String>,
+    pub b2b_approved_at: Option<DateTime<Utc>>,
 }
 
 impl CustomerProfile {
     pub fn is_b2b(&self) -> bool {
         self.customer_type == CustomerType::B2b
+    }
+
+    pub fn is_b2b_approved(&self) -> bool {
+        self.is_b2b() && self.b2b_approved_at.is_some()
     }
 }
 
@@ -349,6 +356,7 @@ pub async fn get_profile(
         .map(|profile| CustomerProfile {
             customer_type: profile.customer_type,
             company_name: profile.company_name,
+            b2b_approved_at: profile.b2b_approved_at,
         }))
 }
 
@@ -364,6 +372,8 @@ pub async fn upsert_profile(
          ON CONFLICT (user_id) DO UPDATE \
          SET customer_type = EXCLUDED.customer_type, \
              company_name = EXCLUDED.company_name, \
+             b2b_approved_at = CASE WHEN EXCLUDED.customer_type = 'b2c' \
+                                    THEN NULL ELSE customer_profiles.b2b_approved_at END, \
              updated_at = now()",
         [
             user_id.into(),
@@ -550,6 +560,93 @@ pub enum ShipMethod {
     Freight,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_provider")]
+pub enum PaymentProvider {
+    #[sea_orm(string_value = "stripe")]
+    Stripe,
+    #[sea_orm(string_value = "paypal")]
+    Paypal,
+    #[sea_orm(string_value = "square")]
+    Square,
+    #[sea_orm(string_value = "invoice")]
+    Invoice,
+}
+
+impl PaymentProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stripe => "stripe",
+            Self::Paypal => "paypal",
+            Self::Square => "square",
+            Self::Invoice => "invoice",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stripe => "Card / bank (Stripe)",
+            Self::Paypal => "PayPal",
+            Self::Square => "Square",
+            Self::Invoice => "Invoice (Net 30)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_status")]
+pub enum PaymentStatus {
+    #[sea_orm(string_value = "pending")]
+    Pending,
+    #[sea_orm(string_value = "processing")]
+    Processing,
+    #[sea_orm(string_value = "paid")]
+    Paid,
+    #[sea_orm(string_value = "invoiced")]
+    Invoiced,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+    #[sea_orm(string_value = "refunded")]
+    Refunded,
+}
+
+impl PaymentStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "payment pending",
+            Self::Processing => "payment processing",
+            Self::Paid => "paid",
+            Self::Invoiced => "invoiced net 30",
+            Self::Failed => "payment failed",
+            Self::Refunded => "refunded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_kind")]
+pub enum PaymentKind {
+    #[sea_orm(string_value = "charge")]
+    Charge,
+    #[sea_orm(string_value = "subscription_cycle")]
+    SubscriptionCycle,
+    #[sea_orm(string_value = "refund")]
+    Refund,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "subscription_status")]
+pub enum SubscriptionStatus {
+    #[sea_orm(string_value = "pending")]
+    Pending,
+    #[sea_orm(string_value = "active")]
+    Active,
+    #[sea_orm(string_value = "past_due")]
+    PastDue,
+    #[sea_orm(string_value = "cancelled")]
+    Cancelled,
+}
+
 impl ShipMethod {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -611,6 +708,10 @@ pub struct OrderRow {
     pub total_cents: i64,
     pub next_run_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub payment_provider: Option<PaymentProvider>,
+    pub payment_status: PaymentStatus,
+    pub payment_ref: Option<String>,
+    pub paid_at: Option<DateTime<Utc>>,
 }
 
 impl OrderRow {
@@ -629,6 +730,10 @@ impl OrderRow {
             total_cents: order.total_cents,
             next_run_at: order.next_run_at,
             created_at: order.created_at,
+            payment_provider: order.payment_provider,
+            payment_status: order.payment_status,
+            payment_ref: order.payment_ref,
+            paid_at: order.paid_at,
         }
     }
 
@@ -1235,30 +1340,29 @@ pub async fn shipments_for_user(
 }
 
 /// Record a fulfillment (ops / EDI 856): create a shipment with carrier +
-/// tracking and advance the order to fulfilled. Ownership is checked so an
-/// API key can only fulfill its own orders. Returns None if the order isn't
-/// the user's.
+/// tracking and advance the order to fulfilled. The caller is authenticated
+/// separately with the dedicated operations credential; customer API keys
+/// cannot mutate fulfillment state. Returns None for an unknown order.
 pub async fn record_fulfillment(
     conn: &DatabaseConnection,
-    user_id: Uuid,
     order_id: Uuid,
     carrier: &str,
     tracking_number: &str,
     ship_date: chrono::NaiveDate,
 ) -> Result<Option<Uuid>, DbErr> {
     let tx = conn.begin().await?;
-    let owned = tx
+    let order = tx
         .query_one(stmt(
             "SELECT ship_method::text AS ship_method FROM orders \
-             WHERE id = $1 AND user_id = $2 FOR UPDATE",
-            [order_id.into(), user_id.into()],
+             WHERE id = $1 FOR UPDATE",
+            [order_id.into()],
         ))
         .await?;
-    let Some(owned_row) = owned else {
+    let Some(order) = order else {
         tx.rollback().await?;
         return Ok(None);
     };
-    let ship_method = ShipMethod::parse(&owned_row.try_get::<String>("", "ship_method")?)
+    let ship_method = ShipMethod::parse(&order.try_get::<String>("", "ship_method")?)
         .unwrap_or(ShipMethod::Standard);
 
     let (min, max) = ship_method.eta_business_days();
@@ -1451,6 +1555,253 @@ pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, 
         tx.commit().await?;
     }
     Ok(created)
+}
+
+// ---------------------------------------------------------------------------
+// Payments. These tables are new and therefore use SeaORM exclusively.
+
+pub async fn set_order_payment(
+    conn: &DatabaseConnection,
+    order_id: Uuid,
+    provider: PaymentProvider,
+    payment_ref: &str,
+    status: PaymentStatus,
+) -> Result<(), DbErr> {
+    let Some(row) = order::Entity::find_by_id(order_id).one(conn).await? else {
+        return Ok(());
+    };
+    let mut active: order::ActiveModel = row.into();
+    active.payment_provider = Set(Some(provider));
+    active.payment_ref = Set(Some(payment_ref.to_string()));
+    active.payment_status = Set(status);
+    active.update(conn).await?;
+    Ok(())
+}
+
+pub async fn set_order_payment_status(
+    conn: &DatabaseConnection,
+    order_id: Uuid,
+    status: PaymentStatus,
+) -> Result<(), DbErr> {
+    let Some(row) = order::Entity::find_by_id(order_id).one(conn).await? else {
+        return Ok(());
+    };
+    let stamp_paid = status == PaymentStatus::Paid && row.paid_at.is_none();
+    let mut active: order::ActiveModel = row.into();
+    active.payment_status = Set(status);
+    if stamp_paid {
+        active.paid_at = Set(Some(Utc::now()));
+    }
+    active.update(conn).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderPaymentFacts {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub total_cents: i64,
+    pub kind: OrderKind,
+    pub frequency: Option<OrderFrequency>,
+    pub payment_provider: Option<PaymentProvider>,
+    pub payment_status: PaymentStatus,
+    pub payment_ref: Option<String>,
+}
+
+impl From<order::Model> for OrderPaymentFacts {
+    fn from(row: order::Model) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+            total_cents: row.total_cents,
+            kind: row.kind,
+            frequency: row.frequency,
+            payment_provider: row.payment_provider,
+            payment_status: row.payment_status,
+            payment_ref: row.payment_ref,
+        }
+    }
+}
+
+pub async fn order_payment_facts(
+    conn: &DatabaseConnection,
+    order_id: Uuid,
+) -> Result<Option<OrderPaymentFacts>, DbErr> {
+    Ok(order::Entity::find_by_id(order_id)
+        .one(conn)
+        .await?
+        .map(OrderPaymentFacts::from))
+}
+
+pub async fn find_order_by_payment_ref(
+    conn: &DatabaseConnection,
+    provider: PaymentProvider,
+    payment_ref: &str,
+) -> Result<Option<Uuid>, DbErr> {
+    Ok(order::Entity::find()
+        .filter(order::Column::PaymentProvider.eq(provider))
+        .filter(order::Column::PaymentRef.eq(payment_ref))
+        .one(conn)
+        .await?
+        .map(|row| row.id))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn record_payment(
+    conn: &DatabaseConnection,
+    order_id: Option<Uuid>,
+    user_id: Uuid,
+    provider: PaymentProvider,
+    kind: PaymentKind,
+    provider_ref: &str,
+    amount_cents: i64,
+    status: PaymentStatus,
+) -> Result<bool, DbErr> {
+    let existing = payment::Entity::find()
+        .filter(payment::Column::Provider.eq(provider))
+        .filter(payment::Column::ProviderRef.eq(provider_ref))
+        .one(conn)
+        .await?;
+    match existing {
+        Some(row) => {
+            let mut active: payment::ActiveModel = row.into();
+            active.status = Set(status);
+            active.updated_at = Set(Utc::now());
+            active.update(conn).await?;
+            Ok(false)
+        }
+        None => {
+            payment::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                order_id: Set(order_id),
+                user_id: Set(user_id),
+                provider: Set(provider),
+                kind: Set(kind),
+                provider_ref: Set(provider_ref.to_string()),
+                amount_cents: Set(amount_cents),
+                currency: Set("USD".to_string()),
+                status: Set(status),
+                created_at: NotSet,
+                updated_at: NotSet,
+            }
+            .insert(conn)
+            .await?;
+            Ok(true)
+        }
+    }
+}
+
+pub async fn upsert_subscription(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+    order_id: Option<Uuid>,
+    provider: PaymentProvider,
+    provider_ref: &str,
+    status: SubscriptionStatus,
+    frequency: OrderFrequency,
+) -> Result<(), DbErr> {
+    let existing = payment_subscription::Entity::find()
+        .filter(payment_subscription::Column::Provider.eq(provider))
+        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
+        .one(conn)
+        .await?;
+    match existing {
+        Some(row) => {
+            let mut active: payment_subscription::ActiveModel = row.into();
+            active.status = Set(status);
+            active.updated_at = Set(Utc::now());
+            active.update(conn).await?;
+        }
+        None => {
+            payment_subscription::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                user_id: Set(user_id),
+                order_id: Set(order_id),
+                provider: Set(provider),
+                provider_ref: Set(provider_ref.to_string()),
+                status: Set(status),
+                frequency: Set(frequency),
+                created_at: NotSet,
+                updated_at: NotSet,
+            }
+            .insert(conn)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn set_subscription_status(
+    conn: &DatabaseConnection,
+    provider: PaymentProvider,
+    provider_ref: &str,
+    status: SubscriptionStatus,
+) -> Result<(), DbErr> {
+    let Some(row) = payment_subscription::Entity::find()
+        .filter(payment_subscription::Column::Provider.eq(provider))
+        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
+        .one(conn)
+        .await?
+    else {
+        return Ok(());
+    };
+    let mut active: payment_subscription::ActiveModel = row.into();
+    active.status = Set(status);
+    active.updated_at = Set(Utc::now());
+    active.update(conn).await?;
+    Ok(())
+}
+
+pub async fn subscription_owner(
+    conn: &DatabaseConnection,
+    provider: PaymentProvider,
+    provider_ref: &str,
+) -> Result<Option<(Uuid, Option<Uuid>)>, DbErr> {
+    Ok(payment_subscription::Entity::find()
+        .filter(payment_subscription::Column::Provider.eq(provider))
+        .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
+        .one(conn)
+        .await?
+        .map(|row| (row.user_id, row.order_id)))
+}
+
+pub async fn record_payment_event(
+    conn: &DatabaseConnection,
+    provider: PaymentProvider,
+    event_id: &str,
+    payload: &serde_json::Value,
+) -> Result<bool, DbErr> {
+    let outcome = payment_event::Entity::insert(payment_event::ActiveModel {
+        provider: Set(provider),
+        event_id: Set(event_id.to_string()),
+        payload: Set(payload.clone()),
+        received_at: NotSet,
+    })
+    .on_conflict(
+        OnConflict::columns([
+            payment_event::Column::Provider,
+            payment_event::Column::EventId,
+        ])
+        .do_nothing()
+        .to_owned(),
+    )
+    .do_nothing()
+    .exec(conn)
+    .await?;
+    Ok(matches!(outcome, TryInsertResult::Inserted(_)))
+}
+
+pub async fn latest_email_for_user(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+) -> Result<Option<String>, DbErr> {
+    conn.query_one(stmt(
+        "SELECT email FROM login_events WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+        [user_id.into()],
+    ))
+    .await?
+    .map(|row| row.try_get("", "email"))
+    .transpose()
 }
 
 #[cfg(test)]

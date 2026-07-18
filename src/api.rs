@@ -62,7 +62,7 @@ async fn authenticate(
         }
     };
     match db::get_profile(pool, user_id).await {
-        Ok(Some(profile)) if profile.is_b2b() => Ok((user_id, profile)),
+        Ok(Some(profile)) if profile.is_b2b_approved() => Ok((user_id, profile)),
         Ok(_) => Err(error_response(
             StatusCode::FORBIDDEN,
             "API access is for business accounts",
@@ -71,6 +71,38 @@ async fn authenticate(
             tracing::error!(error = %err, "profile lookup failed");
             Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "lookup failed"))
         }
+    }
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0
+}
+
+fn operations_authorized(state: &SharedState, headers: &HeaderMap) -> Result<(), Response> {
+    let Some(expected) = state.config.operations_api_key.as_deref() else {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fulfillment API is not configured",
+        ));
+    };
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or_default();
+    if constant_time_eq(presented, expected) {
+        Ok(())
+    } else {
+        Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "warehouse credential required",
+        ))
     }
 }
 
@@ -186,19 +218,19 @@ pub struct FulfillmentRequest {
 }
 
 /// POST /api/v1/orders/{id}/fulfillment -- record a shipment with carrier +
-/// tracking and mark the order fulfilled (the outbound "856 ASN" step). Only
-/// the order's owner (via their API key) can fulfill it.
+/// tracking and mark the order fulfilled (the outbound "856 ASN" step).
 pub async fn order_fulfill(
     State(state): State<SharedState>,
     headers: HeaderMap,
     axum::extract::Path(order_id): axum::extract::Path<Uuid>,
     Json(request): Json<FulfillmentRequest>,
 ) -> Response {
-    let (user_id, _) = match authenticate(&state, &headers).await {
-        Ok(pair) => pair,
-        Err(response) => return response,
+    if let Err(response) = operations_authorized(&state, &headers) {
+        return response;
+    }
+    let Some(pool) = &state.pool else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "database not configured");
     };
-    let pool = state.pool.as_ref().expect("authenticate checked pool");
 
     if request.carrier.trim().is_empty() || request.tracking_number.trim().is_empty() {
         return error_response(
@@ -221,7 +253,6 @@ pub async fn order_fulfill(
 
     match db::record_fulfillment(
         pool,
-        user_id,
         order_id,
         request.carrier.trim(),
         request.tracking_number.trim(),

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::auth::{self, Biz, MaybeUser};
 use crate::db::{self, CartOwner, CustomerProfile, OrderFrequency, OrderKind};
-use crate::{pages, AppError, SharedState};
+use crate::{pages, payments, AppError, SharedState};
 
 fn parse_kind(kind: &str) -> OrderKind {
     match kind {
@@ -43,6 +43,63 @@ pub struct CheckoutRequest {
     po_number: String,
     #[serde(default)]
     ship_method: String,
+    #[serde(default)]
+    pay_method: String,
+}
+
+fn payment_method_options(
+    config: &crate::Config,
+    is_b2b: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut options = Vec::new();
+    if config.stripe.is_some() {
+        options.push((
+            "stripe",
+            if is_b2b { "Card or ACH bank debit (Stripe)" } else { "Card (Stripe)" },
+        ));
+    }
+    if config.paypal.is_some() {
+        options.push(("paypal", "PayPal"));
+    }
+    if config.square.is_some() {
+        options.push(("square", "Square"));
+    }
+    if is_b2b && config.stripe.is_some() {
+        options.push(("invoice", "Invoice my account — Net 30 (PO required)"));
+    }
+    options
+}
+
+async fn dispatch_payment(
+    state: &SharedState,
+    headers: &axum::http::HeaderMap,
+    auth_user: &crate::auth::AuthUser,
+    order_id: Uuid,
+    method: payments::PayMethod,
+    is_b2b: bool,
+    po_number: Option<&str>,
+) -> Redirect {
+    let base = auth::request_base(headers, state);
+    match payments::start_payment(
+        state,
+        &base,
+        auth_user.id,
+        auth_user.email.as_deref(),
+        order_id,
+        method,
+        is_b2b,
+        po_number,
+    )
+    .await
+    {
+        Ok(payments::StartOutcome::Redirect(url)) => Redirect::to(&url),
+        Ok(payments::StartOutcome::Invoiced) => Redirect::to("/orders?invoiced=1"),
+        Ok(payments::StartOutcome::NotConfigured) => Redirect::to("/orders?placed=1"),
+        Err(err) => {
+            tracing::error!(error = %err, %order_id, "payment start failed");
+            Redirect::to("/orders?payerror=1")
+        }
+    }
 }
 
 /// POST /checkout -- turn the cart into an order (stock + holds resolved in
@@ -51,6 +108,7 @@ pub async fn checkout(
     State(state): State<SharedState>,
     user: MaybeUser,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Form(request): Form<CheckoutRequest>,
 ) -> Result<Response, AppError> {
     let (auth_user, profile) = match auth::require_full(&state, &user).await {
@@ -73,7 +131,10 @@ pub async fn checkout(
         return Ok(Redirect::to("/cart").into_response());
     }
 
-    let is_b2b = profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b = profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
     let kind = parse_kind(&request.kind);
     let frequency = parse_frequency(&request.frequency);
     if kind == OrderKind::Recurring && frequency.is_none() {
@@ -115,10 +176,25 @@ pub async fn checkout(
     )
     .await
     {
-        Ok(_) => {
+        Ok(order_id) => {
             // Holds were consumed with the order; refresh any /ws listeners.
             let _ = state.cart_events.send(cart_id);
-            Ok((jar, Redirect::to("/orders?placed=1")).into_response())
+            let redirect = match payments::PayMethod::parse(request.pay_method.trim()) {
+                Some(pay_method) => {
+                    dispatch_payment(
+                        &state,
+                        &headers,
+                        &auth_user,
+                        order_id,
+                        pay_method,
+                        is_b2b,
+                        po_number,
+                    )
+                    .await
+                }
+                None => Redirect::to("/orders?placed=1"),
+            };
+            Ok((jar, redirect).into_response())
         }
         Err(db::OrderError::Insufficient(shortages)) => {
             let names: HashMap<i64, String> = lines
@@ -160,6 +236,23 @@ fn status_class(status: db::OrderStatus) -> &'static str {
         db::OrderStatus::Fulfilled => "st-fulfilled",
         db::OrderStatus::Cancelled => "st-cancelled",
     }
+}
+
+fn payment_class(status: db::PaymentStatus) -> &'static str {
+    match status {
+        db::PaymentStatus::Paid => "st-fulfilled",
+        db::PaymentStatus::Invoiced | db::PaymentStatus::Processing => "st-processing",
+        db::PaymentStatus::Pending => "st-placed",
+        db::PaymentStatus::Failed | db::PaymentStatus::Refunded => "st-cancelled",
+    }
+}
+
+fn payment_retryable(order: &db::OrderRow) -> bool {
+    order.status != db::OrderStatus::Cancelled
+        && matches!(
+            order.payment_status,
+            db::PaymentStatus::Pending | db::PaymentStatus::Failed
+        )
 }
 
 fn shipment_status_class(status: db::ShipmentStatus) -> &'static str {
@@ -241,7 +334,10 @@ pub async fn orders_page(
         ship_by_order.insert(row.order_id, row.shipment());
     }
 
-    let is_b2b = profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b = profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
 
     // B2B order-management filters.
     let status_filter = filter.status.as_deref().and_then(db::OrderStatus::parse);
@@ -305,6 +401,7 @@ pub async fn orders_page(
                             div .order-head {
                                 a .order-id href=(format!("/orders/{}", order.id)) { "Order " (order.short_id()) }
                                 span .status-badge .(status_class(order.status)) { (order.status.label()) }
+                                span .status-badge .(payment_class(order.payment_status)) { (order.payment_status.label()) }
                                 @if order.kind == db::OrderKind::Recurring { span .status-badge .st-sub { "subscription" } }
                                 span .muted-inline { (order.created_at.format("%b %-d, %Y")) }
                             }
@@ -338,6 +435,20 @@ pub async fn orders_page(
                                     form .inline-form method="post" action=(format!("/orders/{}/reorder", order.id)) {
                                         (pages::csrf_field())
                                         button .button type="submit" { "Reorder" }
+                                    }
+                                    @if payment_retryable(order) {
+                                        @let retry_options = payment_method_options(&state.config, is_b2b);
+                                        @if !retry_options.is_empty() {
+                                            form .inline-form method="post" action=(format!("/orders/{}/pay", order.id)) {
+                                                (pages::csrf_field())
+                                                select name="pay_method" {
+                                                    @for (value, label) in &retry_options {
+                                                        option value=(value) { (label) }
+                                                    }
+                                                }
+                                                button .button type="submit" { "Pay now" }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -506,6 +617,57 @@ pub async fn reorder(
     Ok(Redirect::to("/cart").into_response())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PayNowRequest {
+    #[serde(default)]
+    pay_method: String,
+}
+
+/// POST /orders/{id}/pay -- restart a pending/failed hosted payment only for
+/// the order owner. Provider callbacks still verify the order id separately.
+pub async fn pay_now(
+    State(state): State<SharedState>,
+    user: MaybeUser,
+    headers: axum::http::HeaderMap,
+    Path(order_id): Path<Uuid>,
+    Form(request): Form<PayNowRequest>,
+) -> Result<Response, AppError> {
+    let (auth_user, profile) = match auth::require_full(&state, &user).await {
+        Ok(pair) => pair,
+        Err(redirect) => return Ok(redirect),
+    };
+    if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
+        return Ok(redirect);
+    }
+    let Some(pool) = &state.pool else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+    let Some(order) = db::get_order(pool, auth_user.id, order_id).await? else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+    if !payment_retryable(&order) {
+        return Ok(Redirect::to("/orders").into_response());
+    }
+    let is_b2b = profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
+    let Some(method) = payments::PayMethod::parse(request.pay_method.trim()) else {
+        return Ok(Redirect::to("/orders").into_response());
+    };
+    Ok(dispatch_payment(
+        &state,
+        &headers,
+        &auth_user,
+        order_id,
+        method,
+        is_b2b,
+        order.po_number.as_deref(),
+    )
+    .await
+    .into_response())
+}
+
 /// GET /quick-order -- B2B grid: every SKU with a qty box, one submit.
 pub async fn quick_order_page(
     State(state): State<SharedState>,
@@ -519,7 +681,11 @@ pub async fn quick_order_page(
     if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
         return Ok(redirect);
     }
-    if !profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false) {
+    if !profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false)
+    {
         return Ok(Redirect::to("/").into_response());
     }
 
@@ -590,7 +756,7 @@ pub async fn quick_order_submit(
     // personal account drive it.
     if !profile
         .as_ref()
-        .map(CustomerProfile::is_b2b)
+        .map(CustomerProfile::is_b2b_approved)
         .unwrap_or(false)
     {
         return Ok(Redirect::to("/").into_response());
@@ -638,8 +804,26 @@ pub async fn quick_order_submit(
 }
 
 /// Shared checkout form fragment rendered on the cart page.
-pub fn checkout_form(profile: Option<&CustomerProfile>, has_2fa: bool) -> Markup {
-    let is_b2b = profile.map(CustomerProfile::is_b2b).unwrap_or(false);
+pub fn checkout_form(
+    config: &crate::Config,
+    profile: Option<&CustomerProfile>,
+    has_2fa: bool,
+) -> Markup {
+    let is_b2b = profile
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
+    let is_b2b_pending = profile
+        .map(|profile| profile.is_b2b() && !profile.is_b2b_approved())
+        .unwrap_or(false);
+    let pay_options = payment_method_options(config, is_b2b);
+    if is_b2b_pending {
+        return html! {
+            div .notice {
+                strong { "Business account approval pending. " }
+                "Ordering becomes available after operations approves your company."
+            }
+        };
+    }
     if is_b2b && !has_2fa {
         return html! {
             div .notice .error {
@@ -688,6 +872,19 @@ pub fn checkout_form(profile: Option<&CustomerProfile>, has_2fa: bool) -> Markup
                     }
                 }
             }
+            @if pay_options.is_empty() {
+                div .notice { "Online payment isn't configured in this environment; the order is placed as payment-pending." }
+            } @else {
+                fieldset .pay-methods {
+                    legend { "Pay with" }
+                    @for (index, (value, label)) in pay_options.iter().enumerate() {
+                        label .pay-method {
+                            input type="radio" name="pay_method" value=(value) checked[index == 0];
+                            (label)
+                        }
+                    }
+                }
+            }
             button .primary type="submit" { "Place order" }
         }
     }
@@ -713,13 +910,14 @@ mod tests {
         let profile = CustomerProfile {
             customer_type: db::CustomerType::B2b,
             company_name: Some("Wobble Co".into()),
+            b2b_approved_at: Some(chrono::Utc::now()),
         };
         // Business account without a verified factor: hard stop, no form.
-        let blocked = checkout_form(Some(&profile), false).into_string();
+        let blocked = checkout_form(&crate::Config::default(), Some(&profile), false).into_string();
         assert!(blocked.contains("Two-factor authentication required"));
         assert!(!blocked.contains("Place order"));
         // With 2FA satisfied: the order form renders, including PO + freight.
-        let allowed = checkout_form(Some(&profile), true).into_string();
+        let allowed = checkout_form(&crate::Config::default(), Some(&profile), true).into_string();
         assert!(allowed.contains("Place order"));
         assert!(allowed.contains("PO number"));
         assert!(allowed.contains("Freight (LTL)"));
@@ -731,8 +929,9 @@ mod tests {
         let profile = CustomerProfile {
             customer_type: db::CustomerType::B2c,
             company_name: None,
+            b2b_approved_at: None,
         };
-        let rendered = checkout_form(Some(&profile), false).into_string();
+        let rendered = checkout_form(&crate::Config::default(), Some(&profile), false).into_string();
         assert!(rendered.contains("Place order"));
         assert!(!rendered.contains("PO number"));
         assert!(rendered.contains("name=\"ship_method\""));
