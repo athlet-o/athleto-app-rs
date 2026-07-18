@@ -82,10 +82,16 @@ test(`[${Driver.engine()}] htmx is vendored same-origin (CSP-friendly)`, async (
   }
 });
 
-test(`[${Driver.engine()}] unknown route returns a 404 page`, async () => {
+test(`[${Driver.engine()}] unknown route returns 404`, async () => {
   const page = await driver.newPage();
   try {
-    const { status } = await page.navigate(`${BASE_URL}/no-such-page-xyz`);
+    // A bodyless 404 makes Playwright's goto throw (ERR_HTTP_RESPONSE_CODE_FAILURE)
+    // but not Puppeteer's; an in-page fetch reports the status identically in both.
+    await page.goto(`${BASE_URL}/`);
+    const status = await page.evaluate(async (base) => {
+      const r = await fetch(`${base}/no-such-page-xyz`, { credentials: 'same-origin' });
+      return r.status;
+    }, BASE_URL);
     assert.equal(status, 404);
   } finally {
     await page.close();
