@@ -1,0 +1,107 @@
+name: e2e
+
+# Browser end-to-end tests: the real app booted against a throwaway Postgres,
+# driven through Chrome under BOTH Playwright and Puppeteer (node:test). The
+# authenticated journeys additionally need Supabase secrets; without them those
+# tests skip and the guest-facing suites still run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [playwright, puppeteer]
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: athleto_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/athleto_test
+      # Optional: set these repo secrets to also run the authenticated suites.
+      SUPABASE_URL: ${{ secrets.ATHLETO_SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.ATHLETO_SUPABASE_ANON_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.ATHLETO_SUPABASE_SERVICE_KEY }}
+      E2E_BASE_URL: http://localhost:8145
+      # The biz-host chrome check hits the deployed host; skip it in CI.
+      E2E_SKIP_LIVE: "1"
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # The embedded migrations reference Supabase's auth.uid(); stub it so a
+      # vanilla Postgres can run the same schema.
+      - name: Stub Supabase auth.uid()
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS auth;" \
+            -c "CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS \$\$ SELECT NULL::uuid \$\$;"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build app
+        run: cargo build --bin athleto-app-rs
+
+      - name: Boot app (runs migrations against the throwaway Postgres)
+        run: |
+          SUPABASE_URL="$SUPABASE_URL" SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
+          DATABASE_URL="$DATABASE_URL" PORT=8145 ATHLETO_PUBLIC_BASE_URL=http://localhost:8145 \
+            ./target/debug/athleto-app-rs > app.log 2>&1 &
+          echo "waiting for /healthz + seeded products..."
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8145/healthz || true)
+            n=$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM products" 2>/dev/null || echo 0)
+            if [ "$code" = "200" ] && [ "${n:-0}" -ge 1 ]; then echo "ready ($n products)"; break; fi
+            sleep 2
+          done
+          psql "$DATABASE_URL" -tAc "SELECT count(*) FROM products" || (cat app.log; exit 1)
+
+      - name: Install Google Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Install e2e deps
+        working-directory: e2e
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+        run: npm ci || npm install
+
+      - name: Run browser E2E (${{ matrix.engine }})
+        working-directory: e2e
+        env:
+          E2E_ENGINE: ${{ matrix.engine }}
+        run: node --test --test-timeout=60000 --test-concurrency=1 *.test.mjs
+
+      - name: App log on failure
+        if: failure()
+        run: cat app.log || true
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-${{ matrix.engine }}
+          path: e2e/**/*.png
+          if-no-files-found: ignore
+          retention-days: 7
