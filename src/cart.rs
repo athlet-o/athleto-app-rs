@@ -7,6 +7,8 @@
 //! routes degrade to a "not configured" notice so the rest of the storefront
 //! keeps working.
 
+use std::time::Duration;
+
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Json, Redirect, Response};
@@ -19,7 +21,7 @@ use uuid::Uuid;
 
 use crate::auth::{self, Biz, MaybeUser};
 use crate::db::{self, CartLine, CartOwner, CustomerProfile, HoldOutcome};
-use crate::security;
+use crate::request_trust::{self, PeerAddress};
 use crate::{orders, pages, AppError, SharedState};
 
 pub const CART_COOKIE: &str = "athleto_cart";
@@ -313,6 +315,7 @@ pub async fn add_item(
     biz: Biz,
     jar: CookieJar,
     headers: HeaderMap,
+    peer: PeerAddress,
     Form(input): Form<AddItem>,
 ) -> Result<Response, AppError> {
     let Some(pool) = &state.pool else {
@@ -329,12 +332,12 @@ pub async fn add_item(
     // unthrottled script could mass-reserve inventory (hold everything
     // "sold out" for HOLD_MINUTES). Throttle per client IP; the window is
     // generous enough that real add-to-cart bursts are unaffected.
-    let ip = security::client_ip(&headers);
-    if !state.cart_limiter.check(
-        &format!("cart:{ip}"),
-        40,
-        std::time::Duration::from_secs(60),
-    ) {
+    let ip = request_trust::client_ip(&headers, peer.0, &state.config.trusted_proxy_networks);
+    if !state
+        .rate_limits
+        .check("cart-hold-ip", &ip, 40, Duration::from_secs(60))
+        .await
+    {
         let message = "Too many cart updates -- slow down for a moment and try again.";
         if is_htmx(&headers) {
             return Ok((

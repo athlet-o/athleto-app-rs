@@ -93,9 +93,7 @@ pub const CALLBACK_JS: &str = r#"
     if(status) status.textContent='No sign-in tokens found. Open the link from your email again, or request a new one.';
     return;
   }
-  // The CSRF cookie is intentionally readable here: forwarding the tokens to
-  // POST /auth/session requires the same double-submit proof as every form.
-  var csrf=(document.cookie.match(/(?:^|; )athleto_csrf=([^;]+)/)||[])[1]||'';
+  var csrf=document.body.getAttribute('data-csrf-token')||'';
   var f=document.createElement('form'); f.method='POST'; f.action='/auth/session';
   [['access_token',access],['refresh_token',refresh],['flow',flow],['csrf_token',csrf]].forEach(function(pair){
     var i=document.createElement('input'); i.type='hidden'; i.name=pair[0]; i.value=pair[1];
@@ -898,7 +896,7 @@ pub fn layout_for(title: &str, user: Option<&AuthUser>, biz: Biz, content: Marku
                 script defer="defer" src=(assets::HTMX_JS_PATH) {}
                 script defer="defer" src=(assets::HTMX_WS_JS_PATH) {}
             }
-            body hx-headers=(csrf_headers) {
+            body data-csrf-token=(security::csrf_token()) hx-headers=(csrf_headers) {
                 header .site-header {
                     a .brand-lockup href="/" {
                         span .brand-mark { "AO" }

@@ -45,6 +45,8 @@ pub const MANAGED_KEYS: &[&str] = &[
     "SUPABASE_ANON_KEY",
     "DATABASE_URL",
     "ATHLETO_OPERATIONS_API_KEY",
+    "ATHLETO_TURNSTILE_SECRET",
+    "ATHLETO_MFA_STATE_KEY",
     "ATHLETO_STRIPE_SECRET_KEY",
     "ATHLETO_STRIPE_PUBLISHABLE_KEY",
     "ATHLETO_STRIPE_WEBHOOK_SECRET",
@@ -259,12 +261,14 @@ mod tests {
     }
 
     #[test]
-    fn managed_keys_cover_every_payment_and_billing_var() {
+    fn managed_keys_cover_every_payment_billing_and_auth_secret() {
         for name in [
             "ATHLETO_STRIPE_SECRET_KEY",
             "ATHLETO_PAYPAL_CLIENT_SECRET",
             "ATHLETO_SQUARE_ACCESS_TOKEN",
             "ATHLETO_BILLING_TENANT_ID",
+            "ATHLETO_TURNSTILE_SECRET",
+            "ATHLETO_MFA_STATE_KEY",
         ] {
             assert!(
                 MANAGED_KEYS.contains(&name),

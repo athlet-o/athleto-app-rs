@@ -26,6 +26,18 @@ re-grep the named function/symbol.
   `db::run_due_recurring_orders` to skip any order with a `payment_subscriptions`
   row. Covered by `tests/recurring_runner_db.rs`.
 - **Migration 0006 checksum drift** — see [Migration discipline](#migration-discipline).
+- **Login/IP throttles were replica-local and trusted any `X-Forwarded-For`.**
+  They now use the modular `rate_limit` service (Fiducia-backed and fail-closed
+  when configured), and `request_trust` accepts forwarding headers only from
+  configured direct-proxy CIDRs.
+- **Magic links could silently create accounts and email-spam an arbitrary
+  address.** Existing-account login now sends `create_user: false`; self-signup
+  requires explicit enablement plus a successful server-side Turnstile proof.
+- **MFA and CSRF browser state was mutable.** The pending SMS challenge is a
+  short-lived HMAC-signed, user-bound cookie, while the CSRF cookie is now
+  HttpOnly and its synchronizer token is supplied through the rendered DOM.
+- **AAL was read from an unverified JWT payload.** GoTrue's authenticated
+  `/auth/v1/factors` response now supplies the assurance level and factors.
 
 ---
 
@@ -103,14 +115,7 @@ re-grep the named function/symbol.
   it's a 500-panic, not a clean error.
 - **Fix:** `let Some(pool) = state.pool.as_ref() else { return Err(AppError::unavailable("db")) };`
 
-### 8. Rate-limiter mutex poison takes down every request
-- `src/security.rs` `RateLimiter` — `self.entries.lock().expect("rate limiter lock")`
-  runs in middleware on **every** request; a panic while the lock is held poisons it
-  and every subsequent request panics.
-- **Fix:** recover the guard instead of panicking —
-  `.lock().unwrap_or_else(|e| e.into_inner())`.
-
-### 9. The `@athleto/sync` local-first SDK is not wired in
+### 8. The `@athleto/sync` local-first SDK is not wired in
 - No references to `@athleto/sync`, the `athleto-optimistic` htmx extension, or an
   `/api/sync` catch-up endpoint anywhere in `src/`. The cart uses the app's own `/ws`
   (`src/ws.rs`) with the **stock** htmx ws extension (`src/assets.rs`), not the SDK's
@@ -122,7 +127,7 @@ re-grep the named function/symbol.
   that the bespoke `/ws` is the intended path and the SDK is out of scope here. Don't
   leave it ambiguous.
 
-### 10. CI lint is non-blocking; one transitive advisory
+### 9. CI lint is non-blocking; one transitive advisory
 - `.github/workflows/ci.yml` runs `fmt` + `clippy` as `continue-on-error: true` — drop
   that once the tree is clean so lint regressions block merge (athleto-sync already
   gates on clippy).
@@ -131,7 +136,7 @@ re-grep the named function/symbol.
   unused, disabling that SeaORM feature removes the `rsa` dependency; otherwise track.
   Plus `proc-macro-error2` unmaintained (warning).
 
-### 11. nginx `/jello` gateway not yet cut over to this app
+### 10. nginx `/jello` gateway not yet cut over to this app
 - `~/codes/ores/k8s-cluster/remote/argocd/dd-next-runtime/dd-remote-gateway.configmap.yaml`:
   `location = /jello` and `/jello/sample` still set their upstream (`$dd_up_3` /
   `$dd_up_4`) to `dd-remote-web-home.default.svc.cluster.local:8080`. Athleto is
@@ -173,7 +178,7 @@ exist`.
 
 ## Hardening posture already in place (don't regress)
 
-- **CSRF**: double-submit token on every state-changing form + htmx header;
+- **CSRF**: HttpOnly synchronizer token on every state-changing form + htmx header;
   `/api/v1` is the only exemption (bearer-auth, no ambient cookie); webhooks are
   exempt but verify provider signatures. Constant-time token compare.
 - **Payment webhooks fail closed**: no signing secret ⇒ reject; HMAC over the
@@ -183,3 +188,5 @@ exist`.
 - **Login-flow pinning**: `athleto_login_flow` cookie must match the `flow` param
   on confirm, so a leaked magic link can't be completed in another browser.
 - **B2B requires approval *then* 2FA** before ordering/API (`require_b2b_ready`).
+- **B2B host selection is presentation-only**; authorization continues to
+  require `CustomerProfile::is_b2b_approved()` and the verified-MFA gate.

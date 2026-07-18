@@ -68,7 +68,11 @@ pub fn seal(key: &[u8; 32], state: &PendingChallenge) -> Result<String, StateErr
     ))
 }
 
-pub fn open(key: &[u8; 32], value: &str, expected_user: Uuid) -> Result<PendingChallenge, StateError> {
+pub fn open(
+    key: &[u8; 32],
+    value: &str,
+    expected_user: Uuid,
+) -> Result<PendingChallenge, StateError> {
     open_at(key, value, expected_user, now_secs())
 }
 
@@ -96,8 +100,10 @@ fn open_at(
         .map_err(|_| StateError::Invalid)?;
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| StateError::Invalid)?;
     mac.update(&payload);
-    mac.verify_slice(&signature).map_err(|_| StateError::Invalid)?;
-    let state = serde_json::from_slice::<PendingChallenge>(&payload).map_err(|_| StateError::Invalid)?;
+    mac.verify_slice(&signature)
+        .map_err(|_| StateError::Invalid)?;
+    let state =
+        serde_json::from_slice::<PendingChallenge>(&payload).map_err(|_| StateError::Invalid)?;
     if state.user_id != expected_user {
         return Err(StateError::WrongUser);
     }

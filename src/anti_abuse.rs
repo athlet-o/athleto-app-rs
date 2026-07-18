@@ -25,7 +25,9 @@ pub async fn verify_turnstile(
     if secret.trim().is_empty() || !valid_turnstile_token(token) {
         return Ok(false);
     }
-    let remote_ip = remote_ip.map(|address| address.to_string()).unwrap_or_default();
+    let remote_ip = remote_ip
+        .map(|address| address.to_string())
+        .unwrap_or_default();
     let response = http
         .post(TURNSTILE_VERIFY_URL)
         .form(&[

@@ -2,8 +2,31 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use axum::http::HeaderMap;
+use axum::extract::{ConnectInfo, FromRequestParts};
+use axum::http::{request::Parts, HeaderMap};
 use ipnet::IpNet;
+
+/// Direct TCP peer when the server was built with connection info. Unit and
+/// router tests do not have a socket, so absence deliberately maps to the
+/// conservative `unknown` bucket instead of rejecting the request.
+#[derive(Clone, Copy)]
+pub struct PeerAddress(pub Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for PeerAddress
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|peer| peer.0),
+        ))
+    }
+}
 
 /// Return a client address only from a configured immediate proxy. Direct
 /// callers cannot steer a rate-limit bucket with a forged forwarding header.
@@ -15,7 +38,10 @@ pub fn client_ip(
     let Some(peer) = peer else {
         return "unknown".to_string();
     };
-    if !trusted_proxy_networks.iter().any(|network| network.contains(&peer.ip())) {
+    if !trusted_proxy_networks
+        .iter()
+        .any(|network| network.contains(&peer.ip()))
+    {
         return peer.ip().to_string();
     }
     headers
@@ -25,7 +51,12 @@ pub fn client_ip(
             value
                 .split(',')
                 .rev()
-                .find_map(|candidate| candidate.trim().parse::<IpAddr>().ok())
+                .filter_map(|candidate| candidate.trim().parse::<IpAddr>().ok())
+                .find(|address| {
+                    !trusted_proxy_networks
+                        .iter()
+                        .any(|network| network.contains(address))
+                })
         })
         .unwrap_or_else(|| peer.ip())
         .to_string()
@@ -52,10 +83,16 @@ mod tests {
         );
         let peer = "10.0.0.7:443".parse().unwrap();
         let trusted = ["10.0.0.0/8".parse().unwrap()];
-        assert_eq!(
-            client_ip(&headers, Some(peer), &trusted),
-            "198.51.100.7"
-        );
+        assert_eq!(client_ip(&headers, Some(peer), &trusted), "198.51.100.7");
+    }
+
+    #[test]
+    fn trusted_proxy_chain_skips_internal_hops() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.9, 10.0.0.6".parse().unwrap());
+        let peer = "10.0.0.7:443".parse().unwrap();
+        let trusted = ["10.0.0.0/8".parse().unwrap()];
+        assert_eq!(client_ip(&headers, Some(peer), &trusted), "203.0.113.9");
     }
 
     #[test]

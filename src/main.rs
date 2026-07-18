@@ -3,14 +3,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use athleto_app_rs::{
-    billing, coordinate, db, payments, router, secrets, AppState, Config, SharedState,
+    billing, coordinate, db, mfa_state, payments, router, secrets, AppState, Config, SharedState,
 };
+use ipnet::IpNet;
 
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn trusted_proxy_networks() -> Vec<IpNet> {
+    env_opt("ATHLETO_TRUSTED_PROXY_CIDRS")
+        .into_iter()
+        .flat_map(|cidrs| cidrs.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .filter_map(|cidr| match cidr.trim().parse::<IpNet>() {
+            Ok(network) => Some(network),
+            Err(error) => {
+                tracing::error!(%cidr, %error, "ignoring invalid ATHLETO_TRUSTED_PROXY_CIDRS entry");
+                None
+            }
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -40,6 +55,16 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let secret = secrets::SecretSource::load(fiducia_client.as_ref()).await;
+    let mfa_state_key = match secret.get("ATHLETO_MFA_STATE_KEY") {
+        Some(value) => match mfa_state::decode_key(&value) {
+            Some(key) => Some(key),
+            None => {
+                tracing::error!("ATHLETO_MFA_STATE_KEY must be base64 for exactly 32 bytes");
+                None
+            }
+        },
+        None => None,
+    };
 
     let config = Config {
         supabase_url: secret
@@ -58,6 +83,11 @@ async fn main() -> anyhow::Result<()> {
                 .collect()
         }),
         sms_mfa_enabled: env_opt("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
+        self_signup_enabled: env_opt("ATHLETO_ALLOW_SELF_SIGNUP").as_deref() == Some("1"),
+        turnstile_site_key: env_opt("ATHLETO_TURNSTILE_SITE_KEY"),
+        turnstile_secret: secret.get("ATHLETO_TURNSTILE_SECRET"),
+        mfa_state_key,
+        trusted_proxy_networks: trusted_proxy_networks(),
         fiducia_url,
         fiducia_api_key,
         // HOSTNAME is the pod name under Kubernetes; unique per replica.
@@ -119,6 +149,14 @@ async fn main() -> anyhow::Result<()> {
     if config.allowed_hosts.is_none() {
         tracing::warn!(
             "ALLOWED_HOSTS not set; trusting any inbound Host header (fine for dev, set it in production)"
+        );
+    }
+    if config.self_signup_enabled && !config.self_signup_ready() {
+        tracing::error!("ATHLETO_ALLOW_SELF_SIGNUP requires ATHLETO_TURNSTILE_SITE_KEY and ATHLETO_TURNSTILE_SECRET");
+    }
+    if config.trusted_proxy_networks.is_empty() {
+        tracing::warn!(
+            "ATHLETO_TRUSTED_PROXY_CIDRS not set; forwarded client addresses are ignored"
         );
     }
 
@@ -209,10 +247,13 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "athleto-app-rs listening");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
     Ok(())
 }

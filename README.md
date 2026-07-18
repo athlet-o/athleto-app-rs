@@ -49,12 +49,16 @@ and a powder packet (just add water).
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
 | `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical B2C/B2B browser origins for auth and provider returns |
 | `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
+| `ATHLETO_TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated ingress/LB CIDRs allowed to supply `X-Forwarded-For` for abuse throttles. Unset means the app ignores that header and uses the direct peer address. |
+| `ATHLETO_ALLOW_SELF_SIGNUP` | `0` | Set to `1` only with both Turnstile values below. Default-deny magic-link requests only sign in existing accounts. |
+| `ATHLETO_TURNSTILE_SITE_KEY` / `ATHLETO_TURNSTILE_SECRET` | *(unset)* | Cloudflare Turnstile public site key and private verification key required together for self-signup. The secret is managed through the normal environment/Fiducia envelope path. |
+| `ATHLETO_MFA_STATE_KEY` | *(unset)* | Base64-encoded 32-byte HMAC key that signs the five-minute pending SMS-MFA challenge cookie. SMS verification fails closed when absent or malformed. |
 | `ATHLETO_OPERATIONS_API_KEY` | *(unset)* | Dedicated bearer credential for ops-only writes: warehouse fulfillment (`POST /api/v1/orders/{id}/fulfillment`) and B2B account approval (`POST /api/v1/ops/customers/{id}/approval`) |
 | `ATHLETO_STRIPE_SECRET_KEY` / `ATHLETO_STRIPE_WEBHOOK_SECRET` | *(unset)* | Stripe hosted checkout and signed webhook verification; also enables approved B2B Net-30 invoices |
 | `ATHLETO_PAYPAL_CLIENT_ID` / `ATHLETO_PAYPAL_CLIENT_SECRET` / `ATHLETO_PAYPAL_WEBHOOK_ID` | *(unset)* | PayPal hosted checkout/subscriptions and webhook verification |
 | `ATHLETO_SQUARE_ACCESS_TOKEN` / `ATHLETO_SQUARE_LOCATION_ID` / `ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY` | *(unset)* | Square hosted checkout/subscriptions and signature verification |
 | `ATHLETO_BILLING_URL` / `ATHLETO_BILLING_API_KEY` / `ATHLETO_BILLING_TENANT_ID` | *(unset)* | Optional observer-only AR/AP ledger integration |
-| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(both unset)* | fiducia.cloud fenced-lock service for singleton-job leadership (sweeper / recurring runner). Public endpoints require `https`; internal `http` is allowed only for local/cluster addresses. Both unset = Postgres advisory-lock fallback; partial or unsafe configuration fails closed. |
+| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(both unset)* | fiducia.cloud control plane for fenced singleton-job leases and distributed login/cart/MFA throttles. Public endpoints require `https`; internal `http` is allowed only for local/cluster addresses. Both unset = local-development throttles plus Postgres advisory-lock fallback; partial or unsafe configuration fails closed. |
 | `ATHLETO_SECRETS_KEY` | *(unset)* | Base64 32-byte AES key used only to decrypt approved `v1:` secret envelopes from fiducia KV; unset keeps secrets environment-only |
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
@@ -92,6 +96,17 @@ Application queries go through SeaORM (`src/entities/` + `src/db.rs`); the
 hold-claim and checkout transactions stay hand-written SQL executed via
 `sea_orm::Statement` to preserve their locking semantics. Everything runs at
 runtime against the pool, so the crate builds without a live `DATABASE_URL`.
+
+### Supabase database role and RLS
+
+RLS protects direct PostgREST access today, but it cannot protect a backend
+connection made as a table owner or `BYPASSRLS` role. Production must use a
+dedicated, non-owner runtime login in `DATABASE_URL`, with `NOBYPASSRLS`, and
+policies that constrain every customer-scoped operation to the authenticated
+subject. The rollout checklist and validation query are in
+[`docs/supabase-rls-runtime.md`](docs/supabase-rls-runtime.md). Do not point
+the production app at the Supabase `postgres` owner account once that role is
+provisioned.
 
 ### Go-forward: declarative migrations (dpm)
 

@@ -246,7 +246,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/auth/confirm", get(auth::auth_confirm))
         .route("/auth/session", post(auth::auth_session))
         .route("/logout", post(auth::logout))
-        // The old password signup page; magic-link login signs new users up.
+        // The old password signup page; self-signup, when explicitly enabled,
+        // is Turnstile-gated through the magic-link form.
         .route("/signup", get(|| async { Redirect::permanent("/login") }))
         // Account: B2C/B2B profile, 2FA, API keys.
         .route("/account", get(account::account_page))

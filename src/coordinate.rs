@@ -150,8 +150,9 @@ pub async fn try_lead(
 /// Minimal async fiducia.cloud client for the protocol in
 /// `fiducia-cloud/fiducia-clients`. The upstream Rust client is currently a
 /// blocking, unreleased source checkout, so this keeps the app async while
-/// matching the shared HTTP contract exactly. Used only for singleton-job
-/// leadership and the encrypted config-KV overlay, never for cart holds.
+/// matching the shared HTTP contract exactly. Used for singleton-job
+/// leadership, distributed abuse throttles, and the encrypted config-KV
+/// overlay, never for cart holds.
 #[derive(Clone)]
 pub struct FiduciaClient {
     http: reqwest::Client,
@@ -179,6 +180,8 @@ pub enum FiduciaRequestError {
     Rejected(u16),
     #[error("fiducia returned an invalid lock-acquire response: {0}")]
     InvalidGrant(&'static str),
+    #[error("fiducia returned an invalid rate-limit response: {0}")]
+    InvalidRateLimit(&'static str),
 }
 
 impl FiduciaClient {
@@ -325,6 +328,54 @@ impl FiduciaClient {
             }
         }
     }
+
+    /// Atomically consume one token from Fiducia's canonical distributed rate
+    /// limiter. Callers fail closed on errors so a backend outage cannot turn
+    /// a protected endpoint into an unbounded one.
+    pub async fn rate_limit_check(
+        &self,
+        tenant: &str,
+        key: &str,
+        limit: u64,
+        window_ms: u64,
+    ) -> Result<bool, FiduciaRequestError> {
+        let tenant = path_segment(tenant);
+        let key = path_segment(key);
+        let response = self
+            .http
+            .post(format!("{}/v1/rate-limit/{tenant}/{key}/check", self.base))
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({
+                "algorithm": "sliding_window",
+                "limit": limit,
+                "window_ms": window_ms,
+            }))
+            .send()
+            .await
+            .map_err(FiduciaRequestError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(FiduciaRequestError::Rejected(status.as_u16()));
+        }
+        let body = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(FiduciaRequestError::Transport)?;
+        parse_rate_limit(&body)
+    }
+}
+
+fn path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 /// Normalize a coordination endpoint before attaching a bearer credential.
@@ -399,6 +450,25 @@ fn parse_lock_acquire(body: &serde_json::Value) -> Result<Option<u64>, FiduciaRe
     }
 }
 
+fn parse_rate_limit(body: &serde_json::Value) -> Result<bool, FiduciaRequestError> {
+    if body.get("committed").and_then(|value| value.as_bool()) != Some(true) {
+        return Err(FiduciaRequestError::InvalidRateLimit(
+            "request was not committed",
+        ));
+    }
+    let output = body
+        .pointer("/result/output")
+        .ok_or(FiduciaRequestError::InvalidRateLimit(
+            "missing result.output",
+        ))?;
+    output
+        .get("allowed")
+        .and_then(|value| value.as_bool())
+        .ok_or(FiduciaRequestError::InvalidRateLimit(
+            "result.output is missing allowed",
+        ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +531,30 @@ mod tests {
             parse_lock_acquire(&unfenced),
             Err(FiduciaRequestError::InvalidGrant(_))
         ));
+    }
+
+    #[test]
+    fn rate_limit_requires_a_committed_canonical_response() {
+        let allowed = serde_json::json!({
+            "committed": true,
+            "result": { "output": { "allowed": true, "remaining": 2 } }
+        });
+        assert!(parse_rate_limit(&allowed).unwrap());
+
+        let denied = serde_json::json!({
+            "committed": true,
+            "result": { "output": { "allowed": false, "remaining": 0 } }
+        });
+        assert!(!parse_rate_limit(&denied).unwrap());
+
+        assert!(matches!(
+            parse_rate_limit(&serde_json::json!({ "committed": false })),
+            Err(FiduciaRequestError::InvalidRateLimit(_))
+        ));
+    }
+
+    #[test]
+    fn path_segments_are_percent_encoded() {
+        assert_eq!(path_segment("tenant/key value"), "tenant%2Fkey%20value");
     }
 }
