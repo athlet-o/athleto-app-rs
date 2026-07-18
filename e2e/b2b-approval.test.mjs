@@ -56,9 +56,10 @@ test(`[${Driver.engine()}] ops approval: unauth 401, unknown 404, approve/revoke
     await loginBrowser(page, email);
     await page.goto(`${BASE_URL}/account/setup`);
     await page.waitFor('input[name="customer_type"][value="b2b"]');
-    const csrf = await csrfToken(page);
-    await submitForm(page, { csrf_token: csrf, customer_type: 'b2b', company_name: 'Approval E2E Co' });
-    await page.waitFor('header.site-header', { timeout: 10000 });
+    await page.click('input[name="customer_type"][value="b2b"]'); // check the B2B radio
+    await page.fill('input[name="company_name"]', 'Approval E2E Co');
+    await page.click('form[action="/account/setup"] button[type="submit"]'); // server-rendered csrf field rides along
+    await page.waitAwayFrom('/account/setup', { timeout: 10000 });
   } finally {
     await page.close();
   }
