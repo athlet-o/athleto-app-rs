@@ -18,8 +18,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::{self, Biz, MaybeUser};
-use crate::security;
 use crate::db::{self, CartLine, CartOwner, CustomerProfile, HoldOutcome};
+use crate::security;
 use crate::{orders, pages, AppError, SharedState};
 
 pub const CART_COOKIE: &str = "athleto_cart";
@@ -143,6 +143,7 @@ pub struct CartPageParams {
 }
 
 fn cart_page_markup(
+    config: &crate::Config,
     user: &MaybeUser,
     biz: Biz,
     profile: Option<&CustomerProfile>,
@@ -187,6 +188,7 @@ fn cart_page_markup(
                 (cart_contents(lines))
                 @if user.as_ref().is_some() && !lines.is_empty() {
                     (orders::checkout_form(
+                        config,
                         profile,
                         user.as_ref().map(|u| u.has_verified_factor()).unwrap_or(false),
                     ))
@@ -247,8 +249,16 @@ pub async fn cart_page(
         Some(auth_user) => auth::load_profile(&state, auth_user.id).await,
         None => None,
     };
-    Ok(cart_page_markup(&user, biz, profile.as_ref(), &lines, hold_seconds, &params)
-        .into_response())
+    Ok(cart_page_markup(
+        &state.config,
+        &user,
+        biz,
+        profile.as_ref(),
+        &lines,
+        hold_seconds,
+        &params,
+    )
+    .into_response())
 }
 
 /// GET /cart/hold -- lease-status poll for the countdown banner.
@@ -320,10 +330,11 @@ pub async fn add_item(
     // "sold out" for HOLD_MINUTES). Throttle per client IP; the window is
     // generous enough that real add-to-cart bursts are unaffected.
     let ip = security::client_ip(&headers);
-    if !state
-        .cart_limiter
-        .check(&format!("cart:{ip}"), 40, std::time::Duration::from_secs(60))
-    {
+    if !state.cart_limiter.check(
+        &format!("cart:{ip}"),
+        40,
+        std::time::Duration::from_secs(60),
+    ) {
         let message = "Too many cart updates -- slow down for a moment and try again.";
         if is_htmx(&headers) {
             return Ok((
@@ -332,9 +343,11 @@ pub async fn add_item(
             )
                 .into_response());
         }
-        return Ok(
-            (axum::http::StatusCode::TOO_MANY_REQUESTS, Redirect::to("/cart")).into_response(),
-        );
+        return Ok((
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Redirect::to("/cart"),
+        )
+            .into_response());
     }
 
     // Reuse the existing owner (user id or anon cookie), or mint a new

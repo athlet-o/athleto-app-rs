@@ -11,6 +11,7 @@ pub struct Model {
     pub user_id: Uuid,
     pub customer_type: CustomerType,
     pub company_name: Option<String>,
+    pub b2b_approved_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

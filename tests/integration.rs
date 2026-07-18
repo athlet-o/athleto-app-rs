@@ -11,7 +11,11 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 fn test_state() -> SharedState {
-    Arc::new(AppState::new(None, reqwest::Client::new(), Config::default()))
+    Arc::new(AppState::new(
+        None,
+        reqwest::Client::new(),
+        Config::default(),
+    ))
 }
 
 async fn send(state: &SharedState, request: Request<Body>) -> Response<Body> {
@@ -51,10 +55,8 @@ async fn mint_csrf(state: &SharedState) -> String {
 }
 
 fn form_post(path: &str, token: Option<&str>, body: &str) -> Request<Body> {
-    let mut builder = Request::post(path).header(
-        header::CONTENT_TYPE,
-        "application/x-www-form-urlencoded",
-    );
+    let mut builder =
+        Request::post(path).header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
     let body = match token {
         Some(token) => {
             builder = builder.header(header::COOKIE, format!("athleto_csrf={token}"));
@@ -234,10 +236,7 @@ async fn post_with_mismatched_token_is_rejected() {
     let forged = "0".repeat(64);
     let request = Request::post("/logout")
         .header(header::COOKIE, format!("athleto_csrf={token}"))
-        .header(
-            header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded",
-        )
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(Body::from(format!("csrf_token={forged}")))
         .unwrap();
     let response = send(&state, request).await;
@@ -293,15 +292,27 @@ async fn html_responses_carry_security_headers() {
     assert!(csp.contains("'nonce-"), "CSP should carry the inline nonce");
     assert!(csp.contains("frame-ancestors 'none'"));
 
-    assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+    assert_eq!(
+        headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+        "nosniff"
+    );
     assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
     assert_eq!(headers.get(header::REFERRER_POLICY).unwrap(), "no-referrer");
     // Plain http (no proxy header): no HSTS.
     assert!(!headers.contains_key(header::STRICT_TRANSPORT_SECURITY));
 
     // The nonce in the CSP matches the one stamped on the inline style tag.
-    let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap().to_string();
-    assert!(body_string(response).await.contains(&format!("nonce=\"{nonce}\"")));
+    let nonce = csp
+        .split("'nonce-")
+        .nth(1)
+        .unwrap()
+        .split('\'')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(body_string(response)
+        .await
+        .contains(&format!("nonce=\"{nonce}\"")));
 }
 
 #[tokio::test]
@@ -370,7 +381,11 @@ async fn login_throttles_per_ip_after_five_attempts() {
     let state = test_state();
     let token = mint_csrf(&state).await;
     let post = |n: usize| {
-        let mut request = form_post("/login", Some(&token), &format!("email=u{n}%40club.example"));
+        let mut request = form_post(
+            "/login",
+            Some(&token),
+            &format!("email=u{n}%40club.example"),
+        );
         request
             .headers_mut()
             .insert("x-forwarded-for", "203.0.113.9".parse().unwrap());

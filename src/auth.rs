@@ -31,6 +31,11 @@ use crate::{pages, security, SharedState};
 
 pub const ACCESS_COOKIE: &str = "sb_access_token";
 pub const REFRESH_COOKIE: &str = "sb_refresh_token";
+/// Short-lived browser binding for a magic-link request. The high-entropy
+/// nonce is HttpOnly and must accompany the callback before session cookies
+/// are minted, preventing a link initiated in another browser from logging a
+/// recipient in unexpectedly.
+const LOGIN_FLOW_COOKIE: &str = "athleto_login_flow";
 /// Pending SMS challenge, stored as "{factor_id}:{challenge_id}".
 const MFA_CHALLENGE_COOKIE: &str = "sb_mfa_challenge";
 
@@ -49,7 +54,7 @@ impl Factor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthUser {
     pub id: Uuid,
     pub email: Option<String>,
@@ -82,7 +87,7 @@ impl AuthUser {
 /// Current-user extractor. Resolves to `MaybeUser(None)` (never rejects) when
 /// there is no session cookie, Supabase is not configured, or the token is
 /// invalid/expired.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct MaybeUser(pub Option<AuthUser>);
 
 impl MaybeUser {
@@ -164,9 +169,8 @@ impl FromRequestParts<SharedState> for MaybeUser {
     }
 }
 
-/// Host-aware flag: true when the request came in on the B2B storefront host
-/// (biz.athleto.store or a `biz.` prefix in general). Hosts outside the
-/// ALLOWED_HOSTS allowlist never get the biz chrome.
+/// Host-aware flag for the configured canonical B2B storefront. A prefix in
+/// an arbitrary Host header must not select a more privileged-looking UI.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Biz(pub bool);
 
@@ -182,14 +186,21 @@ impl FromRequestParts<SharedState> for Biz {
             .get(HOST)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
-        Ok(Self(
-            host.starts_with("biz.") && state.config.host_allowed(host),
-        ))
+        Ok(Self(state.config.is_biz_host(host)))
     }
 }
 
 fn session_cookie(name: &'static str, value: String) -> Cookie<'static> {
     Cookie::build((name, value))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .build()
+}
+
+fn login_flow_cookie(value: String) -> Cookie<'static> {
+    Cookie::build((LOGIN_FLOW_COOKIE, value))
         .path("/")
         .http_only(true)
         .secure(true)
@@ -208,6 +219,7 @@ pub fn refresh_session_cookie(value: String) -> Cookie<'static> {
 fn clear_session(jar: CookieJar) -> CookieJar {
     jar.remove(Cookie::build(ACCESS_COOKIE).path("/"))
         .remove(Cookie::build(REFRESH_COOKIE).path("/"))
+        .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
         .remove(Cookie::build(MFA_CHALLENGE_COOKIE).path("/"))
 }
 
@@ -228,20 +240,16 @@ async fn gotrue_error_message(response: reqwest::Response) -> String {
 /// header so app./biz./localhost all round-trip to themselves. Hosts outside
 /// the ALLOWED_HOSTS allowlist fall back to the configured public base so a
 /// spoofed Host header cannot steer auth redirects off-site.
-fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
+pub(crate) fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
     let host = headers
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if host.is_empty() || !state.config.host_allowed(host) {
-        return state.config.public_base_url.clone();
-    }
-    let scheme = if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
-        "http"
+    if state.config.is_biz_host(host) {
+        state.config.biz_public_base_url.clone()
     } else {
-        "https"
-    };
-    format!("{scheme}://{host}")
+        state.config.public_base_url.clone()
+    }
 }
 
 fn not_configured_page(user: &MaybeUser, title: &str, heading: &str) -> Markup {
@@ -261,11 +269,7 @@ fn not_configured_page(user: &MaybeUser, title: &str, heading: &str) -> Markup {
 // Login: magic link request.
 
 /// GET /login
-pub async fn login_page(
-    State(state): State<SharedState>,
-    user: MaybeUser,
-    biz: Biz,
-) -> Response {
+pub async fn login_page(State(state): State<SharedState>, user: MaybeUser, biz: Biz) -> Response {
     if user.as_ref().is_some() {
         return Redirect::to("/").into_response();
     }
@@ -324,6 +328,7 @@ pub async fn login_submit(
     State(state): State<SharedState>,
     biz: Biz,
     headers: HeaderMap,
+    jar: CookieJar,
     Form(request): Form<LoginRequest>,
 ) -> Response {
     let email = request.email.trim().to_lowercase();
@@ -332,9 +337,10 @@ pub async fn login_submit(
     // email (and `create_user: true` mints an account for unknown addresses),
     // so this endpoint must not be free to hammer.
     let ip = security::client_ip(&headers);
-    let ip_ok = state
-        .login_limiter
-        .check(&format!("ip:{ip}"), 5, std::time::Duration::from_secs(60));
+    let ip_ok =
+        state
+            .login_limiter
+            .check(&format!("ip:{ip}"), 5, std::time::Duration::from_secs(60));
     let email_ok = state.login_limiter.check(
         &format!("email:{email}"),
         3,
@@ -360,7 +366,11 @@ pub async fn login_submit(
 
     // `create_user: true` stays: magic-link login doubling as signup is the
     // product's only signup path, so removing it would strand new users.
-    let redirect_to = format!("{}/auth/callback", request_base(&headers, &state));
+    let flow = Uuid::new_v4().to_string();
+    let redirect_to = format!(
+        "{}/auth/callback?flow={flow}",
+        request_base(&headers, &state)
+    );
     let response = state
         .http
         .post(format!("{base}/auth/v1/otp"))
@@ -371,33 +381,37 @@ pub async fn login_submit(
         .await;
 
     match response {
-        Ok(response) if response.status().is_success() => pages::layout_for(
-            "Check your email | AthletO",
-            None,
-            biz,
-            html! {
-                section .section .auth-section {
-                    div .auth-card {
-                        h2 { "Check your inbox" }
-                        div .notice .success {
-                            "We sent a sign-in link to " strong { (email) } ". "
-                            "It expires in about an hour and works once."
-                        }
-                        p .auth-lede {
-                            "Open the link on this device to land right back here, signed in. "
-                            "Nothing arriving? Check spam, or "
-                            a href="/login" { "try again" } "."
+        Ok(response) if response.status().is_success() => (
+            jar.add(login_flow_cookie(flow)),
+            pages::layout_for(
+                "Check your email | AthletO",
+                None,
+                biz,
+                html! {
+                    section .section .auth-section {
+                        div .auth-card {
+                            h2 { "Check your inbox" }
+                            div .notice .success {
+                                "We sent a sign-in link to " strong { (email) } ". "
+                                "It expires in about an hour and works once."
+                            }
+                            p .auth-lede {
+                                "Open the link on this device to land right back here, signed in. "
+                                "Nothing arriving? Check spam, or "
+                                a href="/login" { "try again" } "."
+                            }
                         }
                     }
-                }
-            },
+                },
+            ),
         )
-        .into_response(),
+            .into_response(),
         Ok(response) => {
             let message = gotrue_error_message(response).await;
+            tracing::warn!(%message, "magic link request rejected by Supabase");
             login_form(
                 biz,
-                Some(html! { div .notice .error { "Could not send the link: " (message) } }),
+                Some(html! { div .notice .error { "Could not send a sign-in link. Check your email and try again shortly." } }),
             )
             .into_response()
         }
@@ -444,6 +458,14 @@ pub async fn auth_callback(biz: Biz) -> Markup {
 pub struct SessionTokens {
     access_token: String,
     refresh_token: String,
+    flow: String,
+}
+
+fn flow_matches(jar: &CookieJar, flow: &str) -> bool {
+    Uuid::parse_str(flow).is_ok()
+        && jar
+            .get(LOGIN_FLOW_COOKIE)
+            .is_some_and(|cookie| cookie.value() == flow)
 }
 
 /// POST /auth/session -- validate fragment-delivered tokens and set cookies.
@@ -453,6 +475,13 @@ pub async fn auth_session(
     jar: CookieJar,
     Form(tokens): Form<SessionTokens>,
 ) -> Response {
+    if !flow_matches(&jar, &tokens.flow) {
+        return login_form(
+            biz,
+            Some(html! { div .notice .error { "This sign-in attempt did not start in this browser. Request a fresh link." } }),
+        )
+        .into_response();
+    }
     let Some(user) = fetch_user(&state, &tokens.access_token).await else {
         return login_form(
             biz,
@@ -462,6 +491,7 @@ pub async fn auth_session(
     };
 
     let jar = jar
+        .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
         .add(session_cookie(ACCESS_COOKIE, tokens.access_token.clone()))
         .add(session_cookie(REFRESH_COOKIE, tokens.refresh_token.clone()));
 
@@ -474,6 +504,7 @@ pub async fn auth_session(
 #[derive(Debug, Deserialize)]
 pub struct ConfirmParams {
     token_hash: String,
+    flow: String,
     #[serde(rename = "type", default = "default_confirm_type")]
     verify_type: String,
 }
@@ -500,6 +531,13 @@ pub async fn auth_confirm(
         return not_configured_page(&MaybeUser(None), "Sign in | AthletO", "Sign in")
             .into_response();
     };
+    if !flow_matches(&jar, &params.flow) {
+        return login_form(
+            biz,
+            Some(html! { div .notice .error { "This sign-in attempt did not start in this browser. Request a fresh link." } }),
+        )
+        .into_response();
+    }
 
     let response = state
         .http
@@ -516,9 +554,10 @@ pub async fn auth_confirm(
         Ok(response) if response.status().is_success() => response.json().await.unwrap_or_default(),
         Ok(response) => {
             let message = gotrue_error_message(response).await;
+            tracing::warn!(%message, "magic link verification rejected by Supabase");
             return login_form(
                 biz,
-                Some(html! { div .notice .error { "Sign-in link rejected: " (message) } }),
+                Some(html! { div .notice .error { "That sign-in link was invalid or expired. Request a fresh one." } }),
             )
             .into_response();
         }
@@ -549,6 +588,7 @@ pub async fn auth_confirm(
     };
 
     let jar = jar
+        .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
         .add(session_cookie(ACCESS_COOKIE, access))
         .add(session_cookie(REFRESH_COOKIE, refresh));
 
@@ -580,11 +620,7 @@ pub async fn finalize_login(state: &SharedState, user: &AuthUser, jar: CookieJar
     };
 
     let email = user.email.as_deref().unwrap_or_default();
-    let fragment = format!(
-        "email={}&next={}",
-        urlencode(email),
-        urlencode(next)
-    );
+    let fragment = format!("email={}&next={}", urlencode(email), urlencode(next));
     (jar, Redirect::to(&format!("/login/remembered#{fragment}"))).into_response()
 }
 
@@ -760,10 +796,13 @@ pub async fn login_2fa_send(
             .build();
             (jar.add(cookie), Redirect::to("/login/2fa?sent=1")).into_response()
         }
-        Err(message) => {
-            two_fa_form(user, Biz(false), false, Some(html! { div .notice .error { (message) } }))
-                .into_response()
-        }
+        Err(message) => two_fa_form(
+            user,
+            Biz(false),
+            false,
+            Some(html! { div .notice .error { (message) } }),
+        )
+        .into_response(),
     }
 }
 
@@ -787,16 +826,24 @@ pub async fn login_2fa_submit(
 
     // SMS challenges were created by /login/2fa/send; TOTP challenges can be
     // minted right before verification.
-    let stored = jar
-        .get(MFA_CHALLENGE_COOKIE)
-        .and_then(|cookie| cookie.value().split_once(':').map(|(f, c)| (f.to_string(), c.to_string())));
+    let stored = jar.get(MFA_CHALLENGE_COOKIE).and_then(|cookie| {
+        cookie
+            .value()
+            .split_once(':')
+            .map(|(f, c)| (f.to_string(), c.to_string()))
+    });
     let challenge_id = match stored {
         Some((factor_id, challenge_id)) if factor_id == request.factor_id => challenge_id,
         _ => match create_challenge(&state, &user.access_token, &request.factor_id).await {
             Ok(challenge_id) => challenge_id,
             Err(message) => {
-                return two_fa_form(user, biz, false, Some(html! { div .notice .error { (message) } }))
-                    .into_response()
+                return two_fa_form(
+                    user,
+                    biz,
+                    false,
+                    Some(html! { div .notice .error { (message) } }),
+                )
+                .into_response()
             }
         },
     };
@@ -979,10 +1026,19 @@ pub async fn require_full(
 
 /// Additional gate for order placement and other B2B-sensitive actions:
 /// business accounts must have a verified second factor.
-pub fn require_b2b_ready(user: &AuthUser, profile: Option<&CustomerProfile>) -> Result<(), Response> {
+#[allow(clippy::result_large_err)]
+pub fn require_b2b_ready(
+    user: &AuthUser,
+    profile: Option<&CustomerProfile>,
+) -> Result<(), Response> {
     if let Some(profile) = profile {
-        if profile.is_b2b() && !user.has_verified_factor() {
-            return Err(Redirect::to("/account?required2fa=1").into_response());
+        if profile.is_b2b() {
+            if !profile.is_b2b_approved() {
+                return Err(Redirect::to("/account?approval=pending").into_response());
+            }
+            if !user.has_verified_factor() {
+                return Err(Redirect::to("/account?required2fa=1").into_response());
+            }
         }
     }
     Ok(())
@@ -1044,7 +1100,10 @@ mod tests {
         );
         assert_eq!(jwt_aal(&token), "aal2");
         // Missing claim, malformed token, and empty string all fall back safely.
-        assert_eq!(jwt_aal(&format!("h.{}.s", enc(&serde_json::json!({})))), "aal1");
+        assert_eq!(
+            jwt_aal(&format!("h.{}.s", enc(&serde_json::json!({})))),
+            "aal1"
+        );
         assert_eq!(jwt_aal("not-a-jwt"), "aal1");
     }
 

@@ -78,7 +78,10 @@ fn tokens_match(a: &str, b: &str) -> bool {
     if a.len() != b.len() || a.is_empty() {
         return false;
     }
-    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 /// Pull one field out of an `application/x-www-form-urlencoded` body. Only
@@ -132,7 +135,12 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
     );
     // /api/v1/* authenticates with bearer API keys, never cookies, so CSRF
     // does not apply there.
-    let csrf_exempt = request.uri().path().starts_with("/api/v1/");
+    let path = request.uri().path();
+    let csrf_exempt = path.starts_with("/api/v1/")
+        // Provider webhooks authenticate with their signed raw payloads, not
+        // ambient browser cookies. Requiring a browser CSRF token would make
+        // legitimate callbacks impossible.
+        || matches!(path, "/webhooks/stripe" | "/webhooks/paypal" | "/webhooks/square");
 
     let request = if state_changing && !csrf_exempt {
         let provided_header = request

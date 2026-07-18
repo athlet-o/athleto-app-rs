@@ -76,7 +76,7 @@ fn setup_form(
                         button .primary type="submit" { "Save and continue" }
                     }
                     p .auth-alt {
-                        "Business accounts must set up two-factor authentication before placing orders."
+                        "Business accounts require approval and two-factor authentication before placing orders."
                     }
                 }
             }
@@ -139,10 +139,8 @@ pub async fn setup_submit(
     }
 
     match customer_type {
-        CustomerType::B2b if !auth_user.has_verified_factor() => {
-            Redirect::to("/account?required2fa=1").into_response()
-        }
-        _ => Redirect::to("/").into_response(),
+        CustomerType::B2b => Redirect::to("/account?approval=pending").into_response(),
+        CustomerType::B2c => Redirect::to("/").into_response(),
     }
 }
 
@@ -151,6 +149,7 @@ pub async fn setup_submit(
 
 #[derive(Debug, Default, Deserialize)]
 pub struct AccountParams {
+    approval: Option<String>,
     required2fa: Option<String>,
     enrolled: Option<String>,
     error: Option<String>,
@@ -178,8 +177,10 @@ pub async fn account_page(
         None => Vec::new(),
     };
     let api_keys = match (&state.pool, profile.as_ref()) {
-        (Some(pool), Some(profile)) if profile.is_b2b() => {
-            db::list_api_keys(pool, auth_user.id).await.unwrap_or_default()
+        (Some(pool), Some(profile)) if profile.is_b2b_approved() => {
+            db::list_api_keys(pool, auth_user.id)
+                .await
+                .unwrap_or_default()
         }
         _ => Vec::new(),
     };
@@ -208,7 +209,12 @@ fn account_markup(
     params: &AccountParams,
     extra: Option<Markup>,
 ) -> Markup {
-    let is_b2b = profile.map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b = profile
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
+    let b2b_pending = profile
+        .map(|profile| profile.is_b2b() && !profile.is_b2b_approved())
+        .unwrap_or(false);
     let verified_count = user.verified_factors().count();
     pages::layout_for(
         "Account | AthletO",
@@ -217,6 +223,12 @@ fn account_markup(
         html! {
             section .section {
                 h2 { "Your account" }
+                @if params.approval.is_some() || b2b_pending {
+                    div .notice {
+                        strong { "Business account approval pending. " }
+                        "Net-30 terms, ERP API keys, and business ordering activate after operations approves your company."
+                    }
+                }
                 @if params.required2fa.is_some() {
                     div .notice .error {
                         strong { "Business accounts require two-factor authentication. " }
@@ -500,21 +512,21 @@ pub async fn totp_verify(
     if auth_user.needs_aal2() {
         return Redirect::to("/login/2fa").into_response();
     }
-    let challenge = match auth::create_challenge(&state, &auth_user.access_token, &request.factor_id).await
-    {
-        Ok(challenge) => challenge,
-        Err(message) => {
-            return totp_verify_page(
-                auth_user,
-                biz,
-                &request.factor_id,
-                &request.qr,
-                &request.secret,
-                Some(html! { div .notice .error { (message) } }),
-            )
-            .into_response()
-        }
-    };
+    let challenge =
+        match auth::create_challenge(&state, &auth_user.access_token, &request.factor_id).await {
+            Ok(challenge) => challenge,
+            Err(message) => {
+                return totp_verify_page(
+                    auth_user,
+                    biz,
+                    &request.factor_id,
+                    &request.qr,
+                    &request.secret,
+                    Some(html! { div .notice .error { (message) } }),
+                )
+                .into_response()
+            }
+        };
     match auth::verify_challenge(
         &state,
         &auth_user.access_token,
@@ -581,9 +593,13 @@ pub async fn phone_enroll(
                 .unwrap_or_default()
                 .to_string();
             match auth::create_challenge(&state, &auth_user.access_token, &factor_id).await {
-                Ok(challenge) => phone_verify_page(auth_user, &factor_id, &challenge, None).into_response(),
-                Err(message) => Redirect::to(&format!("/account?error={}", urlencoding_light(&message)))
-                    .into_response(),
+                Ok(challenge) => {
+                    phone_verify_page(auth_user, &factor_id, &challenge, None).into_response()
+                }
+                Err(message) => {
+                    Redirect::to(&format!("/account?error={}", urlencoding_light(&message)))
+                        .into_response()
+                }
             }
         }
         Err(message) => {
@@ -689,14 +705,18 @@ pub async fn factor_unenroll(
     // reopen the door 2FA is required to close.
     let is_last_verified = auth_user
         .verified_factors()
-        .filter(|factor| factor.id != factor_id)
-        .next()
+        .find(|factor| factor.id != factor_id)
         .is_none()
         && auth_user
             .factors
             .iter()
             .any(|factor| factor.id == factor_id && factor.is_verified());
-    if profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false) && is_last_verified {
+    if profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b)
+        .unwrap_or(false)
+        && is_last_verified
+    {
         return Redirect::to(
             "/account?error=Business+accounts+must+keep+at+least+one+verified+factor",
         )
@@ -733,7 +753,7 @@ pub async fn api_key_create(
     if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
         return redirect;
     }
-    let Some(profile) = profile.filter(CustomerProfile::is_b2b) else {
+    let Some(profile) = profile.filter(CustomerProfile::is_b2b_approved) else {
         return Redirect::to("/account").into_response();
     };
     let Some(pool) = &state.pool else {
@@ -744,7 +764,8 @@ pub async fn api_key_create(
     let prefix: String = key.chars().take(13).collect();
     let name = request.name.trim();
     let name = if name.is_empty() { "unnamed" } else { name };
-    if let Err(err) = db::insert_api_key(pool, auth_user.id, name, &hash_api_key(&key), &prefix).await
+    if let Err(err) =
+        db::insert_api_key(pool, auth_user.id, name, &hash_api_key(&key), &prefix).await
     {
         tracing::error!(error = %err, "api key insert failed");
         return Redirect::to("/account?error=Could+not+create+the+key").into_response();
@@ -753,7 +774,9 @@ pub async fn api_key_create(
     let recent = db::recent_login_events(pool, auth_user.id, 5)
         .await
         .unwrap_or_default();
-    let api_keys = db::list_api_keys(pool, auth_user.id).await.unwrap_or_default();
+    let api_keys = db::list_api_keys(pool, auth_user.id)
+        .await
+        .unwrap_or_default();
     let reveal = html! {
         div .notice .success {
             strong { "API key created -- copy it now, it will not be shown again:" }
@@ -833,7 +856,11 @@ mod tests {
     use std::sync::Arc;
 
     fn state() -> SharedState {
-        Arc::new(AppState::new(None, reqwest::Client::new(), Config::default()))
+        Arc::new(AppState::new(
+            None,
+            reqwest::Client::new(),
+            Config::default(),
+        ))
     }
 
     fn aal1_user_with_verified_totp() -> AuthUser {

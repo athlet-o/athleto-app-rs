@@ -54,23 +54,67 @@ async fn authenticate(
     let user_id = match db::api_key_user(pool, &hash_key(token)).await {
         Ok(Some(user_id)) => user_id,
         Ok(None) => {
-            return Err(error_response(StatusCode::UNAUTHORIZED, "unknown or revoked API key"))
+            return Err(error_response(
+                StatusCode::UNAUTHORIZED,
+                "unknown or revoked API key",
+            ))
         }
         Err(err) => {
             tracing::error!(error = %err, "api key lookup failed");
-            return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "lookup failed"));
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "lookup failed",
+            ));
         }
     };
     match db::get_profile(pool, user_id).await {
-        Ok(Some(profile)) if profile.is_b2b() => Ok((user_id, profile)),
+        Ok(Some(profile)) if profile.is_b2b_approved() => Ok((user_id, profile)),
         Ok(_) => Err(error_response(
             StatusCode::FORBIDDEN,
             "API access is for business accounts",
         )),
         Err(err) => {
             tracing::error!(error = %err, "profile lookup failed");
-            Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "lookup failed"))
+            Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "lookup failed",
+            ))
         }
+    }
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0
+}
+
+// The handler must short-circuit with a fully formed HTTP response. Boxing it
+// just to shrink the enum would allocate on each rejected request.
+#[allow(clippy::result_large_err)]
+fn operations_authorized(state: &SharedState, headers: &HeaderMap) -> Result<(), Response> {
+    let Some(expected) = state.config.operations_api_key.as_deref() else {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fulfillment API is not configured",
+        ));
+    };
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or_default();
+    if constant_time_eq(presented, expected) {
+        Ok(())
+    } else {
+        Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "warehouse credential required",
+        ))
     }
 }
 
@@ -123,25 +167,55 @@ pub async fn orders_list(State(state): State<SharedState>, headers: HeaderMap) -
     };
     let mut items_by_order: HashMap<Uuid, Vec<serde_json::Value>> = HashMap::new();
     for item in items {
-        items_by_order.entry(item.order_id).or_default().push(json!({
-            "name": item.name,
-            "subname": item.subname,
-            "format": item.format.label(),
-            "qty": item.qty,
-            "unit_price_cents": item.unit_price_cents,
-        }));
+        items_by_order
+            .entry(item.order_id)
+            .or_default()
+            .push(json!({
+                "name": item.name,
+                "subname": item.subname,
+                "format": item.format.label(),
+                "qty": item.qty,
+                "unit_price_cents": item.unit_price_cents,
+            }));
     }
+    let shipments = db::shipments_for_user(pool, user_id)
+        .await
+        .unwrap_or_default();
+    let mut ship_by_order: HashMap<Uuid, db::Shipment> = HashMap::new();
+    for row in &shipments {
+        ship_by_order.insert(row.order_id, row.shipment());
+    }
+
     let body: Vec<_> = orders
         .iter()
         .map(|order| {
+            let (eta_earliest, eta_latest) = order.delivery_window();
+            let tracking = ship_by_order.get(&order.id).map(|s| {
+                json!({
+                    "status": s.status.label(),
+                    "carrier": s.carrier,
+                    "tracking_number": s.tracking_number,
+                    "tracking_url": s.tracking_url(),
+                    "ship_date": s.ship_date,
+                    "eta_earliest": s.eta_earliest,
+                    "eta_latest": s.eta_latest,
+                    "delivered_at": s.delivered_at,
+                })
+            });
             json!({
                 "id": order.id,
                 "kind": order.kind.as_str(),
                 "frequency": order.frequency.map(|f| f.label()),
                 "status": order.status.label(),
                 "channel": order.channel.as_str(),
+                "ship_method": order.ship_method.as_str(),
                 "po_number": order.po_number,
+                "subtotal_cents": order.subtotal_cents,
+                "shipping_cents": order.shipping_cents,
+                "tax_cents": order.tax_cents,
                 "total_cents": order.total_cents,
+                "estimated_delivery": { "earliest": eta_earliest, "latest": eta_latest },
+                "shipment": tracking,
                 "next_run_at": order.next_run_at,
                 "created_at": order.created_at,
                 "items": items_by_order.remove(&order.id).unwrap_or_default(),
@@ -149,6 +223,77 @@ pub async fn orders_list(State(state): State<SharedState>, headers: HeaderMap) -
         })
         .collect();
     Json(json!({ "orders": body })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FulfillmentRequest {
+    pub carrier: String,
+    pub tracking_number: String,
+    /// ISO date (YYYY-MM-DD); defaults to today when omitted.
+    #[serde(default)]
+    pub ship_date: Option<String>,
+}
+
+/// POST /api/v1/orders/{id}/fulfillment -- record a shipment with carrier +
+/// tracking and mark the order fulfilled (the outbound "856 ASN" step).
+pub async fn order_fulfill(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path(order_id): axum::extract::Path<Uuid>,
+    Json(request): Json<FulfillmentRequest>,
+) -> Response {
+    if let Err(response) = operations_authorized(&state, &headers) {
+        return response;
+    }
+    let Some(pool) = &state.pool else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "database not configured");
+    };
+
+    if request.carrier.trim().is_empty() || request.tracking_number.trim().is_empty() {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "carrier and tracking_number are required",
+        );
+    }
+    let ship_date = match request.ship_date.as_deref() {
+        Some(raw) => match chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+            Ok(date) => date,
+            Err(_) => {
+                return error_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "ship_date must be YYYY-MM-DD",
+                )
+            }
+        },
+        None => chrono::Utc::now().date_naive(),
+    };
+
+    match db::record_fulfillment(
+        pool,
+        order_id,
+        request.carrier.trim(),
+        request.tracking_number.trim(),
+        ship_date,
+    )
+    .await
+    {
+        Ok(Some(shipment_id)) => (
+            StatusCode::CREATED,
+            Json(json!({
+                "shipment_id": shipment_id,
+                "order_id": order_id,
+                "status": "shipped",
+                "carrier": request.carrier.trim(),
+                "tracking_number": request.tracking_number.trim(),
+            })),
+        )
+            .into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "order not found"),
+        Err(err) => {
+            tracing::error!(error = %err, "fulfillment failed");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "fulfillment failed")
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,7 +382,12 @@ pub async fn orders_create(
         kind,
         request.frequency,
         db::OrderChannel::B2bApi,
-        request.po_number.as_deref().map(str::trim).filter(|po| !po.is_empty()),
+        db::ShipMethod::Freight,
+        request
+            .po_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|po| !po.is_empty()),
         &lines,
         None,
     )
@@ -290,8 +440,7 @@ mod tests {
     // this same vector, or keys minted on /account would never authenticate
     // here. Both tests assert the identical constant.
     const VECTOR_INPUT: &str = "athk_test_vector_001";
-    const VECTOR_SHA256: &str =
-        "66adca3c7ae7f126ff03b7cc7daba157a1b9705447faaabd4fc1c2995c0d308a";
+    const VECTOR_SHA256: &str = "66adca3c7ae7f126ff03b7cc7daba157a1b9705447faaabd4fc1c2995c0d308a";
 
     #[test]
     fn hash_key_matches_shared_vector_and_is_deterministic() {

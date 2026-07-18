@@ -88,7 +88,11 @@ async fn is_own_cart(state: &SharedState, owner: &CartOwner, cart_id: Uuid) -> b
 /// Send the current `#hold-banner` state as an OOB fragment; returns false
 /// once the socket is gone. Browsers without the banner in the DOM simply
 /// ignore the swap.
-async fn push_hold_fragment(state: &SharedState, owner: &CartOwner, socket: &mut WebSocket) -> bool {
+async fn push_hold_fragment(
+    state: &SharedState,
+    owner: &CartOwner,
+    socket: &mut WebSocket,
+) -> bool {
     let Some(conn) = &state.pool else {
         return true; // degraded mode: keep the socket open, nothing to push
     };
