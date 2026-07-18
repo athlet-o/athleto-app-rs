@@ -40,8 +40,8 @@ async fn runner_fires_owned_recurring_but_skips_provider_subscription() {
     }
     // Only `provider` is backed by a provider subscription.
     conn.execute(stmt(
-        "INSERT INTO payment_subscriptions (user_id, order_id, provider, frequency, status) \
-         VALUES ($1, $2, 'stripe', 'weekly', 'active')",
+        "INSERT INTO payment_subscriptions (user_id, order_id, provider, provider_ref, frequency, status) \
+         VALUES ($1, $2, 'stripe', 'sub_test_guard', 'weekly', 'active')",
         vec![user.into(), provider.into()],
     )).await.unwrap();
 
