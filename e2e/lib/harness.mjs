@@ -68,12 +68,25 @@ export async function deleteUser(email) {
  * page (home or /account/setup for a new user).
  */
 export async function loginBrowser(page, email) {
-  const tokenHash = await mintMagicLink(email);
-  await page.goto(`${BASE_URL}/auth/confirm?token_hash=${tokenHash}&type=magiclink`, {
-    waitUntil: 'load',
+  // Sign-in is pinned to the browser that started it: /login sets an
+  // `athleto_login_flow` cookie and the confirm must present a matching `flow`
+  // UUID. We mint a link out-of-band via the admin API, so we set the pinning
+  // cookie ourselves (the server only checks the cookie == the param, not that
+  // it minted it) -- hermetic, no email send, exercises the real flow guard.
+  const flow = crypto.randomUUID();
+  await page.setCookie({
+    name: 'athleto_login_flow',
+    value: flow,
+    url: BASE_URL,
+    httpOnly: true,
   });
-  // The interstitial JS forwards after ~60ms; wait for the site header to
-  // settle so callers can act immediately.
+  const tokenHash = await mintMagicLink(email);
+  await page.goto(
+    `${BASE_URL}/auth/confirm?token_hash=${tokenHash}&type=magiclink&flow=${flow}`,
+    { waitUntil: 'load' },
+  );
+  // /auth/confirm 302s through the remembered-emails interstitial; wait for
+  // the site header to settle so callers can act immediately.
   await page.waitFor('header.site-header', { timeout: 10000 });
 }
 
