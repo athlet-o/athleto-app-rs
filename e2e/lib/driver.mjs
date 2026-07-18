@@ -21,6 +21,12 @@ class Page {
     await this._page.goto(url, { waitUntil });
   }
 
+  /** Navigate and return { status, headers } of the main response. */
+  async navigate(url, { waitUntil = 'load' } = {}) {
+    const resp = await this._page.goto(url, { waitUntil });
+    return { status: resp ? resp.status() : 0, headers: resp ? resp.headers() : {} };
+  }
+
   async waitFor(selector, { state = 'visible', timeout = 10000 } = {}) {
     if (this.engine === 'playwright') {
       await this._page.waitForSelector(selector, { state, timeout });
