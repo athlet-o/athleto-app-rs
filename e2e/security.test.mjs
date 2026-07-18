@@ -4,7 +4,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { Driver } from './lib/driver.mjs';
-import { BASE_URL } from './lib/harness.mjs';
+import { BASE_URL, hasAuth } from './lib/harness.mjs';
 
 let driver;
 before(async () => {
@@ -14,7 +14,14 @@ after(async () => {
   await driver?.close();
 });
 
-test(`[${Driver.engine()}] login page offers a magic link and no password`, async () => {
+// /login renders the magic-link form only when Supabase is configured; without
+// it the page correctly shows a "not configured" notice and no form. Gate this
+// test on the same signal orders.test.mjs / b2b-approval.test.mjs use, so the
+// no-secrets CI (and offline runs) stay green while full coverage runs wherever
+// SUPABASE_URL / SUPABASE_SERVICE_KEY are set.
+const skip = hasAuth() ? false : 'SUPABASE_URL / SUPABASE_SERVICE_KEY not set';
+
+test(`[${Driver.engine()}] login page offers a magic link and no password`, { skip }, async () => {
   const page = await driver.newPage();
   try {
     await page.goto(`${BASE_URL}/login`);
