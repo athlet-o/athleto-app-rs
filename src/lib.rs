@@ -16,12 +16,21 @@ pub mod security;
 pub mod ws;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+
+/// Hard ceiling on request bodies. Storefront forms and the JSON API are tiny;
+/// anything larger is abuse, so cap it before a handler buffers it.
+const MAX_BODY_BYTES: usize = 512 * 1024;
+/// Whole-request timeout. Bounds slow-body / slow-handler resource holding.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub use auth::{auth_session_cookie, refresh_session_cookie};
 
@@ -96,6 +105,9 @@ pub struct AppState {
     pub config: Config,
     /// Per-IP / per-email throttle for the magic-link login endpoint.
     pub login_limiter: security::RateLimiter,
+    /// Per-IP throttle for `POST /cart/items`, which reserves stock holds and
+    /// is reachable anonymously; keeps a script from mass-reserving inventory.
+    pub cart_limiter: security::RateLimiter,
     /// Cart mutations broadcast the affected cart id; /ws connections push a
     /// fresh hold-countdown fragment to their owner.
     pub cart_events: tokio::sync::broadcast::Sender<uuid::Uuid>,
@@ -113,6 +125,7 @@ impl AppState {
             http,
             config,
             login_limiter: security::RateLimiter::new(),
+            cart_limiter: security::RateLimiter::new(),
             cart_events,
         }
     }
@@ -196,6 +209,14 @@ pub fn router(state: SharedState) -> Router {
         .route(assets::HTMX_JS_PATH, get(assets::htmx_js))
         .route(assets::HTMX_WS_JS_PATH, get(assets::htmx_ws_js))
         .route("/healthz", get(healthz))
+        // Innermost first: bound request bodies and total handler time. These
+        // sit *inside* the security layer so their 413/408 responses still flow
+        // back through `security::apply` and pick up the security headers.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         // CSRF enforcement + security headers on every route (incl. the 404
         // fallback); /api/v1 is CSRF-exempt inside the middleware.
         .layer(axum::middleware::from_fn(security::apply))

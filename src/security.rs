@@ -122,6 +122,9 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
     let is_new_token = cookie_token.is_none();
     let token = cookie_token.unwrap_or_else(random_token);
     let nonce = Uuid::new_v4().simple().to_string();
+    // Computed up front so the early CSRF/oversize rejections below carry the
+    // same security headers as a normal response (they used to skip them).
+    let hsts = wants_hsts(&request);
 
     let state_changing = matches!(
         *request.method(),
@@ -145,7 +148,14 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
                 let (parts, body) = request.into_parts();
                 let bytes = match axum::body::to_bytes(body, MAX_FORM_BYTES).await {
                     Ok(bytes) => bytes,
-                    Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+                    Err(_) => {
+                        return finish(
+                            StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+                            &token,
+                            is_new_token,
+                            Some((nonce.clone(), hsts)),
+                        )
+                    }
                 };
                 let provided = std::str::from_utf8(&bytes)
                     .ok()
@@ -160,14 +170,18 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
                 .map(|provided| tokens_match(provided, &token))
                 .unwrap_or(false);
         if !verified {
-            return finish(csrf_rejection(), &token, is_new_token, None);
+            return finish(
+                csrf_rejection(),
+                &token,
+                is_new_token,
+                Some((nonce.clone(), hsts)),
+            );
         }
         request
     } else {
         request
     };
 
-    let hsts = wants_hsts(&request);
     let context = RequestContext {
         csrf_token: token.clone(),
         csp_nonce: nonce.clone(),
@@ -270,13 +284,17 @@ impl RateLimiter {
     }
 }
 
-/// Best-effort client address for throttling: first hop of x-forwarded-for
-/// (the ingress sets it), else a shared bucket.
+/// Best-effort client address for throttling: the **last** (right-most) hop of
+/// x-forwarded-for. Only the trusted proxy directly in front of us (the
+/// ingress) can control the value it appends; a client can forge additional
+/// left-most hops, so taking the first entry would let an attacker mint a fresh
+/// throttle bucket per request. With a single trusted proxy the right-most
+/// entry is the real client address.
 pub fn client_ip(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.split(',').next_back())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "local".to_string())
@@ -333,10 +351,15 @@ mod tests {
     }
 
     #[test]
-    fn client_ip_prefers_first_forwarded_hop() {
+    fn client_ip_uses_trusted_last_forwarded_hop() {
         let mut headers = axum::http::HeaderMap::new();
         assert_eq!(client_ip(&headers), "local");
-        headers.insert("x-forwarded-for", "9.9.9.9, 10.0.0.1".parse().unwrap());
-        assert_eq!(client_ip(&headers), "9.9.9.9");
+        // The right-most hop is the one our trusted proxy appended; a client
+        // that forges a left-most "1.2.3.4" cannot escape its real bucket.
+        headers.insert(
+            "x-forwarded-for",
+            "1.2.3.4, 9.9.9.9, 10.0.0.1".parse().unwrap(),
+        );
+        assert_eq!(client_ip(&headers), "10.0.0.1");
     }
 }
