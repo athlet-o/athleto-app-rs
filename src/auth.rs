@@ -24,6 +24,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine;
 use maud::{html, Markup, PreEscaped};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::db::{self, CustomerProfile};
@@ -31,6 +32,7 @@ use crate::{pages, SharedState};
 
 pub const ACCESS_COOKIE: &str = "sb_access_token";
 pub const REFRESH_COOKIE: &str = "sb_refresh_token";
+const LOGIN_FLOW_COOKIE: &str = "athleto_login_flow";
 /// Pending SMS challenge, stored as "{factor_id}:{challenge_id}".
 const MFA_CHALLENGE_COOKIE: &str = "sb_mfa_challenge";
 
@@ -49,7 +51,7 @@ impl Factor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthUser {
     pub id: Uuid,
     pub email: Option<String>,
@@ -82,7 +84,7 @@ impl AuthUser {
 /// Current-user extractor. Resolves to `MaybeUser(None)` (never rejects) when
 /// there is no session cookie, Supabase is not configured, or the token is
 /// invalid/expired.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct MaybeUser(pub Option<AuthUser>);
 
 impl MaybeUser {
@@ -178,12 +180,25 @@ impl<S: Send + Sync> FromRequestParts<S> for Biz {
             .get(HOST)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
-        Ok(Self(host.starts_with("biz.")))
+        Ok(Self(
+            host.split(':')
+                .next()
+                .is_some_and(|host| host.eq_ignore_ascii_case("biz.athleto.store")),
+        ))
     }
 }
 
 fn session_cookie(name: &'static str, value: String) -> Cookie<'static> {
     Cookie::build((name, value))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .build()
+}
+
+fn login_flow_cookie(value: String) -> Cookie<'static> {
+    Cookie::build((LOGIN_FLOW_COOKIE, value))
         .path("/")
         .http_only(true)
         .secure(true)
@@ -202,6 +217,7 @@ pub fn refresh_session_cookie(value: String) -> Cookie<'static> {
 fn clear_session(jar: CookieJar) -> CookieJar {
     jar.remove(Cookie::build(ACCESS_COOKIE).path("/"))
         .remove(Cookie::build(REFRESH_COOKIE).path("/"))
+        .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
         .remove(Cookie::build(MFA_CHALLENGE_COOKIE).path("/"))
 }
 
@@ -226,15 +242,19 @@ pub fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if host.is_empty() {
-        return state.config.public_base_url.clone();
-    }
-    let scheme = if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
-        "http"
+    if host
+        .split(':')
+        .next()
+        .is_some_and(|host| host.eq_ignore_ascii_case("biz.athleto.store"))
+    {
+        state.config.biz_public_base_url.clone()
     } else {
-        "https"
-    };
-    format!("{scheme}://{host}")
+        state.config.public_base_url.clone()
+    }
+}
+
+fn login_rate_limit_subject(email: &str) -> String {
+    hex::encode(Sha256::digest(email.as_bytes()))
 }
 
 fn not_configured_page(user: &MaybeUser, title: &str, heading: &str) -> Markup {
@@ -316,6 +336,7 @@ pub async fn login_submit(
     State(state): State<SharedState>,
     biz: Biz,
     headers: HeaderMap,
+    jar: CookieJar,
     Form(request): Form<LoginRequest>,
 ) -> Response {
     let Some((base, key)) = state.config.supabase() else {
@@ -324,7 +345,36 @@ pub async fn login_submit(
     };
 
     let email = request.email.trim().to_lowercase();
-    let redirect_to = format!("{}/auth/callback", request_base(&headers, &state));
+    if let Some(pool) = &state.pool {
+        match db::consume_login_attempt(pool, &login_rate_limit_subject(&email)).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return login_form(
+                    biz,
+                    Some(html! {
+                        div .notice .error {
+                            "Too many sign-in requests. Wait a few minutes and try again."
+                        }
+                    }),
+                )
+                .into_response()
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "login rate-limit check failed");
+                return login_form(
+                    biz,
+                    Some(html! {
+                        div .notice .error {
+                            "Sign-in is temporarily unavailable. Try again shortly."
+                        }
+                    }),
+                )
+                .into_response();
+            }
+        }
+    }
+    let flow = Uuid::new_v4().to_string();
+    let redirect_to = format!("{}/auth/callback?flow={flow}", request_base(&headers, &state));
     let response = state
         .http
         .post(format!("{base}/auth/v1/otp"))
@@ -335,7 +385,7 @@ pub async fn login_submit(
         .await;
 
     match response {
-        Ok(response) if response.status().is_success() => pages::layout_for(
+        Ok(response) if response.status().is_success() => (jar.add(login_flow_cookie(flow)), pages::layout_for(
             "Check your email | AthletO",
             None,
             biz,
@@ -355,13 +405,14 @@ pub async fn login_submit(
                     }
                 }
             },
-        )
+        ))
         .into_response(),
         Ok(response) => {
             let message = gotrue_error_message(response).await;
+            tracing::warn!(%message, "magic link request rejected by Supabase");
             login_form(
                 biz,
-                Some(html! { div .notice .error { "Could not send the link: " (message) } }),
+                Some(html! { div .notice .error { "Could not send a sign-in link. Check your email and try again shortly." } }),
             )
             .into_response()
         }
@@ -404,10 +455,11 @@ pub async fn auth_callback(biz: Biz) -> Markup {
     )
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct SessionTokens {
     access_token: String,
     refresh_token: String,
+    flow: String,
 }
 
 /// POST /auth/session -- validate fragment-delivered tokens and set cookies.
@@ -417,6 +469,17 @@ pub async fn auth_session(
     jar: CookieJar,
     Form(tokens): Form<SessionTokens>,
 ) -> Response {
+    let flow_matches = Uuid::parse_str(&tokens.flow).is_ok()
+        && jar
+            .get(LOGIN_FLOW_COOKIE)
+            .is_some_and(|cookie| cookie.value() == tokens.flow);
+    if !flow_matches {
+        return login_form(
+            biz,
+            Some(html! { div .notice .error { "This sign-in attempt did not start in this browser. Request a fresh link." } }),
+        )
+        .into_response();
+    }
     let Some(user) = fetch_user(&state, &tokens.access_token).await else {
         return login_form(
             biz,
@@ -426,6 +489,7 @@ pub async fn auth_session(
     };
 
     let jar = jar
+        .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
         .add(session_cookie(ACCESS_COOKIE, tokens.access_token.clone()))
         .add(session_cookie(REFRESH_COOKIE, tokens.refresh_token.clone()));
 
@@ -438,6 +502,7 @@ pub async fn auth_session(
 #[derive(Debug, Deserialize)]
 pub struct ConfirmParams {
     token_hash: String,
+    flow: String,
     #[serde(rename = "type", default = "default_confirm_type")]
     verify_type: String,
 }
@@ -464,6 +529,17 @@ pub async fn auth_confirm(
         return not_configured_page(&MaybeUser(None), "Sign in | AthletO", "Sign in")
             .into_response();
     };
+    let flow_matches = Uuid::parse_str(&params.flow).is_ok()
+        && jar
+            .get(LOGIN_FLOW_COOKIE)
+            .is_some_and(|cookie| cookie.value() == params.flow);
+    if !flow_matches {
+        return login_form(
+            biz,
+            Some(html! { div .notice .error { "This sign-in attempt did not start in this browser. Request a fresh link." } }),
+        )
+        .into_response();
+    }
 
     let response = state
         .http
@@ -480,9 +556,10 @@ pub async fn auth_confirm(
         Ok(response) if response.status().is_success() => response.json().await.unwrap_or_default(),
         Ok(response) => {
             let message = gotrue_error_message(response).await;
+            tracing::warn!(%message, "magic link verification rejected by Supabase");
             return login_form(
                 biz,
-                Some(html! { div .notice .error { "Sign-in link rejected: " (message) } }),
+                Some(html! { div .notice .error { "That sign-in link was invalid or expired. Request a fresh one." } }),
             )
             .into_response();
         }
@@ -513,6 +590,7 @@ pub async fn auth_confirm(
     };
 
     let jar = jar
+        .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
         .add(session_cookie(ACCESS_COOKIE, access))
         .add(session_cookie(REFRESH_COOKIE, refresh));
 
@@ -924,8 +1002,13 @@ pub async fn require_full(
 /// business accounts must have a verified second factor.
 pub fn require_b2b_ready(user: &AuthUser, profile: Option<&CustomerProfile>) -> Result<(), Response> {
     if let Some(profile) = profile {
-        if profile.is_b2b() && !user.has_verified_factor() {
-            return Err(Redirect::to("/account?required2fa=1").into_response());
+        if profile.is_b2b() {
+            if !profile.is_b2b_approved() {
+                return Err(Redirect::to("/account?approval=pending").into_response());
+            }
+            if !user.has_verified_factor() {
+                return Err(Redirect::to("/account?required2fa=1").into_response());
+            }
         }
     }
     Ok(())

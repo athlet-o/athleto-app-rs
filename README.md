@@ -38,6 +38,8 @@ and a powder packet (just add water).
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
+| `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical browser origins for B2C and B2B redirects |
+| `ATHLETO_OPERATIONS_API_KEY` | *(unset)* | Dedicated bearer credential for warehouse-only fulfillment writes |
 | `ATHLETO_STRIPE_SECRET_KEY` | *(unset)* | Stripe API secret key (`sk_test_…` / `sk_live_…`); enables card checkout, B2B ACH debit, and Net-30 hosted invoices |
 | `ATHLETO_STRIPE_PUBLISHABLE_KEY` | *(unset)* | Stripe publishable key (`pk_…`); reserved for client-side elements — hosted checkout doesn't need it server-side |
 | `ATHLETO_STRIPE_WEBHOOK_SECRET` | *(unset)* | Stripe webhook signing secret (`whsec_…`) for `POST /webhooks/stripe` |
@@ -50,6 +52,8 @@ and a powder packet (just add water).
 | `ATHLETO_BILLING_URL` | *(unset)* | Quaestor billing-server base URL (observer AR/AP ledger) |
 | `ATHLETO_BILLING_API_KEY` | *(unset)* | Bearer token for the billing-server API |
 | `ATHLETO_BILLING_TENANT_ID` | *(unset)* | AthletO tenant UUID in the multi-tenant ledger |
+| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(unset)* | fiducia.cloud endpoint + key; enables job-leadership leases and the KV secret overlay |
+| `ATHLETO_SECRETS_KEY` | *(unset)* | base64 of a 32-byte AES-256 key; decrypts `v1:` envelopes read from the fiducia KV overlay. Unset ⇒ overlay disabled (env-only) |
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a
@@ -75,7 +79,8 @@ SAQ-A):
   orders). B2B sessions additionally offer **ACH bank debit** (`us_bank_account`),
   and B2B can instead choose **Invoice my account (Net 30)**: the order ships
   against the PO and a hosted Stripe invoice (card / ACH / bank transfer) is
-  emailed, due in 30 days.
+  emailed, due in 30 days. Net-30 requires an approved business profile and a
+  purchase-order number; profile selection alone does not grant credit terms.
 - **PayPal** — Orders v2 for one-time; catalog product → billing plan →
   subscription for recurring.
 - **Square** — hosted payment links; catalog subscription plans for recurring

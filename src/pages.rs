@@ -89,7 +89,8 @@ pub const CALLBACK_JS: &str = r#"
     return;
   }
   var f=document.createElement('form'); f.method='POST'; f.action='/auth/session';
-  [['access_token',access],['refresh_token',refresh]].forEach(function(pair){
+  var flow=new URLSearchParams(location.search).get('flow');
+  [['access_token',access],['refresh_token',refresh],['flow',flow||'']].forEach(function(pair){
     var i=document.createElement('input'); i.type='hidden'; i.name=pair[0]; i.value=pair[1];
     f.appendChild(i);
   });

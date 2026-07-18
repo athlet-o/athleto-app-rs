@@ -9,6 +9,7 @@ mod entities;
 mod orders;
 mod pages;
 mod payments;
+mod security;
 mod secrets;
 
 use std::net::SocketAddr;
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -26,12 +28,14 @@ pub use auth::{auth_session_cookie, refresh_session_cookie};
 /// Environment-derived configuration. Every field is optional so the app can
 /// boot (and pass health checks) with no secrets present; features that need
 /// a missing value degrade to a "not configured" notice instead of failing.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub supabase_url: Option<String>,
     pub supabase_anon_key: Option<String>,
     /// Fallback origin for auth redirects when the Host header is absent.
     pub public_base_url: String,
+    pub biz_public_base_url: String,
+    pub operations_api_key: Option<String>,
     /// SMS second factors need the Supabase phone-MFA add-on plus a
     /// configured SMS provider; the UI stays hidden until this is set.
     pub sms_mfa_enabled: bool,
@@ -57,6 +61,8 @@ impl Default for Config {
             supabase_url: None,
             supabase_anon_key: None,
             public_base_url: "https://app.athleto.store".to_string(),
+            biz_public_base_url: "https://biz.athleto.store".to_string(),
+            operations_api_key: None,
             sms_mfa_enabled: false,
             fiducia_url: None,
             fiducia_api_key: None,
@@ -125,6 +131,10 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Max accepted body on provider webhook routes. Real Stripe/PayPal/Square
+/// events are a few KB; 64 KiB is generous headroom while capping abuse.
+const WEBHOOK_BODY_LIMIT: usize = 64 * 1024;
+
 fn router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(pages::home))
@@ -160,12 +170,31 @@ fn router(state: SharedState) -> Router {
         .route("/orders", get(orders::orders_page))
         .route("/orders/{id}", get(orders::order_detail_page))
         .route("/orders/{id}/reorder", post(orders::reorder))
+        .route("/orders/{id}/pay", post(orders::pay_now))
         .route("/quick-order", get(orders::quick_order_page).post(orders::quick_order_submit))
+        // Payments: hosted-checkout returns + signed provider webhooks. The
+        // webhook routes get a tight body cap (provider events are small; an
+        // oversized body is either a bug or an attempt to exhaust memory)
+        // applied as its own merged sub-router.
+        .route("/pay/success", get(payments::pay_success))
+        .route("/pay/cancel", get(payments::pay_cancel))
+        .merge(
+            Router::new()
+                .route("/webhooks/stripe", post(payments::stripe_webhook))
+                .route("/webhooks/paypal", post(payments::paypal_webhook))
+                .route("/webhooks/square", post(payments::square_webhook))
+                .layer(tower_http::limit::RequestBodyLimitLayer::new(WEBHOOK_BODY_LIMIT))
+                .with_state(state.clone()),
+        )
         // B2B ERP API.
         .route("/api/v1/products", get(api::products))
         .route("/api/v1/orders", get(api::orders_list).post(api::orders_create))
         .route("/api/v1/orders/{id}/fulfillment", post(api::order_fulfill))
         .route("/healthz", get(healthz))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security::require_same_origin,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -203,6 +232,9 @@ async fn main() -> anyhow::Result<()> {
         supabase_anon_key: secret.get("SUPABASE_ANON_KEY"),
         public_base_url: env_opt("ATHLETO_PUBLIC_BASE_URL")
             .unwrap_or_else(|| "https://app.athleto.store".to_string()),
+        biz_public_base_url: env_opt("ATHLETO_BIZ_PUBLIC_BASE_URL")
+            .unwrap_or_else(|| "https://biz.athleto.store".to_string()),
+        operations_api_key: secret.get("ATHLETO_OPERATIONS_API_KEY"),
         sms_mfa_enabled: env_opt("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
         fiducia_url,
         fiducia_api_key,

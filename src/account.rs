@@ -75,7 +75,7 @@ fn setup_form(
                         button .primary type="submit" { "Save and continue" }
                     }
                     p .auth-alt {
-                        "Business accounts must set up two-factor authentication before placing orders."
+                        "Business accounts require approval and two-factor authentication before placing orders."
                     }
                 }
             }
@@ -138,10 +138,8 @@ pub async fn setup_submit(
     }
 
     match customer_type {
-        CustomerType::B2b if !auth_user.has_verified_factor() => {
-            Redirect::to("/account?required2fa=1").into_response()
-        }
-        _ => Redirect::to("/").into_response(),
+        CustomerType::B2b => Redirect::to("/account?approval=pending").into_response(),
+        CustomerType::B2c => Redirect::to("/").into_response(),
     }
 }
 
@@ -150,6 +148,7 @@ pub async fn setup_submit(
 
 #[derive(Debug, Default, Deserialize)]
 pub struct AccountParams {
+    approval: Option<String>,
     required2fa: Option<String>,
     enrolled: Option<String>,
     error: Option<String>,
@@ -177,7 +176,7 @@ pub async fn account_page(
         None => Vec::new(),
     };
     let api_keys = match (&state.pool, profile.as_ref()) {
-        (Some(pool), Some(profile)) if profile.is_b2b() => {
+        (Some(pool), Some(profile)) if profile.is_b2b_approved() => {
             db::list_api_keys(pool, auth_user.id).await.unwrap_or_default()
         }
         _ => Vec::new(),
@@ -234,7 +233,12 @@ fn account_markup(
     params: &AccountParams,
     extra: Option<Markup>,
 ) -> Markup {
-    let is_b2b = profile.map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b = profile
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
+    let b2b_pending = profile
+        .map(|profile| profile.is_b2b() && !profile.is_b2b_approved())
+        .unwrap_or(false);
     let verified_count = user.verified_factors().count();
     pages::layout_for(
         "Account | AthletO",
@@ -243,6 +247,12 @@ fn account_markup(
         html! {
             section .section {
                 h2 { "Your account" }
+                @if params.approval.is_some() || b2b_pending {
+                    div .notice {
+                        strong { "Business account approval pending. " }
+                        "Net-30 terms, ERP API keys, and business ordering activate after operations approves your company."
+                    }
+                }
                 @if params.required2fa.is_some() {
                     div .notice .error {
                         strong { "Business accounts require two-factor authentication. " }
@@ -724,7 +734,7 @@ pub async fn api_key_create(
     if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
         return redirect;
     }
-    let Some(profile) = profile.filter(CustomerProfile::is_b2b) else {
+    let Some(profile) = profile.filter(CustomerProfile::is_b2b_approved) else {
         return Redirect::to("/account").into_response();
     };
     let Some(pool) = &state.pool else {

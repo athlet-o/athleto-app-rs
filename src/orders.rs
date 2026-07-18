@@ -136,7 +136,10 @@ pub async fn checkout(
         return Ok(Redirect::to("/cart").into_response());
     }
 
-    let is_b2b = profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b = profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
     let kind = parse_kind(&request.kind);
     let frequency = parse_frequency(&request.frequency);
     if kind == OrderKind::Recurring && frequency.is_none() {
@@ -297,7 +300,10 @@ pub async fn orders_page(
         ship_by_order.insert(row.order_id, row.shipment());
     }
 
-    let is_b2b = profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b = profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
 
     // B2B order-management filters.
     let status_filter = filter.status.as_deref().and_then(db::OrderStatus::parse);
@@ -599,7 +605,11 @@ pub async fn quick_order_page(
     if let Err(redirect) = auth::require_b2b_ready(&auth_user, profile.as_ref()) {
         return Ok(redirect);
     }
-    if !profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false) {
+    if !profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false)
+    {
         return Ok(Redirect::to("/").into_response());
     }
 
@@ -699,8 +709,19 @@ pub fn checkout_form(
     profile: Option<&CustomerProfile>,
     has_2fa: bool,
 ) -> Markup {
-    let is_b2b = profile.map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b_requested = profile.map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b = profile
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
     let pay_options = payment_method_options(config, is_b2b);
+    if is_b2b_requested && !is_b2b {
+        return html! {
+            div .notice {
+                strong { "Business account approval pending. " }
+                "Ordering will unlock once operations approves your company."
+            }
+        };
+    }
     if is_b2b && !has_2fa {
         return html! {
             div .notice .error {
@@ -827,7 +848,10 @@ pub async fn pay_now(
     if !payment_retryable(&order) {
         return Ok(Redirect::to("/orders").into_response());
     }
-    let is_b2b = profile.as_ref().map(CustomerProfile::is_b2b).unwrap_or(false);
+    let is_b2b = profile
+        .as_ref()
+        .map(CustomerProfile::is_b2b_approved)
+        .unwrap_or(false);
     let Some(method) = payments::PayMethod::parse(request.pay_method.trim()) else {
         return Ok(Redirect::to("/orders").into_response());
     };

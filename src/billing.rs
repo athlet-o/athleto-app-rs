@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::db::{self, PaymentProvider};
 use crate::SharedState;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BillingConfig {
     /// e.g. `https://billing.dev.datadamn.com` (no trailing slash).
     pub url: String,

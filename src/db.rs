@@ -310,17 +310,22 @@ impl CustomerType {
 pub struct CustomerProfile {
     pub customer_type: CustomerType,
     pub company_name: Option<String>,
+    pub b2b_approved_at: Option<DateTime<Utc>>,
 }
 
 impl CustomerProfile {
     pub fn is_b2b(&self) -> bool {
         self.customer_type == CustomerType::B2b
     }
+
+    pub fn is_b2b_approved(&self) -> bool {
+        self.is_b2b() && self.b2b_approved_at.is_some()
+    }
 }
 
 pub async fn get_profile(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<CustomerProfile>> {
     sqlx::query_as::<_, CustomerProfile>(
-        "SELECT customer_type, company_name FROM customer_profiles WHERE user_id = $1",
+        "SELECT customer_type, company_name, b2b_approved_at FROM customer_profiles WHERE user_id = $1",
     )
     .bind(user_id)
     .fetch_optional(pool)
@@ -339,6 +344,10 @@ pub async fn upsert_profile(
          ON CONFLICT (user_id) DO UPDATE \
          SET customer_type = EXCLUDED.customer_type, \
              company_name = EXCLUDED.company_name, \
+             b2b_approved_at = CASE \
+                 WHEN EXCLUDED.customer_type = 'b2c' THEN NULL \
+                 ELSE customer_profiles.b2b_approved_at \
+             END, \
              updated_at = now()",
     )
     .bind(user_id)
@@ -362,6 +371,29 @@ pub async fn record_login_event(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+const LOGIN_RATE_LIMIT_MAX_ATTEMPTS: i32 = 5;
+
+pub async fn consume_login_attempt(pool: &PgPool, subject_hash: &str) -> sqlx::Result<bool> {
+    let (attempts,): (i32,) = sqlx::query_as(
+        "INSERT INTO login_rate_limits AS rate (subject_hash, window_started_at, attempts) \
+         VALUES ($1, now(), 1) \
+         ON CONFLICT (subject_hash) DO UPDATE \
+         SET window_started_at = CASE \
+                 WHEN rate.window_started_at <= now() - interval '15 minutes' THEN now() \
+                 ELSE rate.window_started_at \
+             END, \
+             attempts = CASE \
+                 WHEN rate.window_started_at <= now() - interval '15 minutes' THEN 1 \
+                 ELSE rate.attempts + 1 \
+             END \
+         RETURNING attempts",
+    )
+    .bind(subject_hash)
+    .fetch_one(pool)
+    .await?;
+    Ok(attempts <= LOGIN_RATE_LIMIT_MAX_ATTEMPTS)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -919,12 +951,10 @@ pub async fn shipments_for_order(pool: &PgPool, order_id: Uuid) -> sqlx::Result<
 }
 
 /// Record a fulfillment (ops / EDI 856): create a shipment with carrier +
-/// tracking and advance the order to fulfilled. Ownership is checked so an
-/// API key can only fulfill its own orders. Returns None if the order isn't
-/// the user's.
+/// tracking and advance the order to fulfilled. The caller has already passed
+/// operations authentication. Returns None if the order is absent.
 pub async fn record_fulfillment(
     pool: &PgPool,
-    user_id: Uuid,
     order_id: Uuid,
     carrier: &str,
     tracking_number: &str,
@@ -932,9 +962,8 @@ pub async fn record_fulfillment(
 ) -> sqlx::Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
     let owned: Option<(ShipMethod,)> =
-        sqlx::query_as("SELECT ship_method FROM orders WHERE id = $1 AND user_id = $2 FOR UPDATE")
+        sqlx::query_as("SELECT ship_method FROM orders WHERE id = $1 FOR UPDATE")
             .bind(order_id)
-            .bind(user_id)
             .fetch_optional(&mut *tx)
             .await?;
     let Some((ship_method,)) = owned else {

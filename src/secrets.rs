@@ -12,14 +12,28 @@
 //! failure degrades to "not configured" exactly like a missing env var —
 //! fiducia being down must never stop the app from booting.
 //!
-//! Scope note (see docs/secrets-management.md): the fiducia KV is replicated
-//! but not yet an encrypted secrets vault — production secrets-of-record stay
-//! in AWS Secrets Manager (`dd/remote-dev/agent-secrets` -> ESO -> env, which
-//! wins by precedence). This overlay is the client-side seam that a future
-//! `/v1/secrets/*` (envelope-encrypted) fiducia API can slot into without the
-//! app changing again.
+//! **Confidentiality (see docs/secrets-management.md).** A 2026-07 security
+//! audit confirmed the fiducia KV stores values in *cleartext* on every
+//! node's disk (Raft log + snapshots) and over the plain-HTTP peer network —
+//! it is not an encrypted vault. So this overlay never trusts the KV with a
+//! usable plaintext secret: values are **client-side envelope-encrypted**
+//! (AES-256-GCM, `v1:` prefix) and decrypted here with a key
+//! (`ATHLETO_SECRETS_KEY`) that lives *outside* fiducia (AWS Secrets Manager
+//! / secrets.env). A KV-disk or peer-network compromise therefore yields only
+//! opaque ciphertext. Without that key the overlay is disabled (env-only), so
+//! we can never accidentally read a plaintext secret out of the KV. AWS
+//! Secrets Manager remains production secrets-of-record; this is a
+//! cross-provider bootstrap convenience, not a replacement.
+//!
+//! When a real encrypted `/v1/secrets/*` fiducia API ships, the seam is
+//! `FiduciaClient::kv_get` + `decrypt_envelope` — swap those two, nothing
+//! else changes.
 
 use std::collections::HashMap;
+
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
+use base64::Engine;
 
 use crate::coordinate::FiduciaClient;
 
@@ -30,6 +44,7 @@ pub const MANAGED_KEYS: &[&str] = &[
     "SUPABASE_URL",
     "SUPABASE_ANON_KEY",
     "DATABASE_URL",
+    "ATHLETO_OPERATIONS_API_KEY",
     "ATHLETO_STRIPE_SECRET_KEY",
     "ATHLETO_STRIPE_PUBLISHABLE_KEY",
     "ATHLETO_STRIPE_WEBHOOK_SECRET",
@@ -58,6 +73,50 @@ fn env_opt(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The 32-byte AES-256 key that unwraps KV envelopes, base64 in
+/// `ATHLETO_SECRETS_KEY`. Sourced from env only (AWS SM / secrets.env) — the
+/// root of trust must never live in fiducia, since fiducia is what we're
+/// protecting the values from.
+fn secrets_key() -> Option<[u8; 32]> {
+    let raw = env_opt("ATHLETO_SECRETS_KEY")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw.as_bytes())
+        .ok()?;
+    bytes.try_into().ok()
+}
+
+/// Wrap plaintext into a `v1:` envelope: `v1:` + base64(nonce[12] ‖ ciphertext
+/// ‖ tag), AES-256-GCM. The seal side of the overlay: operators (or a future
+/// `athleto secrets put` subcommand) call this to produce the ciphertext they
+/// PUT into `secrets/athleto/*`. Exercised by the round-trip tests.
+#[allow(dead_code)] // publish-side helper / tooling seam; consumed by tests + ops
+pub fn seal_envelope(key: &[u8; 32], plaintext: &str) -> Option<String> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher.encrypt(&nonce, plaintext.as_bytes()).ok()?;
+    let mut blob = nonce.to_vec();
+    blob.extend_from_slice(&ciphertext);
+    Some(format!("v1:{}", base64::engine::general_purpose::STANDARD.encode(blob)))
+}
+
+/// Unwrap a `v1:` envelope. Returns `None` on any format/auth failure — an
+/// unparseable, unauthenticated, or plaintext value is treated as *absent*,
+/// never accepted as a secret. This is what stops a plaintext (or tampered)
+/// KV value from ever reaching the app as config.
+fn decrypt_envelope(key: &[u8; 32], value: &str) -> Option<String> {
+    let b64 = value.strip_prefix("v1:")?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .ok()?;
+    if raw.len() < 12 + 16 {
+        return None; // need at least a nonce and a GCM tag
+    }
+    let (nonce, ciphertext) = raw.split_at(12);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let plaintext = cipher.decrypt(Nonce::from_slice(nonce), ciphertext).ok()?;
+    String::from_utf8(plaintext).ok()
+}
+
 /// Env-first configuration lookup with an optional fiducia-KV overlay behind
 /// it. Built once at boot; `get` is then cheap and deterministic.
 pub struct SecretSource {
@@ -75,29 +134,48 @@ impl SecretSource {
         Self { overlay }
     }
 
-    /// Fetch every managed key that the environment does NOT already set from
-    /// the fiducia config KV. Failures are logged and skipped.
+    /// Fetch every managed key the environment does NOT set from the fiducia
+    /// KV, decrypting each `v1:` envelope with `ATHLETO_SECRETS_KEY`. Disabled
+    /// (env-only) when that key is absent, because the KV holds ciphertext we
+    /// couldn't read — and must never hold usable plaintext. All failures
+    /// degrade to "unset".
     pub async fn load(client: Option<&FiduciaClient>) -> Self {
         let mut overlay = HashMap::new();
         let Some(client) = client else {
+            return Self { overlay };
+        };
+        let Some(key) = secrets_key() else {
+            tracing::warn!(
+                "fiducia KV secret overlay disabled: ATHLETO_SECRETS_KEY is unset. The fiducia \
+                 KV stores values in cleartext, so secrets must be envelope-encrypted and this \
+                 app refuses to read plaintext from it; using environment only. See \
+                 docs/secrets-management.md"
+            );
             return Self { overlay };
         };
         for name in MANAGED_KEYS {
             if env_opt(name).is_some() {
                 continue; // env wins; don't even ask
             }
-            if let Some(value) = client.kv_get(&kv_key(name)).await {
-                let value = value.trim().to_string();
-                if !value.is_empty() {
-                    overlay.insert((*name).to_string(), value);
+            let Some(value) = client.kv_get(&kv_key(name)).await else {
+                continue;
+            };
+            match decrypt_envelope(&key, value.trim()) {
+                Some(plaintext) if !plaintext.is_empty() => {
+                    overlay.insert((*name).to_string(), plaintext);
                 }
+                _ => tracing::warn!(
+                    key = *name,
+                    "fiducia KV value is not a decryptable v1 envelope; ignoring (plaintext \
+                     values are never accepted as secrets)"
+                ),
             }
         }
         if !overlay.is_empty() {
             // Names only — never values.
             let mut names: Vec<&str> = overlay.keys().map(String::as_str).collect();
             names.sort_unstable();
-            tracing::info!(keys = ?names, "config filled from fiducia KV overlay");
+            tracing::info!(keys = ?names, "config filled from fiducia KV overlay (decrypted)");
         }
         Self { overlay }
     }
@@ -133,6 +211,40 @@ mod tests {
         let path = source.get("PATH").expect("PATH is set");
         assert_ne!(path, "kv-should-never-win");
         assert!(source.get("ATHLETO_TOTALLY_UNSET").is_none());
+    }
+
+    #[test]
+    fn envelope_seals_and_unwraps_round_trip() {
+        let key = [7u8; 32];
+        let sealed = seal_envelope(&key, "sk_test_secret_value").expect("seal");
+        assert!(sealed.starts_with("v1:"));
+        // The ciphertext must not leak the plaintext.
+        assert!(!sealed.contains("sk_test_secret_value"));
+        assert_eq!(
+            decrypt_envelope(&key, &sealed).as_deref(),
+            Some("sk_test_secret_value")
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_wrong_key_tamper_and_plaintext() {
+        let key = [7u8; 32];
+        let other = [9u8; 32];
+        let sealed = seal_envelope(&key, "top-secret").unwrap();
+        // Wrong key: GCM auth fails → None (treated as absent, not accepted).
+        assert!(decrypt_envelope(&other, &sealed).is_none());
+        // Plaintext value (no v1: envelope) is never accepted as a secret.
+        assert!(decrypt_envelope(&key, "sk_live_plaintext").is_none());
+        // Tampered ciphertext fails the GCM tag.
+        let mut tampered = sealed.clone();
+        tampered.push('A');
+        assert!(decrypt_envelope(&key, &tampered).is_none());
+        // Too-short blob (no room for nonce+tag) is rejected.
+        let short = format!(
+            "v1:{}",
+            base64::engine::general_purpose::STANDARD.encode([0u8; 8])
+        );
+        assert!(decrypt_envelope(&key, &short).is_none());
     }
 
     #[test]
