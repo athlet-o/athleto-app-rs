@@ -27,6 +27,16 @@ class Page {
     return { status: resp ? resp.status() : 0, headers: resp ? resp.headers() : {} };
   }
 
+  /** Wait until the page URL no longer contains `pathPart` (e.g. after a
+   * client-side redirect forwards off an interstitial). */
+  async waitAwayFrom(pathPart, { timeout = 10000 } = {}) {
+    if (this.engine === 'playwright') {
+      await this._page.waitForURL((u) => !u.toString().includes(pathPart), { timeout });
+    } else {
+      await this._page.waitForFunction((p) => !location.href.includes(p), { timeout }, pathPart);
+    }
+  }
+
   async waitFor(selector, { state = 'visible', timeout = 10000 } = {}) {
     if (this.engine === 'playwright') {
       await this._page.waitForSelector(selector, { state, timeout });
