@@ -44,7 +44,8 @@ test(`[${Driver.engine()}] TOTP 2FA enrolls and is then required at login`, { sk
     await page.goto(`${BASE_URL}/account`);
     await page.waitFor('form[action="/account/2fa/totp"] button[type="submit"]');
     await page.click('form[action="/account/2fa/totp"] button[type="submit"]');
-    await page.waitFor('input[name="secret"]', { timeout: 10000 });
+    // Wait on the visible code field (the secret is a hidden input, never "visible").
+    await page.waitFor('input[name="code"]', { timeout: 10000 });
     const secret = await page.attr('input[name="secret"]', 'value');
     assert.ok(secret && secret.length >= 16, 'a TOTP secret was issued');
 
