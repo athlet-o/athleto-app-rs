@@ -29,9 +29,15 @@ async fn main() -> anyhow::Result<()> {
 
     let fiducia_url = env_opt("FIDUCIA_URL");
     let fiducia_api_key = env_opt("FIDUCIA_API_KEY");
-    let fiducia_client = match (fiducia_url.clone(), fiducia_api_key.clone()) {
-        (Some(url), Some(key)) => Some(coordinate::FiduciaClient::new(url, key)),
-        _ => None,
+    let fiducia_client = match coordinate::FiduciaClient::from_options(
+        fiducia_url.as_deref(),
+        fiducia_api_key.as_deref(),
+    ) {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::error!(error = %err, "invalid fiducia configuration; secret overlay disabled and singleton jobs will fail closed");
+            None
+        }
     };
     let secret = secrets::SecretSource::load(fiducia_client.as_ref()).await;
 

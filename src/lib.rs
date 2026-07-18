@@ -58,8 +58,8 @@ pub struct Config {
     /// configured SMS provider; the UI stays hidden until this is set.
     pub sms_mfa_enabled: bool,
     /// fiducia.cloud lock service, used only for singleton-job leadership
-    /// leases (never for cart holds). Both must be set to activate; otherwise
-    /// leadership falls back to a Postgres advisory lock.
+    /// leases (never for cart holds). Both values unset activates the Postgres
+    /// advisory-lock fallback; partial or unsafe configuration fails closed.
     pub fiducia_url: Option<String>,
     pub fiducia_api_key: Option<String>,
     /// Identifies this replica in fiducia lease holder strings.

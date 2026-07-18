@@ -89,6 +89,24 @@ that's the end state.
   writable KV can't inject `PATH`-style variables. Log lines name filled keys,
   never values.
 
+### Client and transport boundary
+
+The app does **not** currently declare the upstream Rust `fiducia-client`
+crate from `fiducia-cloud/fiducia-clients`. The audited upstream revision
+(`e2fa3c0`, 2026-07-18) is an unreleased blocking client whose Cargo manifest
+depends on an unpublished sibling `fiducia-interfaces` path, so it cannot
+resolve as a normal git or registry dependency. It also models trusted
+internal-header authentication, while this app uses the deployed
+`Authorization: Bearer $FIDUCIA_API_KEY` edge contract.
+
+`src/coordinate.rs` therefore keeps a small async `reqwest` adapter that
+matches the shared lock/KV wire protocol: it disables redirects, bounds every
+request, accepts only `https` public endpoints (or recognized local/in-cluster
+`http` addresses), and requires the committed `result.output.fencing_token`
+grant before leader-only work can start. Do not add an unpinned git dependency
+on `fiducia-clients`; migrate only after a versioned, independently resolvable
+Rust package supports the deployed bearer-auth mode.
+
 Publishing a value (seal client-side, then PUT the ciphertext; put only
 test-mode keys here until the fiducia scope work below lands):
 

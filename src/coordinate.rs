@@ -24,6 +24,10 @@
 //! never an advisory lock (session-scoped, breaks through poolers) and never a
 //! fiducia lease (liveness-coupled, wrong layer). See docs/cart-holds.md.
 
+use std::net::IpAddr;
+use std::time::Duration;
+
+use reqwest::{redirect::Policy, Url};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Value};
 
 use crate::Config;
@@ -88,20 +92,34 @@ pub async fn try_lead(
     job: &str,
     lease_secs: u64,
 ) -> Option<Leadership> {
-    if let Some(client) = FiduciaClient::from_config(config) {
-        let holder = format!("athleto:{}:{}", config.replica_id, job);
-        let key = format!("athleto:cron:{job}");
-        match client.acquire(&key, &holder, lease_secs * 1000).await {
-            Some(fencing_token) => {
-                return Some(Leadership::Fiducia {
-                    client,
-                    holder,
-                    fencing_token,
-                })
+    match FiduciaClient::from_config(config) {
+        Ok(Some(client)) => {
+            let holder = format!("athleto:{}:{}", config.replica_id, job);
+            let key = format!("athleto:cron:{job}");
+            match client.acquire(&key, &holder, lease_secs * 1000).await {
+                Ok(Some(fencing_token)) => {
+                    return Some(Leadership::Fiducia {
+                        client,
+                        holder,
+                        fencing_token,
+                    })
+                }
+                // A competing replica has the lease. Do not fall back to a
+                // different coordination plane or we could double-run jobs.
+                Ok(None) => return None,
+                Err(err) => {
+                    tracing::warn!(error = %err, job, "fiducia lease acquisition failed; skipping tick");
+                    return None;
+                }
             }
-            // Fiducia is configured but someone else holds it (or it is
-            // unreachable): skip this tick rather than double-run.
-            None => return None,
+        }
+        // Only a fully unset Fiducia configuration may use the database-only
+        // fallback. Partial or unsafe configuration is an operator error, not
+        // permission to elect a second cross-cluster leader through Postgres.
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(error = %err, job, "invalid fiducia configuration; skipping singleton tick");
+            return None;
         }
     }
 
@@ -129,10 +147,11 @@ pub async fn try_lead(
     }
 }
 
-/// Minimal fiducia.cloud lock/lease client. The lock API is
-/// `POST /v1/locks/acquire` and `POST /v1/locks/release`, authed with a
-/// `Bearer` API key; the edge injects the org identity. Used only for the
-/// seconds-long leadership lease, never for cart holds.
+/// Minimal async fiducia.cloud client for the protocol in
+/// `fiducia-cloud/fiducia-clients`. The upstream Rust client is currently a
+/// blocking, unreleased source checkout, so this keeps the app async while
+/// matching the shared HTTP contract exactly. Used only for singleton-job
+/// leadership and the encrypted config-KV overlay, never for cart holds.
 #[derive(Clone)]
 pub struct FiduciaClient {
     http: reqwest::Client,
@@ -140,19 +159,66 @@ pub struct FiduciaClient {
     api_key: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum FiduciaConfigError {
+    #[error("FIDUCIA_URL and FIDUCIA_API_KEY must either both be set or both be unset")]
+    PartialConfiguration,
+    #[error("FIDUCIA_URL must be an absolute https URL or a trusted internal http URL")]
+    UnsafeBaseUrl,
+    #[error("FIDUCIA_API_KEY must not be empty")]
+    EmptyApiKey,
+    #[error("could not construct the fiducia HTTP client")]
+    HttpClient,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FiduciaRequestError {
+    #[error("fiducia transport request failed")]
+    Transport(#[source] reqwest::Error),
+    #[error("fiducia returned HTTP {0}")]
+    Rejected(u16),
+    #[error("fiducia returned an invalid lock-acquire response: {0}")]
+    InvalidGrant(&'static str),
+}
+
 impl FiduciaClient {
-    pub fn new(base: String, api_key: String) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            base: base.trim_end_matches('/').to_string(),
-            api_key,
+    pub fn new(base: String, api_key: String) -> Result<Self, FiduciaConfigError> {
+        let base = normalize_base_url(&base)?;
+        let api_key = api_key.trim().to_string();
+        if api_key.is_empty() {
+            return Err(FiduciaConfigError::EmptyApiKey);
         }
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(5))
+            .redirect(Policy::none())
+            .build()
+            .map_err(|_| FiduciaConfigError::HttpClient)?;
+        Ok(Self {
+            http,
+            base,
+            api_key,
+        })
     }
 
-    pub fn from_config(config: &Config) -> Option<Self> {
-        let base = config.fiducia_url.clone()?;
-        let api_key = config.fiducia_api_key.clone()?;
-        Some(Self::new(base, api_key))
+    pub fn from_config(config: &Config) -> Result<Option<Self>, FiduciaConfigError> {
+        Self::from_options(
+            config.fiducia_url.as_deref(),
+            config.fiducia_api_key.as_deref(),
+        )
+    }
+
+    pub fn from_options(
+        base: Option<&str>,
+        api_key: Option<&str>,
+    ) -> Result<Option<Self>, FiduciaConfigError> {
+        match (base, api_key) {
+            (None, None) => Ok(None),
+            (Some(base), Some(api_key)) => {
+                Self::new(base.to_string(), api_key.to_string()).map(Some)
+            }
+            _ => Err(FiduciaConfigError::PartialConfiguration),
+        }
     }
 
     /// Read one key from the fiducia config KV (`GET /v1/kv?key=K`); the org
@@ -165,12 +231,17 @@ impl FiduciaClient {
             .get(format!("{}/v1/kv", self.base))
             .query(&[("key", key)])
             .bearer_auth(&self.api_key)
-            .timeout(std::time::Duration::from_secs(5))
             .send()
             .await;
         match resp {
             Ok(resp) if resp.status().is_success() => {
-                let body: serde_json::Value = resp.json().await.ok()?;
+                let body: serde_json::Value = match resp.json().await {
+                    Ok(body) => body,
+                    Err(err) => {
+                        tracing::warn!(error = %err, key, "fiducia kv_get response was not JSON");
+                        return None;
+                    }
+                };
                 if body.get("found").and_then(|v| v.as_bool()) != Some(true) {
                     return None;
                 }
@@ -191,8 +262,15 @@ impl FiduciaClient {
     }
 
     /// Acquire (non-blocking) a lease on `key` held by `holder` for `ttl_ms`.
-    /// Returns the fencing token on success, `None` if held or unreachable.
-    pub async fn acquire(&self, key: &str, holder: &str, ttl_ms: u64) -> Option<u64> {
+    /// Returns the fencing token on success and `None` only when another holder
+    /// already owns the lock. Transport and protocol failures stay distinct so
+    /// callers can fail closed rather than mistake an outage for contention.
+    pub async fn acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        ttl_ms: u64,
+    ) -> Result<Option<u64>, FiduciaRequestError> {
         let resp = self
             .http
             .post(format!("{}/v1/locks/acquire", self.base))
@@ -204,25 +282,17 @@ impl FiduciaClient {
                 "wait": false,
             }))
             .send()
-            .await;
-        match resp {
-            Ok(resp) if resp.status().is_success() => {
-                let body: serde_json::Value = resp.json().await.ok()?;
-                if body.get("acquired").and_then(|v| v.as_bool()) == Some(true) {
-                    body.get("fencing_token").and_then(|v| v.as_u64())
-                } else {
-                    None // queued/blocked -> someone else leads
-                }
-            }
-            Ok(resp) => {
-                tracing::warn!(status = %resp.status(), "fiducia acquire rejected");
-                None
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "fiducia acquire unreachable");
-                None
-            }
+            .await
+            .map_err(FiduciaRequestError::Transport)?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(FiduciaRequestError::Rejected(status.as_u16()));
         }
+        let body = resp
+            .json::<serde_json::Value>()
+            .await
+            .map_err(FiduciaRequestError::Transport)?;
+        parse_lock_acquire(&body)
     }
 
     pub async fn release(&self, holder: &str, fencing_token: u64) {
@@ -233,9 +303,99 @@ impl FiduciaClient {
             .json(&serde_json::json!({ "holder": holder, "fencing_token": fencing_token }))
             .send()
             .await;
-        if let Err(err) = result {
-            tracing::warn!(error = %err, "fiducia release failed; lease will expire on TTL");
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body)
+                        if body.get("committed").and_then(|value| value.as_bool())
+                            == Some(true) => {}
+                    Ok(_) => tracing::warn!(
+                        "fiducia release was not committed; lease will expire on TTL"
+                    ),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "fiducia release response was not JSON; lease will expire on TTL")
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(status = %resp.status(), "fiducia release rejected; lease will expire on TTL")
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "fiducia release failed; lease will expire on TTL")
+            }
         }
+    }
+}
+
+/// Normalize a coordination endpoint before attaching a bearer credential.
+/// Public endpoints must use TLS; plaintext is allowed only for local or
+/// cluster-internal addresses where the network is the explicit trust boundary.
+fn normalize_base_url(raw: &str) -> Result<String, FiduciaConfigError> {
+    let mut url = Url::parse(raw.trim()).map_err(|_| FiduciaConfigError::UnsafeBaseUrl)?;
+    let host = url.host_str().ok_or(FiduciaConfigError::UnsafeBaseUrl)?;
+    if !matches!(url.scheme(), "https" | "http")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+        || (url.scheme() == "http" && !cleartext_internal_host_allowed(host))
+    {
+        return Err(FiduciaConfigError::UnsafeBaseUrl);
+    }
+    url.set_path("");
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+fn cleartext_internal_host_allowed(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return match address {
+            IpAddr::V4(address) => {
+                address.is_loopback() || address.is_private() || address.is_link_local()
+            }
+            IpAddr::V6(address) => {
+                let first_segment = address.segments()[0];
+                address.is_loopback()
+                    || (first_segment & 0xfe00) == 0xfc00
+                    || (first_segment & 0xffc0) == 0xfe80
+            }
+        };
+    }
+    !host.contains('.')
+        || [
+            ".svc",
+            ".svc.cluster.local",
+            ".cluster.local",
+            ".internal",
+            ".local",
+        ]
+        .iter()
+        .any(|suffix| host.ends_with(suffix))
+}
+
+fn parse_lock_acquire(body: &serde_json::Value) -> Result<Option<u64>, FiduciaRequestError> {
+    if body.get("committed").and_then(|value| value.as_bool()) != Some(true) {
+        return Ok(None);
+    }
+    let output = body
+        .pointer("/result/output")
+        .ok_or(FiduciaRequestError::InvalidGrant("missing result.output"))?;
+    match output.get("acquired").and_then(|value| value.as_bool()) {
+        Some(false) => Ok(None),
+        Some(true) => output
+            .get("fencing_token")
+            .and_then(|value| value.as_u64())
+            .map(Some)
+            .ok_or(FiduciaRequestError::InvalidGrant(
+                "granted lease is missing fencing_token",
+            )),
+        None => Err(FiduciaRequestError::InvalidGrant(
+            "result.output is missing acquired",
+        )),
     }
 }
 
@@ -255,10 +415,51 @@ mod tests {
     #[test]
     fn fiducia_client_requires_both_url_and_key() {
         let mut config = Config::default();
-        assert!(FiduciaClient::from_config(&config).is_none());
+        assert!(FiduciaClient::from_config(&config).unwrap().is_none());
         config.fiducia_url = Some("https://hetzner.lb.fiducia.cloud".into());
-        assert!(FiduciaClient::from_config(&config).is_none());
+        assert!(matches!(
+            FiduciaClient::from_config(&config),
+            Err(FiduciaConfigError::PartialConfiguration)
+        ));
         config.fiducia_api_key = Some("fdc_x.y".into());
-        assert!(FiduciaClient::from_config(&config).is_some());
+        assert!(FiduciaClient::from_config(&config).unwrap().is_some());
+    }
+
+    #[test]
+    fn fiducia_rejects_public_cleartext_but_allows_internal_cleartext() {
+        assert!(matches!(
+            FiduciaClient::from_options(Some("http://fiducia.cloud"), Some("fdc_x.y")),
+            Err(FiduciaConfigError::UnsafeBaseUrl)
+        ));
+        assert!(FiduciaClient::from_options(
+            Some("http://fiducia-node.default.svc.cluster.local:8090"),
+            Some("fdc_x.y")
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[test]
+    fn lock_acquire_requires_the_canonical_fenced_grant() {
+        let granted = serde_json::json!({
+            "committed": true,
+            "result": { "output": { "acquired": true, "fencing_token": 42 } }
+        });
+        assert_eq!(parse_lock_acquire(&granted).unwrap(), Some(42));
+
+        let contended = serde_json::json!({
+            "committed": true,
+            "result": { "output": { "acquired": false } }
+        });
+        assert_eq!(parse_lock_acquire(&contended).unwrap(), None);
+
+        let unfenced = serde_json::json!({
+            "committed": true,
+            "result": { "output": { "acquired": true } }
+        });
+        assert!(matches!(
+            parse_lock_acquire(&unfenced),
+            Err(FiduciaRequestError::InvalidGrant(_))
+        ));
     }
 }

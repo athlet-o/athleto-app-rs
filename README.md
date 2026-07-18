@@ -54,7 +54,7 @@ and a powder packet (just add water).
 | `ATHLETO_PAYPAL_CLIENT_ID` / `ATHLETO_PAYPAL_CLIENT_SECRET` / `ATHLETO_PAYPAL_WEBHOOK_ID` | *(unset)* | PayPal hosted checkout/subscriptions and webhook verification |
 | `ATHLETO_SQUARE_ACCESS_TOKEN` / `ATHLETO_SQUARE_LOCATION_ID` / `ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY` | *(unset)* | Square hosted checkout/subscriptions and signature verification |
 | `ATHLETO_BILLING_URL` / `ATHLETO_BILLING_API_KEY` / `ATHLETO_BILLING_TENANT_ID` | *(unset)* | Optional observer-only AR/AP ledger integration |
-| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(unset)* | fiducia.cloud lock service for singleton-job leadership leases (sweeper / recurring runner); unset = Postgres advisory-lock fallback |
+| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(both unset)* | fiducia.cloud fenced-lock service for singleton-job leadership (sweeper / recurring runner). Public endpoints require `https`; internal `http` is allowed only for local/cluster addresses. Both unset = Postgres advisory-lock fallback; partial or unsafe configuration fails closed. |
 | `ATHLETO_SECRETS_KEY` | *(unset)* | Base64 32-byte AES key used only to decrypt approved `v1:` secret envelopes from fiducia KV; unset keeps secrets environment-only |
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
