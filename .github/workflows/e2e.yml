@@ -41,6 +41,9 @@ jobs:
       SUPABASE_URL: ${{ secrets.ATHLETO_SUPABASE_URL }}
       SUPABASE_ANON_KEY: ${{ secrets.ATHLETO_SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_KEY: ${{ secrets.ATHLETO_SUPABASE_SERVICE_KEY }}
+      # Enables the ops B2B-approval test; must equal the app's boot value below.
+      ATHLETO_OPERATIONS_API_KEY: ${{ secrets.ATHLETO_OPERATIONS_API_KEY }}
+      E2E_OPS_KEY: ${{ secrets.ATHLETO_OPERATIONS_API_KEY }}
       E2E_BASE_URL: http://localhost:8145
       # The biz-host chrome check hits the deployed host; skip it in CI.
       E2E_SKIP_LIVE: "1"
