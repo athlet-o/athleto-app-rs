@@ -1432,12 +1432,22 @@ pub async fn record_fulfillment(
 /// guard) can never fire the same subscription twice. Returns how many child
 /// orders were created.
 pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, DbErr> {
+    // Provider-managed subscriptions (Stripe/PayPal/Square `mode=subscription`)
+    // are driven by the provider, which charges the card and records a cycle
+    // against the original order each period. Those orders must NOT also be
+    // fired by this internal runner, or every cycle would mint an unpaid,
+    // orphaned child order AND double-decrement stock. So skip any order that
+    // has a provider subscription row; the runner only advances recurring
+    // orders it owns (Net-30 / unpaid recurring with no provider subscription).
     let due = conn
         .query_all(stmt(
-            "SELECT id FROM orders \
-             WHERE kind = 'recurring' AND status <> 'cancelled' \
-             AND next_run_at IS NOT NULL AND next_run_at <= now() \
-             ORDER BY next_run_at LIMIT 100",
+            "SELECT id FROM orders o \
+             WHERE o.kind = 'recurring' AND o.status <> 'cancelled' \
+             AND o.next_run_at IS NOT NULL AND o.next_run_at <= now() \
+             AND NOT EXISTS ( \
+                 SELECT 1 FROM payment_subscriptions ps WHERE ps.order_id = o.id \
+             ) \
+             ORDER BY o.next_run_at LIMIT 100",
             [],
         ))
         .await?;
@@ -1467,9 +1477,12 @@ pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, 
         let sub = tx
             .query_one(stmt(
                 "SELECT user_id, frequency::text AS frequency, channel::text AS channel, \
-                        ship_method::text AS ship_method FROM orders \
-                 WHERE id = $1 AND kind = 'recurring' AND status <> 'cancelled' \
-                 AND next_run_at IS NOT NULL AND next_run_at <= now()",
+                        ship_method::text AS ship_method FROM orders o \
+                 WHERE o.id = $1 AND o.kind = 'recurring' AND o.status <> 'cancelled' \
+                 AND o.next_run_at IS NOT NULL AND o.next_run_at <= now() \
+                 AND NOT EXISTS ( \
+                     SELECT 1 FROM payment_subscriptions ps WHERE ps.order_id = o.id \
+                 )",
                 [subscription_id.into()],
             ))
             .await?;
