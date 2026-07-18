@@ -61,6 +61,13 @@ export async function deleteUser(email) {
   if (user) await admin(`/admin/users/${user.id}`, { method: 'DELETE' });
 }
 
+/** The Supabase auth user id for an email (for ops endpoints keyed by user_id). */
+export async function getUserId(email) {
+  const res = await admin('/admin/users?page=1&per_page=200');
+  const { users = [] } = await res.json();
+  return users.find((u) => u.email === email)?.id ?? null;
+}
+
 /**
  * Log a browser page in as `email`: mint a link and navigate to /auth/confirm,
  * which verifies the token and sets HttpOnly session cookies, then bounces
