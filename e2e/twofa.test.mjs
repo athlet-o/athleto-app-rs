@@ -10,6 +10,7 @@ import {
   hasAuth,
   testEmail,
   loginBrowser,
+  mintMagicLink,
   deleteUser,
   totp,
 } from './lib/harness.mjs';
