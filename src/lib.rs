@@ -282,6 +282,13 @@ pub fn router(state: SharedState) -> Router {
             get(api::orders_list).post(api::orders_create),
         )
         .route("/api/v1/orders/{id}/fulfillment", post(api::order_fulfill))
+        // Ops-only: approve/revoke a business account (the step that lets a
+        // vetted B2B customer actually order + use the ERP API). Gated by the
+        // operations credential, not a customer key.
+        .route(
+            "/api/v1/ops/customers/{user_id}/approval",
+            post(api::ops_b2b_approval),
+        )
         // Vendored assets (htmx + extensions), served same-origin for the CSP.
         .route(assets::HTMX_JS_PATH, get(assets::htmx_js))
         .route(assets::HTMX_WS_JS_PATH, get(assets::htmx_ws_js))
