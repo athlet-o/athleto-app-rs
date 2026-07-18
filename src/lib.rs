@@ -3,6 +3,7 @@
 //! booting the binary.
 
 pub mod account;
+pub mod anti_abuse;
 pub mod api;
 pub mod assets;
 pub mod auth;
@@ -11,9 +12,12 @@ pub mod cart;
 pub mod coordinate;
 pub mod db;
 pub mod entities;
+pub mod mfa_state;
 pub mod orders;
 pub mod pages;
 pub mod payments;
+pub mod rate_limit;
+pub mod request_trust;
 pub mod secrets;
 pub mod security;
 pub mod ws;
@@ -28,6 +32,8 @@ use axum::Router;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+
+use ipnet::IpNet;
 
 /// Hard ceiling on request bodies. Storefront forms and the JSON API are tiny;
 /// anything larger is abuse, so cap it before a handler buffers it.
@@ -57,6 +63,19 @@ pub struct Config {
     /// SMS second factors need the Supabase phone-MFA add-on plus a
     /// configured SMS provider; the UI stays hidden until this is set.
     pub sms_mfa_enabled: bool,
+    /// Only enabled with a verified Turnstile proof. Existing users can always
+    /// request magic links; default-deny keeps unknown emails from creating
+    /// accounts or consuming mail-provider quota.
+    pub self_signup_enabled: bool,
+    /// Public Turnstile site key rendered only when self-signup is enabled.
+    pub turnstile_site_key: Option<String>,
+    /// Private Turnstile verification key, never rendered or logged.
+    pub turnstile_secret: Option<String>,
+    /// HMAC key for the short-lived browser MFA challenge state.
+    pub mfa_state_key: Option<[u8; 32]>,
+    /// Only these direct peers may supply the authoritative X-Forwarded-For
+    /// value used for abuse throttling. Empty means never trust that header.
+    pub trusted_proxy_networks: Vec<IpNet>,
     /// fiducia.cloud lock service, used only for singleton-job leadership
     /// leases (never for cart holds). Both values unset activates the Postgres
     /// advisory-lock fallback; partial or unsafe configuration fails closed.
@@ -84,6 +103,11 @@ impl Default for Config {
             biz_public_base_url: "https://biz.athleto.store".to_string(),
             allowed_hosts: None,
             sms_mfa_enabled: false,
+            self_signup_enabled: false,
+            turnstile_site_key: None,
+            turnstile_secret: None,
+            mfa_state_key: None,
+            trusted_proxy_networks: Vec::new(),
             fiducia_url: None,
             fiducia_api_key: None,
             replica_id: "local".to_string(),
@@ -106,6 +130,12 @@ impl Config {
             (Some(url), Some(key)) => Some((url, key)),
             _ => None,
         }
+    }
+
+    pub fn self_signup_ready(&self) -> bool {
+        self.self_signup_enabled
+            && self.turnstile_site_key.is_some()
+            && self.turnstile_secret.is_some()
     }
 
     /// True when the inbound Host header may be trusted (for auth redirect
@@ -144,11 +174,9 @@ pub struct AppState {
     pub pool: Option<sea_orm::DatabaseConnection>,
     pub http: reqwest::Client,
     pub config: Config,
-    /// Per-IP / per-email throttle for the magic-link login endpoint.
-    pub login_limiter: security::RateLimiter,
-    /// Per-IP throttle for `POST /cart/items`, which reserves stock holds and
-    /// is reachable anonymously; keeps a script from mass-reserving inventory.
-    pub cart_limiter: security::RateLimiter,
+    /// Fiducia-backed throttles when configured; local-only for no-secret
+    /// development. A broken configured backend fails closed.
+    pub rate_limits: rate_limit::RateLimits,
     /// Cart mutations broadcast the affected cart id; /ws connections push a
     /// fresh hold-countdown fragment to their owner.
     pub cart_events: tokio::sync::broadcast::Sender<uuid::Uuid>,
@@ -164,9 +192,8 @@ impl AppState {
         Self {
             pool,
             http,
+            rate_limits: rate_limit::RateLimits::from_config(&config),
             config,
-            login_limiter: security::RateLimiter::new(),
-            cart_limiter: security::RateLimiter::new(),
             cart_events,
         }
     }
