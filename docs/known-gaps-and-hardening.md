@@ -94,6 +94,54 @@ re-grep the named function/symbol.
 
 ---
 
+## Robustness & infra gaps (non-functional)
+
+### 7. Latent request-path panics on the API auth guard
+- `src/api.rs` (`orders_list`, `create_order`) —
+  `state.pool.as_ref().expect("authenticate checked pool")`. Guarded today by the
+  preceding `authenticate` (which requires a pool), but if that invariant ever breaks
+  it's a 500-panic, not a clean error.
+- **Fix:** `let Some(pool) = state.pool.as_ref() else { return Err(AppError::unavailable("db")) };`
+
+### 8. Rate-limiter mutex poison takes down every request
+- `src/security.rs` `RateLimiter` — `self.entries.lock().expect("rate limiter lock")`
+  runs in middleware on **every** request; a panic while the lock is held poisons it
+  and every subsequent request panics.
+- **Fix:** recover the guard instead of panicking —
+  `.lock().unwrap_or_else(|e| e.into_inner())`.
+
+### 9. The `@athleto/sync` local-first SDK is not wired in
+- No references to `@athleto/sync`, the `athleto-optimistic` htmx extension, or an
+  `/api/sync` catch-up endpoint anywhere in `src/`. The cart uses the app's own `/ws`
+  (`src/ws.rs`) with the **stock** htmx ws extension (`src/assets.rs`), not the SDK's
+  optimistic IndexedDB client — so the offline/optimistic sync layer in the
+  `athleto-sync` repo is currently unused here.
+- **Fix (decision):** either adopt it (mount `startSync` +
+  `registerOptimisticExtension` on the cart, add `/api/sync` + Postgres
+  `version`/`sync_sequence` columns — see `athleto-sync/docs/adoption.md`), or document
+  that the bespoke `/ws` is the intended path and the SDK is out of scope here. Don't
+  leave it ambiguous.
+
+### 10. CI lint is non-blocking; one transitive advisory
+- `.github/workflows/ci.yml` runs `fmt` + `clippy` as `continue-on-error: true` — drop
+  that once the tree is clean so lint regressions block merge (athleto-sync already
+  gates on clippy).
+- `cargo audit`: `RUSTSEC-2023-0071` (rsa 0.9 "Marvin Attack" timing sidechannel,
+  medium) via the SQLx/SeaORM MySQL stack — no upstream fix. If the MySQL driver is
+  unused, disabling that SeaORM feature removes the `rsa` dependency; otherwise track.
+  Plus `proc-macro-error2` unmaintained (warning).
+
+### 11. nginx `/jello` gateway not yet cut over to this app
+- `~/codes/ores/k8s-cluster/remote/argocd/dd-next-runtime/dd-remote-gateway.configmap.yaml`:
+  `location = /jello` and `/jello/sample` still set their upstream (`$dd_up_3` /
+  `$dd_up_4`) to `dd-remote-web-home.default.svc.cluster.local:8080`. Athleto is
+  reachable only via its dedicated Ingress (`jello-ws:8145`).
+- **Fix:** repoint those upstreams to `jello-ws.default.svc.cluster.local:8145` and
+  update the guard in `remote/tests/general/athleto-app-config.test.ts` (which asserts
+  the old wiring on purpose).
+
+---
+
 ## Migration discipline
 
 The shared Supabase DB runs the embedded `sqlx::migrate!` migrations. **Never
