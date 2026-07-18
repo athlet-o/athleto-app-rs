@@ -206,6 +206,9 @@ async fn provider_error(response: reqwest::Response) -> PaymentError {
 /// Create the provider-side checkout artifact for an already-placed order and
 /// say where to send the customer. The order keeps `payment_status =
 /// pending` until a verified return or webhook settles it.
+// The explicit owner, origin, B2B, and PO inputs are security boundaries. A
+// wrapper would hide them from payment-flow review without reducing work.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_payment(
     state: &SharedState,
     base_url: &str,
@@ -306,6 +309,9 @@ pub async fn start_payment(
 
 const STRIPE_API: &str = "https://api.stripe.com";
 
+// These values map one-to-one to the hosted checkout payload, so retaining
+// named arguments keeps amount/owner/origin review straightforward.
+#[allow(clippy::too_many_arguments)]
 async fn stripe_checkout_session(
     state: &SharedState,
     cfg: &StripeConfig,
