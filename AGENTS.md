@@ -4,41 +4,39 @@ Rules of the road for agents (and humans) working in this repo.
 
 ## Stack
 
-Maud + Axum + SeaORM/SQLx + Supabase + HTMX. Serves two storefronts from one
+Maud + Axum + SeaORM + Supabase + HTMX. Serves two storefronts from one
 binary by Host header: app.athleto.store (B2C) and biz.athleto.store (B2B).
 Boots degraded with zero secrets — every new feature must keep that property
 (missing config ⇒ "not configured" notice, never a crash).
 
-## Data access: SeaORM for new code
+## Data access: SeaORM only
 
-- **All new tables and new queries use SeaORM** — entities in
-  `src/entities.rs`, handle at `AppState::orm` (wraps the same Postgres pool
-  as `AppState::pool`).
-- Postgres enum types get **dual derives** (`sqlx::Type` +
-  `sea_orm::DeriveActiveEnum`) in `db.rs` so both layers share one Rust type.
-- The handwritten sqlx queries in `db.rs` are **legacy**: port them to SeaORM
-  opportunistically when you touch them; don't add new sqlx queries.
+- Entity queries use SeaORM models in `src/entities/` and the
+  `sea_orm::DatabaseConnection` stored in `AppState::pool`.
+- Locking-heavy transactional queries may stay hand-written, but execute them
+  through `sea_orm::Statement`, `ConnectionTrait`, and `TransactionTrait`.
+- Do not add a direct `sqlx` dependency or call SQLx APIs. SeaORM's Postgres
+  driver is an internal implementation detail, not an application data layer.
 
 ## Migrations
 
-- You can keep generating numbered sqlx files in `migrations/` for now
-  (embedded via `sqlx::migrate!`, applied at boot), **but the go-forward is
-  declarative migrations** with
+- The numbered SQL files in `migrations/` are a frozen audit trail. Runtime
+  code never applies DDL or migrations at boot. The schema authority is the
+  declarative `athleto` database contract in `k8s-cluster`'s `pg-defs`, using
   [dpm](https://github.com/declarative-migrations/declarative-postgres-migrate.rs)
-  (org: [github.com/declarative-migrations](https://github.com/declarative-migrations)):
-  edit a declarative `schema/schema.sql`, let the database converge onto it,
-  and review the SQL dpm emits. Install: `brew install
+  (org: [github.com/declarative-migrations](https://github.com/declarative-migrations)).
+  Edit the declarative schema, let the database converge onto it, and review
+  the SQL dpm emits. Install: `brew install
   declarative-migrations/tap/dpm` (Linux: `scripts/install.sh` in the dpm
   repo). See the billing-server repo for the finished pattern (`schema/` +
   `scripts/dpm.sh`, `migrations/` frozen as an audit trail).
-- **RDS namespace rule:** when the schema lands on the shared dd-platform
-  Amazon RDS instance, this app uses its **own database named `athleto`** —
+- **RDS namespace rule:** the contract targets its **own database named
+  `athleto`** on the shared dd-platform Amazon RDS instance —
   one database per project, never a shared `public` schema, so our table
   names can't collide with other projects.
-- The shared cross-service schema contract is `pg-defs/` in
+- The schema authority is `pg-defs/schema/databases/athleto/schema.sql` in
   `k8s-libs-and-shared-defs` (local checkout:
-  `~/codes/ores/k8s-cluster/remote/libs/pg-defs`); prefer registering
-  cross-service tables there.
+  `~/codes/ores/k8s-cluster/remote/libs/pg-defs`).
 
 ## Payments
 
@@ -48,14 +46,15 @@ Boots degraded with zero secrets — every new feature must keep that property
 - Config is env-driven and each provider is independently optional
   (`ATHLETO_STRIPE_*`, `ATHLETO_PAYPAL_*`, `ATHLETO_SQUARE_*`; see README).
   Placeholder values live in GitHub Actions secrets; real values in
-  `~/.config/athlet-o/secrets.env` locally and AWS Secrets Manager
-  (`dd/remote-dev/agent-secrets`) for the cluster.
+  `~/.config/athlet-o/secrets.env` locally and an external Vault/cloud secret
+  store injected through ESO/Secrets Store CSI in clusters.
 - **Secrets sourcing** goes through `src/secrets.rs`: env first, fiducia
   config KV (`secrets/athleto/<ENV_NAME>`) as the cross-provider overlay for
   gaps. New secret env vars must be added to `secrets::MANAGED_KEYS` (an
   explicit allowlist — never widen it to arbitrary names) and to the README
-  table + CI workflow. AWS SM stays production secrets-of-record until the
-  encrypted `fiducia-secrets` API exists; see docs/secrets-management.md.
+  table + CI workflow. Fiducia KV may protect values with a versioned local
+  keyring or Vault Transit; explicit plaintext entries and legacy client-side
+  envelopes are migration modes. See docs/secrets-management.md.
 - Webhooks must stay idempotent: every handler records
   `(provider, event_id)` in `payment_events` first and bails on replay.
   Ledger postings use idempotency keys (`athleto:order:…`,

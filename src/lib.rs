@@ -16,6 +16,8 @@ pub mod pages;
 pub mod payments;
 pub mod secrets;
 pub mod security;
+pub mod startup;
+pub mod telemetry;
 pub mod ws;
 
 use std::sync::Arc;
@@ -27,7 +29,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
 
 /// Hard ceiling on request bodies. Storefront forms and the JSON API are tiny;
 /// anything larger is abuse, so cap it before a handler buffers it.
@@ -304,6 +305,8 @@ pub fn router(state: SharedState) -> Router {
         // CSRF enforcement + security headers on every route (incl. the 404
         // fallback); /api/v1 is CSRF-exempt inside the middleware.
         .layer(axum::middleware::from_fn(security::apply))
-        .layer(TraceLayer::new_for_http())
+        // Outermost request instrumentation extracts W3C trace context and
+        // records route-bounded OTEL spans/metrics for the collector.
+        .layer(axum::middleware::from_fn(telemetry::track_http_request))
         .with_state(state)
 }

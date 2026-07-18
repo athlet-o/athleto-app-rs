@@ -51,12 +51,19 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # The embedded migrations reference Supabase's auth.uid(); stub it so a
-      # vanilla Postgres can run the same schema.
+      # The legacy schema audit trail references Supabase's auth.uid(); stub it
+      # so vanilla Postgres can build a test fixture. Production schema changes
+      # are reviewed through the k8s-cluster pg-defs/dpm contract.
       - name: Stub Supabase auth.uid()
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS auth;" \
             -c "CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS \$\$ SELECT NULL::uuid \$\$;"
+
+      - name: Build database fixture from the frozen audit trail
+        run: |
+          for migration in migrations/*.sql; do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          done
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
@@ -66,7 +73,7 @@ jobs:
       - name: Build app
         run: cargo build --bin athleto-app-rs
 
-      - name: Boot app (runs migrations against the throwaway Postgres)
+      - name: Boot app against the prepared throwaway Postgres
         run: |
           SUPABASE_URL="$SUPABASE_URL" SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
           DATABASE_URL="$DATABASE_URL" PORT=8145 ATHLETO_PUBLIC_BASE_URL=http://localhost:8145 \

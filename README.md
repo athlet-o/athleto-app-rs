@@ -11,9 +11,8 @@ A self-contained Rust web app on the "MASH" stack:
 
 - **M**aud — server-rendered HTML (inline dark athletic theme, no asset pipeline)
 - **A**xum — HTTP server and routing (plus a websocket endpoint pushing HTML fragments)
-- **S**eaORM — entity query builders over the Supabase pooled Postgres (raw SQL kept
-  for the transactional hold/checkout paths; SQLx remains underneath for the
-  embedded migrations)
+- **S**eaORM — entities, pool configuration, transactions, and raw
+  `sea_orm::Statement` queries for the locking-heavy hold/checkout paths
 - Supabase — GoTrue passwordless (magic link + MFA) auth via its REST API
 - **H**TMX — add-to-cart / remove-from-cart fragment swaps (vendored, served same-origin)
 
@@ -54,8 +53,10 @@ and a powder packet (just add water).
 | `ATHLETO_PAYPAL_CLIENT_ID` / `ATHLETO_PAYPAL_CLIENT_SECRET` / `ATHLETO_PAYPAL_WEBHOOK_ID` | *(unset)* | PayPal hosted checkout/subscriptions and webhook verification |
 | `ATHLETO_SQUARE_ACCESS_TOKEN` / `ATHLETO_SQUARE_LOCATION_ID` / `ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY` | *(unset)* | Square hosted checkout/subscriptions and signature verification |
 | `ATHLETO_BILLING_URL` / `ATHLETO_BILLING_API_KEY` / `ATHLETO_BILLING_TENANT_ID` | *(unset)* | Optional observer-only AR/AP ledger integration |
-| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(both unset)* | fiducia.cloud fenced-lock service for singleton-job leadership (sweeper / recurring runner). Public endpoints require `https`; internal `http` is allowed only for local/cluster addresses. Both unset = Postgres advisory-lock fallback; partial or unsafe configuration fails closed. |
-| `ATHLETO_SECRETS_KEY` | *(unset)* | Base64 32-byte AES key used only to decrypt approved `v1:` secret envelopes from fiducia KV; unset keeps secrets environment-only |
+| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(both unset)* | fiducia.cloud fenced locks for singleton jobs plus the allowlisted `secrets/athleto/*` KV overlay. Public endpoints require `https`; internal `http` is allowed only for local/cluster addresses. Both unset = environment-only secrets and Postgres advisory-lock fallback; partial or unsafe configuration fails closed. |
+| `ATHLETO_SECRETS_KEY` | *(unset)* | Legacy migration key for client-encrypted `v1:` KV envelopes only. Prefer Fiducia's external Vault Transit or versioned keyring at-rest protection; node-encrypted and explicitly plaintext KV responses are handled without this key. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | OTLP/gRPC collector endpoint for traces and metrics; unset keeps structured JSON logs only |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(unset)* | Additional non-secret OTEL resource labels; service identity cannot be overridden |
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a
@@ -76,33 +77,21 @@ Or just `cargo run` for the degraded (no-secrets) storefront.
 Note: session and cart cookies are set with the `Secure` flag; modern browsers
 accept them on `http://localhost`.
 
-## Migrations
+## Database and migrations
 
-SQLx migrations live in `migrations/` and are **embedded in the binary**
-(`sqlx::migrate!`). They run automatically in a background task at startup when
-`DATABASE_URL` is set — startup and health checks never block on the database.
-Schema: `products` (with `product_format` enum `cup|powder`), `carts` (one per
-Supabase user id or anonymous cookie uuid), `cart_items`; a seed migration
-inserts the 3 products x 2 formats.
+Application database access is SeaORM-only (`src/entities/` + `src/db.rs`).
+The hold-claim and checkout transactions remain hand-written SQL executed via
+`sea_orm::Statement` to preserve their locking semantics. `DATABASE_URL` is
+optional and the SeaORM connection is lazy, so the storefront still boots
+degraded when Postgres is unavailable.
 
-To run them manually instead: `cargo install sqlx-cli --no-default-features --features rustls,postgres`
-then `sqlx migrate run`.
-
-Application queries go through SeaORM (`src/entities/` + `src/db.rs`); the
-hold-claim and checkout transactions stay hand-written SQL executed via
-`sea_orm::Statement` to preserve their locking semantics. Everything runs at
-runtime against the pool, so the crate builds without a live `DATABASE_URL`.
-
-### Go-forward: declarative migrations (dpm)
-
-We can keep generating numbered SQL files in `migrations/` for now, but the
-target workflow is **declarative migrations** via
+The numbered files under `migrations/` are a frozen audit trail. The process
+does not run DDL at startup. The current schema authority is the dedicated
+`athleto` database contract at
+`~/codes/ores/k8s-cluster/remote/libs/pg-defs/schema/databases/athleto/schema.sql`.
 [dpm](https://github.com/declarative-migrations/declarative-postgres-migrate.rs)
-(github.com/declarative-migrations): a single `schema/schema.sql` is the source
-of truth and the live database *converges* onto it — dpm materializes the schema
-on a shadow server, introspects both sides, and emits ordered, reviewable SQL.
-The Quaestor billing-server and the shared pg-defs contract already work this
-way (its `migrations/` dir is frozen as an audit trail).
+materializes that contract on a shadow server and emits ordered, reviewable SQL
+to converge the target database.
 
 ```sh
 brew install declarative-migrations/tap/dpm
@@ -110,27 +99,32 @@ brew install declarative-migrations/tap/dpm
 export SHADOW_DATABASE_URL=postgres://…   # server where dpm may create throwaway DBs
 export TARGET_DATABASE_URL=postgres://…   # or DATABASE_URL
 
-dpm diff      # print the migration SQL (never executes)
-dpm verify    # rehearse on a shadow replica, prove convergence
-dpm apply     # generate + execute (interactive confirm; destructive SQL gated)
+scripts/dpm.sh diff      # print migration SQL; never executes
+scripts/dpm.sh verify    # rehearse and prove convergence
+scripts/dpm.sh review    # diff plus migration review
+scripts/dpm.sh apply     # interactive; destructive SQL remains explicitly gated
 ```
 
-When this app's schema moves to the **shared dd-platform Amazon RDS Postgres**,
-it gets its **own database named `athleto`** (per-project database namespace —
-never a shared `public` schema, so table names like `orders`/`payments` can't
-collide with other projects). The shared schema contract lives in
-`k8s-libs-and-shared-defs` → `pg-defs/` (checked out locally at
-`~/codes/ores/k8s-cluster/remote/libs/pg-defs`, vendored into `k8s-cluster` as
-`remote/libs`); porting this app's commerce schema there is an agreed follow-up
-(currently blocked on Supabase `auth.uid()` RLS references).
+The contract targets its own database named `athleto`, never the shared
+`public` schema. Migration application remains a reviewed operator action.
+
+## Observability
+
+The service emits flattened JSON tracing events to stderr for Kubernetes CRI
+collection by Promtail/Loki. Every HTTP route has a W3C-parented server span,
+bounded route/method/status metrics, and `trace_id`/`span_id` log fields. When
+`OTEL_EXPORTER_OTLP_ENDPOINT` is configured, traces and metrics are sent to the
+cluster OpenTelemetry Collector; Prometheus scrapes the collector's exporter.
 
 ## Deploy
 
 Deployed at **https://app.athleto.store** from the ORESoftware `k8s-cluster`
 repo. The public Ingress routes to the **`jello-ws`** ClusterIP Service, which
 selects the existing **`dd-athleto-app-rs`** deployment pods. This repo is
-vendored there as a git submodule at `remote/deployments/athleto-app-rs`. The
-container image is the multi-stage
-`Dockerfile` here (rust:1.90-bookworm build → debian:bookworm-slim, non-root
-UID 10001, port 8080). `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `DATABASE_URL` are
-injected from cluster secrets; probes hit `/healthz`.
+checked out there as a git submodule at
+`remote/deployments/athleto-app-rs`; this standalone repository remains the
+source of truth, and `k8s-cluster` only bumps the reviewed submodule pointer.
+The runtime manifest builds the pinned submodule with `cargo run --release
+--locked`, injects database/auth configuration from cluster secrets, injects
+pod metadata plus the in-cluster OTLP collector endpoint, and probes
+`/healthz`.
