@@ -385,6 +385,31 @@ pub async fn upsert_profile(
     Ok(())
 }
 
+/// Approve (or revoke) a business account. Ops calls this after vetting a
+/// company; until then `b2b_approved_at` is NULL and `is_b2b_approved()` gates
+/// off B2B ordering, the ERP API, and API keys. Returns `Some(is_approved)`
+/// with the resulting state, or `None` if `user_id` is not a B2B account.
+pub async fn set_b2b_approval(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+    approved: bool,
+) -> Result<Option<bool>, DbErr> {
+    let row = conn
+        .query_one(stmt(
+            "UPDATE customer_profiles \
+             SET b2b_approved_at = CASE WHEN $2 THEN COALESCE(b2b_approved_at, now()) ELSE NULL END, \
+                 updated_at = now() \
+             WHERE user_id = $1 AND customer_type = 'b2b' \
+             RETURNING (b2b_approved_at IS NOT NULL) AS approved",
+            [user_id.into(), approved.into()],
+        ))
+        .await?;
+    match row {
+        Some(row) => Ok(Some(row.try_get::<bool>("", "approved")?)),
+        None => Ok(None),
+    }
+}
+
 pub async fn record_login_event(
     conn: &DatabaseConnection,
     user_id: Uuid,

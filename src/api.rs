@@ -297,6 +297,53 @@ pub async fn order_fulfill(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct B2bApprovalRequest {
+    /// true = approve (default), false = revoke.
+    #[serde(default = "default_true")]
+    pub approved: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// POST /api/v1/ops/customers/{user_id}/approval -- ops approves (or revokes) a
+/// business account after vetting. Gated by the operations credential, not a
+/// customer API key. Until a B2B account is approved, `is_b2b_approved()` gates
+/// off its ordering, ERP API, and API keys -- so this is the step that makes a
+/// business account usable. Idempotent: re-approving keeps the original
+/// timestamp.
+pub async fn ops_b2b_approval(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path(user_id): axum::extract::Path<Uuid>,
+    Json(request): Json<B2bApprovalRequest>,
+) -> Response {
+    if let Err(response) = operations_authorized(&state, &headers) {
+        return response;
+    }
+    let Some(pool) = &state.pool else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "database not configured");
+    };
+
+    match db::set_b2b_approval(pool, user_id, request.approved).await {
+        Ok(Some(is_approved)) => Json(json!({
+            "user_id": user_id,
+            "approved": is_approved,
+        }))
+        .into_response(),
+        Ok(None) => error_response(
+            StatusCode::NOT_FOUND,
+            "no business account for that user_id (must have completed B2B setup)",
+        ),
+        Err(err) => {
+            tracing::error!(error = %err, "b2b approval failed");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "approval failed")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ApiOrderRequest {
     #[serde(default)]
     pub po_number: Option<String>,

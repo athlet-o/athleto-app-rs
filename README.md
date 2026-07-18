@@ -33,6 +33,7 @@ and a powder packet (just add water).
 | `GET /pay/{success,cancel}`, `POST /webhooks/{stripe,paypal,square}` | Verified provider returns and signed, replay-safe payment webhooks |
 | `GET|POST /quick-order` | B2B case-quantity grid straight into the cart |
 | `GET|POST /api/v1/...` | ERP JSON API (hashed `athk_` keys): products, orders (list/create), `POST /api/v1/orders/{id}/fulfillment` records carrier + tracking (856-style) |
+| `POST /api/v1/ops/customers/{user_id}/approval` | Ops-only (operations credential): approve/revoke a business account — the step that lets a vetted B2B customer order + use the ERP API. Body `{"approved": true\|false}`. Until approved, `is_b2b_approved()` gates off B2B ordering, the ERP API, and API keys |
 | `GET /ws` | Authenticated websocket pushing HTML fragments (htmx ws extension, `hx-swap-oob`): live cart-hold countdown; `GET /cart/hold` polling remains the fallback |
 | `GET /static/...` | Vendored htmx + ws extension, served same-origin with immutable caching |
 | `GET /healthz` | Liveness/readiness — always `ok`, no dependencies |
@@ -48,7 +49,7 @@ and a powder packet (just add water).
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
 | `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical B2C/B2B browser origins for auth and provider returns |
 | `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
-| `ATHLETO_OPERATIONS_API_KEY` | *(unset)* | Dedicated bearer credential for warehouse-only fulfillment writes |
+| `ATHLETO_OPERATIONS_API_KEY` | *(unset)* | Dedicated bearer credential for ops-only writes: warehouse fulfillment (`POST /api/v1/orders/{id}/fulfillment`) and B2B account approval (`POST /api/v1/ops/customers/{id}/approval`) |
 | `ATHLETO_STRIPE_SECRET_KEY` / `ATHLETO_STRIPE_WEBHOOK_SECRET` | *(unset)* | Stripe hosted checkout and signed webhook verification; also enables approved B2B Net-30 invoices |
 | `ATHLETO_PAYPAL_CLIENT_ID` / `ATHLETO_PAYPAL_CLIENT_SECRET` / `ATHLETO_PAYPAL_WEBHOOK_ID` | *(unset)* | PayPal hosted checkout/subscriptions and webhook verification |
 | `ATHLETO_SQUARE_ACCESS_TOKEN` / `ATHLETO_SQUARE_LOCATION_ID` / `ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY` | *(unset)* | Square hosted checkout/subscriptions and signature verification |
