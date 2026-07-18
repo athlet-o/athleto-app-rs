@@ -13,8 +13,6 @@ import {
   loginBrowser,
   deleteUser,
   getUserId,
-  csrfToken,
-  submitForm,
 } from './lib/harness.mjs';
 
 const OPS = process.env.E2E_OPS_KEY || '';
