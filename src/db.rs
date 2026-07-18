@@ -1477,9 +1477,12 @@ pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, 
         let sub = tx
             .query_one(stmt(
                 "SELECT user_id, frequency::text AS frequency, channel::text AS channel, \
-                        ship_method::text AS ship_method FROM orders \
-                 WHERE id = $1 AND kind = 'recurring' AND status <> 'cancelled' \
-                 AND next_run_at IS NOT NULL AND next_run_at <= now()",
+                        ship_method::text AS ship_method FROM orders o \
+                 WHERE o.id = $1 AND o.kind = 'recurring' AND o.status <> 'cancelled' \
+                 AND o.next_run_at IS NOT NULL AND o.next_run_at <= now() \
+                 AND NOT EXISTS ( \
+                     SELECT 1 FROM payment_subscriptions ps WHERE ps.order_id = o.id \
+                 )",
                 [subscription_id.into()],
             ))
             .await?;
