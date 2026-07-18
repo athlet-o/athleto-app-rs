@@ -117,9 +117,6 @@ export function totp(secret, atMs = Date.now()) {
   const counter = Math.floor(atMs / 1000 / 30);
   const cbuf = Buffer.alloc(8);
   cbuf.writeBigInt64BE(BigInt(counter));
-  // Lazy import so the harness stays load-safe where crypto isn't needed.
-  // eslint-disable-next-line no-undef
-  const { createHmac } = require('node:crypto');
   const h = createHmac('sha1', key).update(cbuf).digest();
   const off = h[h.length - 1] & 0x0f;
   const bin = ((h[off] & 0x7f) << 24) | (h[off + 1] << 16) | (h[off + 2] << 8) | h[off + 3];
