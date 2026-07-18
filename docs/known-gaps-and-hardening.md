@@ -149,30 +149,20 @@ re-grep the named function/symbol.
 
 ## Migration discipline
 
-The shared Supabase DB runs the embedded `sqlx::migrate!` migrations. **Never
-edit a migration that has already been applied** — sqlx stores each migration's
-SHA-384 checksum and aborts the *entire* run at the first modified one, so every
-later migration silently stops applying. This bit us: `0006_payments.sql` was
-edited after it was applied, so `0007` (which adds `customer_profiles.b2b_approved_at`)
-and `0008` never ran → account setup broke at runtime with `column ... does not
-exist`.
+The numbered files under `migrations/` are a frozen history of the original
+Supabase rollout. A historical checksum edit in `0006_payments.sql` prevented
+`0007` and `0008` from applying and caused runtime column drift; do not edit or
+extend that trail for production schema changes.
 
-- To add a change: **write a new numbered migration**, never touch an old one.
-- If a checksum has already drifted and the schema is confirmed correct, reconcile
-  the recorded checksum (this is what unblocked us):
-  ```sh
-  NEW=$(shasum -a 384 migrations/000N_name.sql | awk '{print $1}')
-  psql "$DATABASE_URL" -c "UPDATE _sqlx_migrations SET checksum = decode('$NEW','hex') WHERE version = N;"
-  # then reboot the app; sqlx applies any pending migrations
-  ```
-  Only do this after verifying the migration's objects already exist in the DB.
-- The migrator takes an advisory lock through the Supabase session pooler; under
-  contention it can hit the pooler's ~120s `statement_timeout` (harmless when no
-  migrations are pending, but noisy). Prefer running migrations on a direct
-  (non-pooler) connection with a bounded `lock_timeout`.
-- Go-forward: the [README](../README.md) "declarative migrations (dpm)" section
-  and the shared `k8s-libs-and-shared-defs/pg-defs` contract are the target;
-  moving this schema to the shared RDS (own `athleto` database) is the plan.
+- The current source of truth is
+  `k8s-cluster/remote/libs/pg-defs/schema/databases/athleto/schema.sql`, targeting
+  the dedicated `athleto` database.
+- Change the declarative contract, then use `scripts/dpm.sh diff`, `verify`, and
+  `review`. `apply` is an explicit human-reviewed release action.
+- The application never runs DDL at boot. This avoids startup races, pooler
+  advisory-lock timeouts, and one replica migrating beneath another.
+- CI may apply the frozen files to create an isolated compatibility fixture;
+  that does not make them the production migration authority.
 
 ---
 

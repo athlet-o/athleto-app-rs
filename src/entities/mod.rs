@@ -1,7 +1,6 @@
-//! SeaORM entity modules for the core commerce tables. Written by hand
-//! against the embedded SQL migrations (which stay the schema's source of
-//! truth); columns the app never reads (created_at defaults, ERP extras) are
-//! deliberately omitted from the models.
+//! SeaORM entity modules for the core commerce tables. Written by hand against
+//! the declarative `k8s-cluster/remote/libs/pg-defs` Athlet-O database
+//! contract; columns the app never reads are deliberately omitted.
 //!
 //! The Postgres enum types map onto the ActiveEnums defined in `crate::db`
 //! (ProductFormat, CustomerType, OrderKind, ...), keeping those types usable

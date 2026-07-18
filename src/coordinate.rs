@@ -102,7 +102,7 @@ pub async fn try_lead(
                         client,
                         holder,
                         fencing_token,
-                    })
+                    });
                 }
                 // A competing replica has the lease. Do not fall back to a
                 // different coordination plane or we could double-run jobs.
@@ -158,6 +158,21 @@ pub struct FiduciaClient {
     http: reqwest::Client,
     base: String,
     api_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FiduciaKvValue {
+    pub value: String,
+    pub at_rest: KvAtRest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvAtRest {
+    Encrypted,
+    Plaintext,
+    /// Compatibility for an older Fiducia node that did not return protection
+    /// metadata. Callers may accept a client-side envelope but not raw values.
+    Unknown,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -228,7 +243,7 @@ impl FiduciaClient {
     /// namespace comes from the API key on the fiducia side. Returns `None`
     /// for missing keys and for any transport/auth failure — callers treat
     /// both as "not configured". Used by `crate::secrets` at boot.
-    pub async fn kv_get(&self, key: &str) -> Option<String> {
+    pub async fn kv_get(&self, key: &str) -> Option<FiduciaKvValue> {
         let resp = self
             .http
             .get(format!("{}/v1/kv", self.base))
@@ -248,10 +263,7 @@ impl FiduciaClient {
                 if body.get("found").and_then(|v| v.as_bool()) != Some(true) {
                     return None;
                 }
-                body.get("entry")
-                    .and_then(|entry| entry.get("value"))
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
+                parse_kv_value(&body)
             }
             Ok(resp) => {
                 tracing::warn!(status = %resp.status(), key, "fiducia kv_get rejected");
@@ -376,6 +388,22 @@ fn path_segment(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn parse_kv_value(body: &serde_json::Value) -> Option<FiduciaKvValue> {
+    if body.get("found").and_then(|value| value.as_bool()) != Some(true) {
+        return None;
+    }
+    let value = body.pointer("/entry/value")?.as_str()?.to_string();
+    let at_rest = match body
+        .pointer("/protection/at_rest")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("encrypted") => KvAtRest::Encrypted,
+        Some("plaintext") => KvAtRest::Plaintext,
+        _ => KvAtRest::Unknown,
+    };
+    Some(FiduciaKvValue { value, at_rest })
 }
 
 /// Normalize a coordination endpoint before attaching a bearer credential.
@@ -556,5 +584,33 @@ mod tests {
     #[test]
     fn path_segments_are_percent_encoded() {
         assert_eq!(path_segment("tenant/key value"), "tenant%2Fkey%20value");
+    }
+
+    #[test]
+    fn kv_response_preserves_encrypted_plaintext_and_legacy_postures() {
+        let encrypted = parse_kv_value(&serde_json::json!({
+            "found": true,
+            "entry": {"value": "secret"},
+            "protection": {"at_rest": "encrypted", "provider": "vault_transit"}
+        }))
+        .unwrap();
+        assert_eq!(encrypted.at_rest, KvAtRest::Encrypted);
+        assert_eq!(encrypted.value, "secret");
+
+        let plaintext = parse_kv_value(&serde_json::json!({
+            "found": true,
+            "entry": {"value": "public-config"},
+            "protection": {"at_rest": "plaintext"}
+        }))
+        .unwrap();
+        assert_eq!(plaintext.at_rest, KvAtRest::Plaintext);
+
+        let legacy = parse_kv_value(&serde_json::json!({
+            "found": true,
+            "entry": {"value": "v1:client-envelope"}
+        }))
+        .unwrap();
+        assert_eq!(legacy.at_rest, KvAtRest::Unknown);
+        assert!(parse_kv_value(&serde_json::json!({"found": false})).is_none());
     }
 }

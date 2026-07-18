@@ -29,7 +29,7 @@ Rust DB-backed test. **New money/stock logic should get a DB-backed test.**
 #[tokio::test]
 #[ignore] // needs a real DATABASE_URL; run with --ignored
 async fn my_invariant() {
-    let conn = db::build_pool(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+    let conn = db::build_pool(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     // seed with sea_orm::Statement raw SQL, call the db:: fn, assert via SELECT,
     // then DELETE your rows (use a fresh Uuid namespace so parallel runs don't collide).
 }
@@ -37,8 +37,8 @@ async fn my_invariant() {
 
 - `#[ignore]` keeps them out of the default `cargo test` (which has no DB).
 - The **e2e CI workflow** (`.github/workflows/e2e.yml`) runs them with
-  `cargo test --test <name> -- --ignored` against its throwaway Postgres, after
-  the app boot applies migrations. Add each new `*_db.rs` there.
+  `cargo test --test <name> -- --ignored` against its throwaway Postgres after
+  the declarative schema has been applied. Add each new `*_db.rs` there.
 - Migrations only need Supabase's `auth.uid()` stubbed (the workflow does this);
   everything else is vanilla Postgres.
 
