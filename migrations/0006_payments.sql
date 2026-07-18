@@ -1,6 +1,5 @@
--- Online payment acceptance: Stripe (cards + ACH + hosted Net-30 invoices),
--- PayPal (orders + subscriptions), Square (hosted checkout + subscription
--- plans), plus provider-agnostic reconciliation records.
+-- Hosted payment lifecycle: provider references, settled-payment ledger,
+-- recurring-provider subscriptions, and replay-safe webhook event storage.
 
 CREATE TYPE payment_provider AS ENUM ('stripe', 'paypal', 'square', 'invoice');
 CREATE TYPE payment_status AS ENUM ('pending', 'processing', 'paid', 'invoiced', 'failed', 'refunded');
@@ -44,8 +43,6 @@ CREATE TABLE payment_subscriptions (
 );
 CREATE INDEX payment_subscriptions_user_idx ON payment_subscriptions (user_id);
 
--- Provider callbacks are deduplicated before they can settle money or update
--- order state, making retries and return/webhook races idempotent.
 CREATE TABLE payment_events (
     provider payment_provider NOT NULL,
     event_id TEXT NOT NULL,

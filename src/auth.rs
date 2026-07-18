@@ -31,6 +31,10 @@ use crate::{pages, security, SharedState};
 
 pub const ACCESS_COOKIE: &str = "sb_access_token";
 pub const REFRESH_COOKIE: &str = "sb_refresh_token";
+/// Short-lived browser binding for a magic-link request. The high-entropy
+/// nonce is HttpOnly and must accompany the callback before session cookies
+/// are minted, preventing a link initiated in another browser from logging a
+/// recipient in unexpectedly.
 const LOGIN_FLOW_COOKIE: &str = "athleto_login_flow";
 /// Pending SMS challenge, stored as "{factor_id}:{challenge_id}".
 const MFA_CHALLENGE_COOKIE: &str = "sb_mfa_challenge";
@@ -165,9 +169,8 @@ impl FromRequestParts<SharedState> for MaybeUser {
     }
 }
 
-/// Host-aware flag: true when the request came in on the B2B storefront host
-/// (biz.athleto.store or a `biz.` prefix in general). Hosts outside the
-/// ALLOWED_HOSTS allowlist never get the biz chrome.
+/// Host-aware flag for the configured canonical B2B storefront. A prefix in
+/// an arbitrary Host header must not select a more privileged-looking UI.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Biz(pub bool);
 
@@ -183,12 +186,7 @@ impl FromRequestParts<SharedState> for Biz {
             .get(HOST)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
-        Ok(Self(
-            host.split(':')
-                .next()
-                .is_some_and(|bare| bare.eq_ignore_ascii_case("biz.athleto.store"))
-                && state.config.host_allowed(host),
-        ))
+        Ok(Self(state.config.is_biz_host(host)))
     }
 }
 
@@ -247,15 +245,11 @@ pub(crate) fn request_base(headers: &HeaderMap, state: &SharedState) -> String {
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if host.is_empty() || !state.config.host_allowed(host) {
-        return state.config.public_base_url.clone();
-    }
-    let scheme = if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
-        "http"
+    if state.config.is_biz_host(host) {
+        state.config.biz_public_base_url.clone()
     } else {
-        "https"
-    };
-    format!("{scheme}://{host}")
+        state.config.public_base_url.clone()
+    }
 }
 
 fn not_configured_page(user: &MaybeUser, title: &str, heading: &str) -> Markup {
@@ -370,6 +364,8 @@ pub async fn login_submit(
             .into_response();
     };
 
+    // `create_user: true` stays: magic-link login doubling as signup is the
+    // product's only signup path, so removing it would strand new users.
     let flow = Uuid::new_v4().to_string();
     let redirect_to = format!(
         "{}/auth/callback?flow={flow}",
@@ -458,11 +454,18 @@ pub async fn auth_callback(biz: Biz) -> Markup {
     )
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SessionTokens {
     access_token: String,
     refresh_token: String,
     flow: String,
+}
+
+fn flow_matches(jar: &CookieJar, flow: &str) -> bool {
+    Uuid::parse_str(flow).is_ok()
+        && jar
+            .get(LOGIN_FLOW_COOKIE)
+            .is_some_and(|cookie| cookie.value() == flow)
 }
 
 /// POST /auth/session -- validate fragment-delivered tokens and set cookies.
@@ -472,11 +475,7 @@ pub async fn auth_session(
     jar: CookieJar,
     Form(tokens): Form<SessionTokens>,
 ) -> Response {
-    let flow_matches = Uuid::parse_str(&tokens.flow).is_ok()
-        && jar
-            .get(LOGIN_FLOW_COOKIE)
-            .is_some_and(|cookie| cookie.value() == tokens.flow);
-    if !flow_matches {
+    if !flow_matches(&jar, &tokens.flow) {
         return login_form(
             biz,
             Some(html! { div .notice .error { "This sign-in attempt did not start in this browser. Request a fresh link." } }),
@@ -532,11 +531,7 @@ pub async fn auth_confirm(
         return not_configured_page(&MaybeUser(None), "Sign in | AthletO", "Sign in")
             .into_response();
     };
-    let flow_matches = Uuid::parse_str(&params.flow).is_ok()
-        && jar
-            .get(LOGIN_FLOW_COOKIE)
-            .is_some_and(|cookie| cookie.value() == params.flow);
-    if !flow_matches {
+    if !flow_matches(&jar, &params.flow) {
         return login_form(
             biz,
             Some(html! { div .notice .error { "This sign-in attempt did not start in this browser. Request a fresh link." } }),
@@ -1031,8 +1026,6 @@ pub async fn require_full(
 
 /// Additional gate for order placement and other B2B-sensitive actions:
 /// business accounts must have a verified second factor.
-// Keep the redirect response intact so callers can return it without losing
-// headers/cookies through an intermediate error representation.
 #[allow(clippy::result_large_err)]
 pub fn require_b2b_ready(
     user: &AuthUser,

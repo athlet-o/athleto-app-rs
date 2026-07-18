@@ -10,13 +10,12 @@ axum = { version = "0.8", features = ["macros", "ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-# Explicit secret-envelope decryption and signed payment webhook verification.
 aes-gcm = "0.10"
 hex = "0.4"
 hmac = "0.12"
 maud = { version = "0.27", features = ["axum"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-sea-orm = { version = "1.1", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-uuid", "with-json"] }
+sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-uuid", "with-json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

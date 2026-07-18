@@ -88,7 +88,8 @@ pub const CALLBACK_JS: &str = r#"
     return;
   }
   var access=p.get('access_token'), refresh=p.get('refresh_token');
-  if(!access||!refresh){
+  var flow=(new URLSearchParams(location.search)).get('flow');
+  if(!access||!refresh||!flow){
     if(status) status.textContent='No sign-in tokens found. Open the link from your email again, or request a new one.';
     return;
   }
@@ -96,8 +97,7 @@ pub const CALLBACK_JS: &str = r#"
   // POST /auth/session requires the same double-submit proof as every form.
   var csrf=(document.cookie.match(/(?:^|; )athleto_csrf=([^;]+)/)||[])[1]||'';
   var f=document.createElement('form'); f.method='POST'; f.action='/auth/session';
-  var flow=new URLSearchParams(location.search).get('flow');
-  [['access_token',access],['refresh_token',refresh],['csrf_token',csrf],['flow',flow||'']].forEach(function(pair){
+  [['access_token',access],['refresh_token',refresh],['flow',flow],['csrf_token',csrf]].forEach(function(pair){
     var i=document.createElement('input'); i.type='hidden'; i.name=pair[0]; i.value=pair[1];
     f.appendChild(i);
   });

@@ -1,5 +1,4 @@
-//! The provider callback idempotency ledger. The composite primary key is the
-//! authority for whether a callback has already been applied.
+//! `payment_events` -- idempotency ledger for signed provider webhooks.
 
 use sea_orm::entity::prelude::*;
 
@@ -13,7 +12,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub event_id: String,
     pub payload: Json,
-    pub received_at: DateTimeWithTimeZone,
+    pub received_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

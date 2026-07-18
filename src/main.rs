@@ -27,9 +27,6 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(8080);
 
-    // The Fiducia bootstrap credentials must be available before the encrypted
-    // overlay can be read. `SecretSource` keeps ordinary environment variables
-    // authoritative and treats an unavailable overlay as optional.
     let fiducia_url = env_opt("FIDUCIA_URL");
     let fiducia_api_key = env_opt("FIDUCIA_API_KEY");
     let fiducia_client = match (fiducia_url.clone(), fiducia_api_key.clone()) {
@@ -43,24 +40,23 @@ async fn main() -> anyhow::Result<()> {
             .get("SUPABASE_URL")
             .map(|url| url.trim_end_matches('/').to_string()),
         supabase_anon_key: secret.get("SUPABASE_ANON_KEY"),
-        public_base_url: secret
-            .get("ATHLETO_PUBLIC_BASE_URL")
+        public_base_url: env_opt("ATHLETO_PUBLIC_BASE_URL")
             .unwrap_or_else(|| "https://app.athleto.store".to_string()),
-        biz_public_base_url: secret
-            .get("ATHLETO_BIZ_PUBLIC_BASE_URL")
+        biz_public_base_url: env_opt("ATHLETO_BIZ_PUBLIC_BASE_URL")
             .unwrap_or_else(|| "https://biz.athleto.store".to_string()),
-        allowed_hosts: secret.get("ALLOWED_HOSTS").map(|hosts| {
+        allowed_hosts: env_opt("ALLOWED_HOSTS").map(|hosts| {
             hosts
                 .split(',')
                 .map(|host| host.trim().to_string())
                 .filter(|host| !host.is_empty())
                 .collect()
         }),
-        operations_api_key: secret.get("ATHLETO_OPERATIONS_API_KEY"),
-        sms_mfa_enabled: secret.get("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
+        sms_mfa_enabled: env_opt("ATHLETO_SMS_MFA_ENABLED").as_deref() == Some("1"),
         fiducia_url,
         fiducia_api_key,
+        // HOSTNAME is the pod name under Kubernetes; unique per replica.
         replica_id: env_opt("HOSTNAME").unwrap_or_else(|| "local".to_string()),
+        operations_api_key: secret.get("ATHLETO_OPERATIONS_API_KEY"),
         stripe: secret
             .get("ATHLETO_STRIPE_SECRET_KEY")
             .map(|secret_key| payments::StripeConfig {
@@ -125,8 +121,9 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|url| db::build_pool(&url));
     match &pool {
         Some(pool) => {
-            // Migrations stay asynchronous so process startup and /healthz do
-            // not depend on a reachable database.
+            // Run migrations in the background so startup (and /healthz) never
+            // blocks on database availability. `sqlx::migrate!` runs on the
+            // sqlx pool underneath the SeaORM connection.
             let migrate_pool = pool.get_postgres_connection_pool().clone();
             tokio::spawn(async move {
                 match sqlx::migrate!().run(&migrate_pool).await {
@@ -137,6 +134,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
+            // Singleton background jobs. Across replicas exactly one runs each
+            // tick, chosen by coordinate::try_lead (a fiducia lease when
+            // configured, else a Postgres advisory lock). First ticks are
+            // delayed so nothing races the migrations on a fresh database.
+
+            // Expired-hold sweeper -- hygiene only (claims/availability already
+            // treat stale holds as free via lazy expiry).
             let sweep_pool = pool.clone();
             let sweep_config = config.clone();
             tokio::spawn(async move {
@@ -148,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
                     let Some(lead) =
                         coordinate::try_lead(&sweep_pool, &sweep_config, "hold-sweeper", 120).await
                     else {
-                        continue;
+                        continue; // another replica is sweeping this tick
                     };
                     match db::sweep_expired_holds(&sweep_pool).await {
                         Ok(0) => {}
@@ -159,39 +163,43 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
-            let recurring_pool = pool.clone();
-            let recurring_config = config.clone();
+            // Recurring-order runner -- materializes due subscriptions / B2B
+            // replenishment. Each due order is additionally claimed under a
+            // transaction-scoped advisory lock inside
+            // db::run_due_recurring_orders, so even if the leader guard were
+            // bypassed no subscription could double-fire.
+            let recur_pool = pool.clone();
+            let recur_config = config.clone();
             tokio::spawn(async move {
                 let period = Duration::from_secs(10 * 60);
                 let mut ticker =
                     tokio::time::interval_at(tokio::time::Instant::now() + period, period);
                 loop {
                     ticker.tick().await;
-                    let Some(lead) = coordinate::try_lead(
-                        &recurring_pool,
-                        &recurring_config,
-                        "recurring-runner",
-                        120,
-                    )
-                    .await
+                    let Some(lead) =
+                        coordinate::try_lead(&recur_pool, &recur_config, "recurring-runner", 120)
+                            .await
                     else {
                         continue;
                     };
-                    match db::run_due_recurring_orders(&recurring_pool).await {
+                    match db::run_due_recurring_orders(&recur_pool).await {
                         Ok(0) => {}
-                        Ok(count) => tracing::info!(count, "recurring orders advanced"),
+                        Ok(n) => tracing::info!(materialized = n, "recurring orders advanced"),
                         Err(err) => tracing::warn!(error = %err, "recurring runner failed"),
                     }
                     lead.release().await;
                 }
             });
         }
-        None => tracing::warn!(
-            "DATABASE_URL not set; cart persistence disabled, storefront uses built-in catalog"
-        ),
+        None => {
+            tracing::warn!(
+                "DATABASE_URL not set; cart persistence disabled, storefront uses built-in catalog"
+            );
+        }
     }
 
     let state: SharedState = Arc::new(AppState::new(pool, reqwest::Client::new(), config));
+
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "athleto-app-rs listening");

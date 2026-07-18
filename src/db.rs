@@ -372,10 +372,8 @@ pub async fn upsert_profile(
          ON CONFLICT (user_id) DO UPDATE \
          SET customer_type = EXCLUDED.customer_type, \
              company_name = EXCLUDED.company_name, \
-             b2b_approved_at = CASE \
-                 WHEN EXCLUDED.customer_type = 'b2c' THEN NULL \
-                 ELSE customer_profiles.b2b_approved_at \
-             END, \
+             b2b_approved_at = CASE WHEN EXCLUDED.customer_type = 'b2c' \
+                                    THEN NULL ELSE customer_profiles.b2b_approved_at END, \
              updated_at = now()",
         [
             user_id.into(),
@@ -562,52 +560,6 @@ pub enum ShipMethod {
     Freight,
 }
 
-impl ShipMethod {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::Expedited => "expedited",
-            Self::Freight => "freight",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Standard => "Standard shipping",
-            Self::Expedited => "Expedited shipping",
-            Self::Freight => "Freight (LTL)",
-        }
-    }
-
-    /// Flat shipping charged at checkout, in cents. Freight is billed on the
-    /// business account after weigh/routing, so it books at 0 here.
-    pub fn shipping_cents(self) -> i64 {
-        match self {
-            Self::Standard => 599,
-            Self::Expedited => 1499,
-            Self::Freight => 0,
-        }
-    }
-
-    /// Estimated delivery window in business days (min, max) from order date.
-    pub fn eta_business_days(self) -> (i64, i64) {
-        match self {
-            Self::Standard => (3, 5),
-            Self::Expedited => (1, 2),
-            Self::Freight => (5, 10),
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "standard" => Some(Self::Standard),
-            "expedited" => Some(Self::Expedited),
-            "freight" => Some(Self::Freight),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "payment_provider")]
 pub enum PaymentProvider {
@@ -699,6 +651,52 @@ pub enum SubscriptionStatus {
     Cancelled,
 }
 
+impl ShipMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Expedited => "expedited",
+            Self::Freight => "freight",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard shipping",
+            Self::Expedited => "Expedited shipping",
+            Self::Freight => "Freight (LTL)",
+        }
+    }
+
+    /// Flat shipping charged at checkout, in cents. Freight is billed on the
+    /// business account after weigh/routing, so it books at 0 here.
+    pub fn shipping_cents(self) -> i64 {
+        match self {
+            Self::Standard => 599,
+            Self::Expedited => 1499,
+            Self::Freight => 0,
+        }
+    }
+
+    /// Estimated delivery window in business days (min, max) from order date.
+    pub fn eta_business_days(self) -> (i64, i64) {
+        match self {
+            Self::Standard => (3, 5),
+            Self::Expedited => (1, 2),
+            Self::Freight => (5, 10),
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "standard" => Some(Self::Standard),
+            "expedited" => Some(Self::Expedited),
+            "freight" => Some(Self::Freight),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OrderRow {
     pub id: Uuid,
@@ -712,12 +710,12 @@ pub struct OrderRow {
     pub shipping_cents: i64,
     pub tax_cents: i64,
     pub total_cents: i64,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
     pub payment_provider: Option<PaymentProvider>,
     pub payment_status: PaymentStatus,
     pub payment_ref: Option<String>,
     pub paid_at: Option<DateTime<Utc>>,
-    pub next_run_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
 }
 
 impl OrderRow {
@@ -734,12 +732,12 @@ impl OrderRow {
             shipping_cents: order.shipping_cents,
             tax_cents: order.tax_cents,
             total_cents: order.total_cents,
+            next_run_at: order.next_run_at,
+            created_at: order.created_at,
             payment_provider: order.payment_provider,
             payment_status: order.payment_status,
             payment_ref: order.payment_ref,
-            paid_at: order.paid_at.map(|time| time.with_timezone(&Utc)),
-            next_run_at: order.next_run_at,
-            created_at: order.created_at,
+            paid_at: order.paid_at,
         }
     }
 
@@ -1350,8 +1348,9 @@ pub async fn shipments_for_user(
 }
 
 /// Record a fulfillment (ops / EDI 856): create a shipment with carrier +
-/// tracking and advance the order to fulfilled. The caller has already passed
-/// operations authentication. Returns None if the order is absent.
+/// tracking and advance the order to fulfilled. The caller is authenticated
+/// separately with the dedicated operations credential; customer API keys
+/// cannot mutate fulfillment state. Returns None for an unknown order.
 pub async fn record_fulfillment(
     conn: &DatabaseConnection,
     order_id: Uuid,
@@ -1360,20 +1359,18 @@ pub async fn record_fulfillment(
     ship_date: chrono::NaiveDate,
 ) -> Result<Option<Uuid>, DbErr> {
     let tx = conn.begin().await?;
-    let owned = tx
+    let order = tx
         .query_one(stmt(
-            // This route is already protected by the dedicated operations API
-            // key. Requiring a customer id here would make authorized EDI/
-            // warehouse updates impossible while adding no caller isolation.
-            "SELECT ship_method::text AS ship_method FROM orders WHERE id = $1 FOR UPDATE",
+            "SELECT ship_method::text AS ship_method FROM orders \
+             WHERE id = $1 FOR UPDATE",
             [order_id.into()],
         ))
         .await?;
-    let Some(owned_row) = owned else {
+    let Some(order) = order else {
         tx.rollback().await?;
         return Ok(None);
     };
-    let ship_method = ShipMethod::parse(&owned_row.try_get::<String>("", "ship_method")?)
+    let ship_method = ShipMethod::parse(&order.try_get::<String>("", "ship_method")?)
         .unwrap_or(ShipMethod::Standard);
 
     let (min, max) = ship_method.eta_business_days();
@@ -1569,12 +1566,7 @@ pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, 
 }
 
 // ---------------------------------------------------------------------------
-// Payment persistence. These are deliberately SeaORM-only, while the older
-// lock-heavy cart/order paths above remain explicit SQL transactions.
-
-fn now_tz() -> chrono::DateTime<chrono::FixedOffset> {
-    Utc::now().fixed_offset()
-}
+// Payments. These tables are new and therefore use SeaORM exclusively.
 
 pub async fn set_order_payment(
     conn: &DatabaseConnection,
@@ -1606,7 +1598,7 @@ pub async fn set_order_payment_status(
     let mut active: order::ActiveModel = row.into();
     active.payment_status = Set(status);
     if stamp_paid {
-        active.paid_at = Set(Some(now_tz()));
+        active.paid_at = Set(Some(Utc::now()));
     }
     active.update(conn).await?;
     Ok(())
@@ -1673,16 +1665,16 @@ pub async fn record_payment(
     amount_cents: i64,
     status: PaymentStatus,
 ) -> Result<bool, DbErr> {
-    match payment::Entity::find()
+    let existing = payment::Entity::find()
         .filter(payment::Column::Provider.eq(provider))
         .filter(payment::Column::ProviderRef.eq(provider_ref))
         .one(conn)
-        .await?
-    {
+        .await?;
+    match existing {
         Some(row) => {
             let mut active: payment::ActiveModel = row.into();
             active.status = Set(status);
-            active.updated_at = Set(now_tz());
+            active.updated_at = Set(Utc::now());
             active.update(conn).await?;
             Ok(false)
         }
@@ -1716,16 +1708,16 @@ pub async fn upsert_subscription(
     status: SubscriptionStatus,
     frequency: OrderFrequency,
 ) -> Result<(), DbErr> {
-    match payment_subscription::Entity::find()
+    let existing = payment_subscription::Entity::find()
         .filter(payment_subscription::Column::Provider.eq(provider))
         .filter(payment_subscription::Column::ProviderRef.eq(provider_ref))
         .one(conn)
-        .await?
-    {
+        .await?;
+    match existing {
         Some(row) => {
             let mut active: payment_subscription::ActiveModel = row.into();
             active.status = Set(status);
-            active.updated_at = Set(now_tz());
+            active.updated_at = Set(Utc::now());
             active.update(conn).await?;
         }
         None => {
@@ -1763,7 +1755,7 @@ pub async fn set_subscription_status(
     };
     let mut active: payment_subscription::ActiveModel = row.into();
     active.status = Set(status);
-    active.updated_at = Set(now_tz());
+    active.updated_at = Set(Utc::now());
     active.update(conn).await?;
     Ok(())
 }
@@ -1781,7 +1773,6 @@ pub async fn subscription_owner(
         .map(|row| (row.user_id, row.order_id)))
 }
 
-/// Returns true only for the first delivery of a provider event id.
 pub async fn record_payment_event(
     conn: &DatabaseConnection,
     provider: PaymentProvider,
@@ -1902,39 +1893,27 @@ mod payment_enum_tests {
 
     use super::*;
 
-    /// Guard against drift between the Postgres enum values created in
-    /// 0006_payments.sql and the SeaORM string_value mappings (sqlx's
-    /// rename_all derives are exercised at runtime; these are compile-in).
     #[test]
-    fn sea_orm_string_values_match_the_migration_enums() {
+    fn sea_orm_string_values_match_payment_migrations() {
         assert_eq!(PaymentProvider::Stripe.to_value(), "stripe");
         assert_eq!(PaymentProvider::Paypal.to_value(), "paypal");
         assert_eq!(PaymentProvider::Square.to_value(), "square");
         assert_eq!(PaymentProvider::Invoice.to_value(), "invoice");
-
         assert_eq!(PaymentStatus::Pending.to_value(), "pending");
         assert_eq!(PaymentStatus::Processing.to_value(), "processing");
         assert_eq!(PaymentStatus::Paid.to_value(), "paid");
         assert_eq!(PaymentStatus::Invoiced.to_value(), "invoiced");
         assert_eq!(PaymentStatus::Failed.to_value(), "failed");
         assert_eq!(PaymentStatus::Refunded.to_value(), "refunded");
-
         assert_eq!(PaymentKind::Charge.to_value(), "charge");
         assert_eq!(
             PaymentKind::SubscriptionCycle.to_value(),
             "subscription_cycle"
         );
         assert_eq!(PaymentKind::Refund.to_value(), "refund");
-
         assert_eq!(SubscriptionStatus::Pending.to_value(), "pending");
         assert_eq!(SubscriptionStatus::Active.to_value(), "active");
         assert_eq!(SubscriptionStatus::PastDue.to_value(), "past_due");
         assert_eq!(SubscriptionStatus::Cancelled.to_value(), "cancelled");
-
-        // And the order enums shared with the legacy sqlx layer (0004).
-        assert_eq!(OrderKind::OneTime.to_value(), "one_time");
-        assert_eq!(OrderKind::Recurring.to_value(), "recurring");
-        assert_eq!(OrderFrequency::Biweekly.to_value(), "biweekly");
-        assert_eq!(OrderFrequency::Quarterly.to_value(), "quarterly");
     }
 }

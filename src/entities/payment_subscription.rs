@@ -1,5 +1,4 @@
-//! Provider-billed recurring orders (Stripe subscriptions, PayPal I- ids, or
-//! Square subscriptions). Fulfilment cadence remains in the app's order runner.
+//! `payment_subscriptions` -- recurring provider agreements.
 
 use sea_orm::entity::prelude::*;
 
@@ -16,8 +15,8 @@ pub struct Model {
     pub provider_ref: String,
     pub status: SubscriptionStatus,
     pub frequency: OrderFrequency,
-    pub created_at: DateTimeWithTimeZone,
-    pub updated_at: DateTimeWithTimeZone,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

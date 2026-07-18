@@ -96,8 +96,6 @@ pub enum PaymentError {
     #[error(transparent)]
     Http(#[from] reqwest::Error),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
-    #[error(transparent)]
     Orm(#[from] sea_orm::DbErr),
 }
 
@@ -208,10 +206,6 @@ async fn provider_error(response: reqwest::Response) -> PaymentError {
 /// Create the provider-side checkout artifact for an already-placed order and
 /// say where to send the customer. The order keeps `payment_status =
 /// pending` until a verified return or webhook settles it.
-// The values are independently security-relevant (owner, canonical return
-// origin, approved-business state, and PO), so a catch-all parameter object
-// would make provider-boundary reviews less clear.
-#[allow(clippy::too_many_arguments)]
 pub async fn start_payment(
     state: &SharedState,
     base_url: &str,
@@ -222,10 +216,10 @@ pub async fn start_payment(
     is_b2b: bool,
     po_number: Option<&str>,
 ) -> Result<StartOutcome, PaymentError> {
-    let Some(orm) = &state.pool else {
+    let Some(pool) = &state.pool else {
         return Ok(StartOutcome::NotConfigured);
     };
-    let Some(facts) = db::order_payment_facts(orm, order_id).await? else {
+    let Some(facts) = db::order_payment_facts(pool, order_id).await? else {
         return Err(PaymentError::Provider("order not found".into()));
     };
     if facts.user_id != user_id {
@@ -233,7 +227,7 @@ pub async fn start_payment(
             "order does not belong to the current customer".into(),
         ));
     }
-    let items = db::order_items(orm, order_id).await?;
+    let items = db::order_items(pool, order_id).await?;
     let shipping_cents = facts.total_cents
         - items
             .iter()
@@ -312,9 +306,6 @@ pub async fn start_payment(
 
 const STRIPE_API: &str = "https://api.stripe.com";
 
-// Keep the payment boundary inputs explicit: they map directly to the hosted
-// Checkout payload and make accidental amount/owner substitution reviewable.
-#[allow(clippy::too_many_arguments)]
 async fn stripe_checkout_session(
     state: &SharedState,
     cfg: &StripeConfig,
@@ -819,6 +810,17 @@ fn paypal_approval_link(value: &Value) -> Option<String> {
             None
         }
     })
+}
+
+fn paypal_order_matches(value: &Value, order_id: Uuid) -> bool {
+    value["purchase_units"]
+        .get(0)
+        .and_then(|unit| unit["custom_id"].as_str())
+        == Some(order_id.to_string().as_str())
+}
+
+fn paypal_subscription_matches(value: &Value, order_id: Uuid) -> bool {
+    value["custom_id"].as_str() == Some(order_id.to_string().as_str())
 }
 
 async fn paypal_order(
@@ -1518,6 +1520,15 @@ async fn settle_order(
     let Some(facts) = db::order_payment_facts(orm, order_id).await? else {
         return Ok(());
     };
+    if facts.payment_provider != Some(provider) {
+        tracing::warn!(
+            %order_id,
+            expected = ?facts.payment_provider,
+            actual = provider.as_str(),
+            "provider callback does not match the order's initiated payment method"
+        );
+        return Ok(());
+    }
     if let Some(charged) = &charged {
         if !charge_matches(charged, facts.total_cents) {
             tracing::error!(
@@ -1695,6 +1706,14 @@ pub async fn pay_success(
                     return Ok(PaymentStatus::Pending);
                 };
                 if let Some(subscription_id) = params.subscription_id.as_deref() {
+                    let Some(facts) = db::order_payment_facts(&orm, order_id).await? else {
+                        return Ok(PaymentStatus::Pending);
+                    };
+                    if facts.payment_provider != Some(PaymentProvider::Paypal)
+                        || facts.payment_ref.as_deref() != Some(subscription_id)
+                    {
+                        return Ok(PaymentStatus::Pending);
+                    }
                     let token = paypal_token(&state, cfg).await?;
                     let subscription: Value = state
                         .http
@@ -1710,19 +1729,13 @@ pub async fn pay_success(
                     if matches!(
                         subscription["status"].as_str(),
                         Some("ACTIVE") | Some("APPROVED")
-                    ) {
-                        // Approval carries no charge amount; cycle webhooks verify money.
-                        settle_order(
-                            &state,
-                            &orm,
-                            order_id,
-                            PaymentProvider::Paypal,
-                            subscription_id,
-                            PaymentKind::Charge,
-                            None,
-                        )
-                        .await?;
-                        return Ok(PaymentStatus::Paid);
+                    ) && paypal_subscription_matches(&subscription, order_id)
+                    {
+                        // Subscription approval is not proof of a collected
+                        // payment. The signed sale webhook settles money.
+                        db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing)
+                            .await?;
+                        return Ok(PaymentStatus::Processing);
                     }
                     db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
                     return Ok(PaymentStatus::Processing);
@@ -1730,6 +1743,14 @@ pub async fn pay_success(
                 let Some(paypal_order) = params.token.as_deref() else {
                     return Ok(PaymentStatus::Pending);
                 };
+                let Some(facts) = db::order_payment_facts(&orm, order_id).await? else {
+                    return Ok(PaymentStatus::Pending);
+                };
+                if facts.payment_provider != Some(PaymentProvider::Paypal)
+                    || facts.payment_ref.as_deref() != Some(paypal_order)
+                {
+                    return Ok(PaymentStatus::Pending);
+                }
                 let token = paypal_token(&state, cfg).await?;
                 let response = state
                     .http
@@ -1742,7 +1763,9 @@ pub async fn pay_success(
                     .send()
                     .await?;
                 let capture: Value = response.json().await?;
-                if capture["status"].as_str() == Some("COMPLETED") {
+                if capture["status"].as_str() == Some("COMPLETED")
+                    && paypal_order_matches(&capture, order_id)
+                {
                     let capture = &capture["purchase_units"][0]["payments"]["captures"][0];
                     let capture_id = capture["id"].as_str().unwrap_or(paypal_order);
                     let charged = charged_decimal(

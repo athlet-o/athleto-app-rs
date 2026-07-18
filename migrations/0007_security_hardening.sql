@@ -1,5 +1,7 @@
--- Security hardening: approved B2B terms, public Supabase exposure, and
--- shared login-rate-limit state.
+-- Security hardening: approved B2B terms. Product/cart RLS is established
+-- in 0008_rls_products_carts.sql and login throttling is handled by the
+-- application security middleware, so this migration intentionally owns only
+-- the approval state introduced after those controls shipped.
 
 ALTER TABLE customer_profiles
     ADD COLUMN b2b_approved_at TIMESTAMPTZ;
@@ -7,19 +9,3 @@ ALTER TABLE customer_profiles
 CREATE INDEX customer_profiles_b2b_approval_idx
     ON customer_profiles (b2b_approved_at)
     WHERE b2b_approved_at IS NOT NULL;
-
-CREATE TABLE login_rate_limits (
-    subject_hash TEXT PRIMARY KEY,
-    window_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    attempts INT NOT NULL DEFAULT 1 CHECK (attempts > 0)
-);
-
-ALTER TABLE products ENABLE ROW LEVEL SECURITY;
-ALTER TABLE carts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE cart_items ENABLE ROW LEVEL SECURITY;
-
-REVOKE ALL ON TABLE products, carts, cart_items FROM anon, authenticated;
-GRANT SELECT ON TABLE products TO anon, authenticated;
-
-CREATE POLICY products_public_read ON products
-    FOR SELECT USING (true);

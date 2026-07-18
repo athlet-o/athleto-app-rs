@@ -24,12 +24,12 @@ pub struct Model {
     pub shipping_cents: i64,
     pub tax_cents: i64,
     pub total_cents: i64,
+    pub next_run_at: Option<DateTimeUtc>,
+    pub created_at: DateTimeUtc,
     pub payment_provider: Option<PaymentProvider>,
     pub payment_status: PaymentStatus,
     pub payment_ref: Option<String>,
-    pub paid_at: Option<DateTimeWithTimeZone>,
-    pub next_run_at: Option<DateTimeUtc>,
-    pub created_at: DateTimeUtc,
+    pub paid_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

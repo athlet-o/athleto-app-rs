@@ -27,9 +27,10 @@ and a powder packet (just add water).
 | --- | --- |
 | `GET /` | Storefront product grid (both formats, prices, calories) |
 | `GET /product/{slug}` | Product detail |
-| `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase GoTrue auth; session tokens in HttpOnly Secure SameSite=Lax cookies |
+| `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase GoTrue auth; browser-bound magic links and session tokens in HttpOnly Secure SameSite=Lax cookies |
 | `GET /cart`, `POST /cart/items`, `POST /cart/items/{id}/delete` | Cart pages + htmx fragments; keyed by Supabase user id or anonymous cart cookie |
-| `POST /checkout`, `GET /orders`, `GET /orders/{id}`, `POST /orders/{id}/reorder` | Checkout (one-time/recurring, ship method, B2B PO), order history with status/ETA/tracking + B2B filters, printable receipt, reorder |
+| `POST /checkout`, `GET /orders`, `GET /orders/{id}`, `POST /orders/{id}/reorder`, `POST /orders/{id}/pay` | Hosted payment checkout/retry (Stripe, PayPal, Square; approved B2B Net-30 invoices), order history with status/ETA/tracking + B2B filters, printable receipt, reorder |
+| `GET /pay/{success,cancel}`, `POST /webhooks/{stripe,paypal,square}` | Verified provider returns and signed, replay-safe payment webhooks |
 | `GET|POST /quick-order` | B2B case-quantity grid straight into the cart |
 | `GET|POST /api/v1/...` | ERP JSON API (hashed `athk_` keys): products, orders (list/create), `POST /api/v1/orders/{id}/fulfillment` records carrier + tracking (856-style) |
 | `GET /ws` | Authenticated websocket pushing HTML fragments (htmx ws extension, `hx-swap-oob`): live cart-hold countdown; `GET /cart/hold` polling remains the fallback |
@@ -45,70 +46,19 @@ and a powder packet (just add water).
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
-| `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical browser origins for B2C and B2B redirects |
+| `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical B2C/B2B browser origins for auth and provider returns |
 | `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
 | `ATHLETO_OPERATIONS_API_KEY` | *(unset)* | Dedicated bearer credential for warehouse-only fulfillment writes |
-| `ATHLETO_STRIPE_SECRET_KEY` | *(unset)* | Stripe API secret key (`sk_test_…` / `sk_live_…`); enables card checkout, B2B ACH debit, and Net-30 hosted invoices |
-| `ATHLETO_STRIPE_PUBLISHABLE_KEY` | *(unset)* | Stripe publishable key (`pk_…`); reserved for client-side elements — hosted checkout doesn't need it server-side |
-| `ATHLETO_STRIPE_WEBHOOK_SECRET` | *(unset)* | Stripe webhook signing secret (`whsec_…`) for `POST /webhooks/stripe` |
-| `ATHLETO_PAYPAL_CLIENT_ID` / `ATHLETO_PAYPAL_CLIENT_SECRET` | *(unset)* | PayPal REST app credentials; enables PayPal one-time + subscriptions |
-| `ATHLETO_PAYPAL_WEBHOOK_ID` | *(unset)* | PayPal webhook id used to verify `POST /webhooks/paypal` |
-| `ATHLETO_PAYPAL_ENV` | `sandbox` | `sandbox` or `live` |
-| `ATHLETO_SQUARE_ACCESS_TOKEN` / `ATHLETO_SQUARE_LOCATION_ID` | *(unset)* | Square access token + location; enables Square hosted checkout + subscription plans |
-| `ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY` | *(unset)* | Square webhook signature key for `POST /webhooks/square` |
-| `ATHLETO_SQUARE_ENV` | `sandbox` | `sandbox` or `production` |
-| `ATHLETO_BILLING_URL` | *(unset)* | Quaestor billing-server base URL (observer AR/AP ledger) |
-| `ATHLETO_BILLING_API_KEY` | *(unset)* | Bearer token for the billing-server API |
-| `ATHLETO_BILLING_TENANT_ID` | *(unset)* | AthletO tenant UUID in the multi-tenant ledger |
-| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(unset)* | fiducia.cloud endpoint + key; enables job-leadership leases and the KV secret overlay |
-| `ATHLETO_SECRETS_KEY` | *(unset)* | base64 of a 32-byte AES-256 key; decrypts `v1:` envelopes read from the fiducia KV overlay. Unset ⇒ overlay disabled (env-only) |
+| `ATHLETO_STRIPE_SECRET_KEY` / `ATHLETO_STRIPE_WEBHOOK_SECRET` | *(unset)* | Stripe hosted checkout and signed webhook verification; also enables approved B2B Net-30 invoices |
+| `ATHLETO_PAYPAL_CLIENT_ID` / `ATHLETO_PAYPAL_CLIENT_SECRET` / `ATHLETO_PAYPAL_WEBHOOK_ID` | *(unset)* | PayPal hosted checkout/subscriptions and webhook verification |
+| `ATHLETO_SQUARE_ACCESS_TOKEN` / `ATHLETO_SQUARE_LOCATION_ID` / `ATHLETO_SQUARE_WEBHOOK_SIGNATURE_KEY` | *(unset)* | Square hosted checkout/subscriptions and signature verification |
+| `ATHLETO_BILLING_URL` / `ATHLETO_BILLING_API_KEY` / `ATHLETO_BILLING_TENANT_ID` | *(unset)* | Optional observer-only AR/AP ledger integration |
+| `FIDUCIA_URL` / `FIDUCIA_API_KEY` | *(unset)* | fiducia.cloud lock service for singleton-job leadership leases (sweeper / recurring runner); unset = Postgres advisory-lock fallback |
+| `ATHLETO_SECRETS_KEY` | *(unset)* | Base64 32-byte AES key used only to decrypt approved `v1:` secret envelopes from fiducia KV; unset keeps secrets environment-only |
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a
 "not configured" notice. Set all three variables to enable auth and cart persistence.
-Payment processors are each independently optional — checkout only offers the ones
-with keys present, and with none configured orders are placed as payment-pending.
-
-**Secrets sourcing:** every variable above is read env-first; anything the
-environment leaves unset is fetched once at boot from the **fiducia.cloud
-config KV** (`secrets/athleto/<ENV_NAME>`, reachable with just `FIDUCIA_URL` +
-`FIDUCIA_API_KEY` from any cloud provider). Env always wins; fiducia being
-down is the same as unset. AWS Secrets Manager (via ESO) remains the
-production secrets-of-record. Details and the `fiducia-secrets` roadmap:
-[docs/secrets-management.md](docs/secrets-management.md).
-
-## Payments
-
-Checkout accepts **one-time, subscription, and recurring** payments through three
-processors, all hosted/redirect flows (no card data touches this server — PCI
-SAQ-A):
-
-- **Stripe** — Checkout Sessions (cards; `mode=subscription` for recurring
-  orders). B2B sessions additionally offer **ACH bank debit** (`us_bank_account`),
-  and B2B can instead choose **Invoice my account (Net 30)**: the order ships
-  against the PO and a hosted Stripe invoice (card / ACH / bank transfer) is
-  emailed, due in 30 days. Net-30 requires an approved business profile and a
-  purchase-order number; profile selection alone does not grant credit terms.
-- **PayPal** — Orders v2 for one-time; catalog product → billing plan →
-  subscription for recurring.
-- **Square** — hosted payment links; catalog subscription plans for recurring
-  (weekly / every-two-weeks / monthly / quarterly cadences).
-
-Every payment is confirmed twice: server-side verification on the browser
-return (`/pay/success`) and signed provider webhooks
-(`/webhooks/{stripe,paypal,square}`), deduplicated via the `payment_events`
-table. Orders carry `payment_status` (`pending → processing → paid`, or
-`invoiced` for Net-30), and `/orders` offers **Pay now** retry for pending or
-failed payments.
-
-Settled money is mirrored into the **Quaestor billing-server**
-([quaestor-ledger/billing-server.rs](https://github.com/quaestor-ledger/billing-server.rs)),
-a Model-A *observer* AR/AP ledger — it records, reconciles, and proves; it never
-moves money. Per settled order the app posts an invoice transaction (debit
-`ar/<user>`, credit `revenue/athleto`) and a payment transaction (debit
-`cash/<provider>`, credit `ar/<user>`), idempotency-keyed so webhook replays are
-safe. The account page shows the customer's outstanding balance and credits from
-`GET /v1/tenants/{tenant}/customers/by-email/{email}/billing-state`.
 
 ## Local run
 

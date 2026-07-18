@@ -1,5 +1,4 @@
-//! Settled or pending provider money movements. Provider reference uniqueness
-//! makes browser-return and webhook handling safely idempotent.
+//! `payments` -- provider-reported money movements.
 
 use sea_orm::entity::prelude::*;
 
@@ -18,8 +17,8 @@ pub struct Model {
     pub amount_cents: i64,
     pub currency: String,
     pub status: PaymentStatus,
-    pub created_at: DateTimeWithTimeZone,
-    pub updated_at: DateTimeWithTimeZone,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
