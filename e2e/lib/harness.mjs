@@ -6,6 +6,8 @@
 // harness reports `hasAuth() === false` and the auth suites skip, so the
 // no-auth suites still run (in CI without secrets, and offline).
 
+import { createHmac } from 'node:crypto';
+
 export const BASE_URL = (process.env.E2E_BASE_URL || 'http://localhost:8145').replace(/\/$/, '');
 // The biz storefront: a real host by default, or the local server with a
 // rewritten Host header when E2E_BIZ_VIA_HOST_HEADER=1.
