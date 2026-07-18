@@ -28,3 +28,20 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: cargo clippy --all-targets -- -D warnings
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 20
+      # Build the app binary; the browser helper spawns it in degraded mode
+      # (no APP_BASE_URL) on an ephemeral port and waits for /healthz.
+      - run: cargo build --bin athleto-app-rs
+      - run: npm ci
+        working-directory: tests/browser
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/browser
+      # Runs both the Playwright and Puppeteer suites (node --test).
+      - run: npm test
+        working-directory: tests/browser

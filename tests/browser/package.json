@@ -1,0 +1,16 @@
+{
+  "name": "athleto-browser-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright + Puppeteer browser suites for athleto-app-rs (drives the real server, degraded mode).",
+  "scripts": {
+    "test:pw": "node --test storefront.pw.test.mjs",
+    "test:pptr": "node --test storefront.pptr.test.mjs",
+    "test": "node --test storefront.pw.test.mjs storefront.pptr.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0",
+    "puppeteer": "^23.6.0"
+  }
+}
