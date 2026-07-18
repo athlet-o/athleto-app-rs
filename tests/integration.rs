@@ -434,6 +434,146 @@ async fn vendored_htmx_is_served_with_immutable_caching() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Commerce / payment / order-management handlers in degraded mode: every
+// SeaORM-backed query path must gracefully fall back to a "not configured"
+// notice or a fail-closed status instead of crashing when the pool is absent.
+
+#[tokio::test]
+async fn cart_page_renders_not_configured_notice_without_a_database() {
+    let state = test_state();
+    // The cart handler takes the `state.pool.is_none()` branch and renders the
+    // storefront shell with the not-configured notice rather than 500ing.
+    let response = get(&state, "/cart").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(
+        body.contains("is not configured on this deployment"),
+        "degraded cart page should carry the not-configured notice"
+    );
+    assert!(body.contains("cart database"));
+}
+
+#[tokio::test]
+async fn cart_hold_poll_returns_inactive_json_in_degraded_mode() {
+    let state = test_state();
+    // The htmx countdown poll is reachable anonymously; with no pool the
+    // SeaORM find_cart path is skipped and it reports an inactive hold.
+    let response = get(&state, "/cart/hold").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let ctype = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ctype.starts_with("application/json"), "got {ctype}");
+    let body = body_string(response).await;
+    assert!(body.contains("\"active\":false"));
+    assert!(body.contains("\"seconds_left\":0"));
+}
+
+#[tokio::test]
+async fn hosted_payment_landing_pages_redirect_in_degraded_mode() {
+    let state = test_state();
+    // /pay/success with no database can't reconcile an order, so it bounces to
+    // the order list rather than erroring; /pay/cancel always retries there.
+    let success = get(
+        &state,
+        "/pay/success?provider=stripe&order=00000000-0000-0000-0000-000000000000",
+    )
+    .await;
+    assert!(
+        success.status().is_redirection(),
+        "pay/success should redirect in degraded mode (got {})",
+        success.status()
+    );
+    assert_eq!(success.headers().get(header::LOCATION).unwrap(), "/orders");
+
+    let cancel = get(
+        &state,
+        "/pay/cancel?order=00000000-0000-0000-0000-000000000000",
+    )
+    .await;
+    assert!(cancel.status().is_redirection());
+    assert_eq!(
+        cancel.headers().get(header::LOCATION).unwrap(),
+        "/orders?paycancel=1"
+    );
+}
+
+#[tokio::test]
+async fn provider_webhooks_are_csrf_exempt_and_fail_closed_unconfigured() {
+    let state = test_state();
+    // Webhooks authenticate with signed raw payloads, not browser cookies, so
+    // they must NOT be blocked by the CSRF gate (no 403). With no provider
+    // configured they fail closed with 503 -- never process an order.
+    for path in ["/webhooks/stripe", "/webhooks/paypal", "/webhooks/square"] {
+        let request = Request::post(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{\"id\":\"evt_test\",\"type\":\"noop\"}"))
+            .unwrap();
+        let response = send(&state, request).await;
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{path} must be exempt from CSRF"
+        );
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path} must fail closed when the provider is unconfigured"
+        );
+        // Even the fail-closed path flows back through the security layer.
+        assert!(response
+            .headers()
+            .contains_key(header::CONTENT_SECURITY_POLICY));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CSRF edge cases: the double-submit gate must reject every partial state
+// (cookie-without-field, field-without-cookie) as firmly as a full mismatch.
+
+#[tokio::test]
+async fn csrf_cookie_without_matching_field_is_rejected() {
+    let state = test_state();
+    let token = mint_csrf(&state).await;
+    // Valid cookie present, but the form omits the hidden csrf_token field:
+    // there is nothing to compare against, so the request is forbidden.
+    let request = Request::post("/logout")
+        .header(header::COOKIE, format!("athleto_csrf={token}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("intent=logout"))
+        .unwrap();
+    let response = send(&state, request).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn csrf_field_without_a_cookie_is_rejected() {
+    let state = test_state();
+    // A form field with no backing cookie is the classic double-submit bypass
+    // attempt: the server minted no prior token, so `is_new_token` is true and
+    // verification fails closed even though field and (fresh) token could look
+    // alike. Send a plausible 64-hex value with no cookie at all.
+    let forged = "a".repeat(64);
+    let request = Request::post("/logout")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("csrf_token={forged}")))
+        .unwrap();
+    let response = send(&state, request).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    // A brand-new token cookie is issued so the reloaded form can succeed.
+    assert!(response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| value.starts_with("athleto_csrf=")));
+}
+
 #[test]
 fn host_allowlist_is_permissive_only_when_unset() {
     let permissive = Config::default();

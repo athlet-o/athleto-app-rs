@@ -482,6 +482,31 @@ mod tests {
     }
 
     #[test]
+    fn ws_oob_fragment_carries_swap_oob_and_countdown() {
+        // This is the exact payload pushed over /ws: an id-targeted OOB swap
+        // the htmx ws extension applies by id. It must carry hx-swap-oob and a
+        // fresh countdown, and must NOT be marked expired while time remains.
+        let fragment = hold_banner_div(600, true).into_string();
+        assert!(fragment.contains("id=\"hold-banner\""));
+        assert!(fragment.contains("hx-swap-oob=\"true\""));
+        assert!(fragment.contains("data-seconds=\"600\""));
+        assert!(fragment.contains("10m 0s"));
+        assert!(!fragment.contains("hold-banner expired"));
+    }
+
+    #[test]
+    fn non_oob_fragment_omits_swap_oob_and_marks_expiry() {
+        // The in-page render (oob=false) must not carry hx-swap-oob (it is not
+        // an out-of-band swap), and a zero countdown flips to the expired state
+        // with a clamped data-seconds of 0.
+        let fragment = hold_banner_div(0, false).into_string();
+        assert!(!fragment.contains("hx-swap-oob"));
+        assert!(fragment.contains("hold-banner expired"));
+        assert!(fragment.contains("data-seconds=\"0\""));
+        assert!(fragment.contains("expired - items may go back on sale"));
+    }
+
+    #[test]
     fn clamp_line_qty_bounds_hold_quantity() {
         assert_eq!(clamp_line_qty(1), 1);
         assert_eq!(clamp_line_qty(24), 24);
