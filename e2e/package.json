@@ -1,0 +1,17 @@
+{
+  "name": "athleto-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser E2E for athleto-app-rs, run under Playwright and Puppeteer via node:test",
+  "scripts": {
+    "test:playwright": "E2E_ENGINE=playwright node --test *.test.mjs",
+    "test:puppeteer": "E2E_ENGINE=puppeteer node --test *.test.mjs",
+    "test": "npm run test:playwright && npm run test:puppeteer",
+    "cluster-smoke": "node cluster/run-cluster.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.0",
+    "puppeteer": "^24.22.3"
+  }
+}
