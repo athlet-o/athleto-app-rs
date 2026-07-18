@@ -85,8 +85,11 @@ export async function loginBrowser(page, email) {
     `${BASE_URL}/auth/confirm?token_hash=${tokenHash}&type=magiclink&flow=${flow}`,
     { waitUntil: 'load' },
   );
-  // /auth/confirm 302s through the remembered-emails interstitial; wait for
-  // the site header to settle so callers can act immediately.
+  // /auth/confirm 302s to the remembered-emails interstitial, whose script
+  // forwards to the real destination. Wait for that client-side forward to
+  // complete (else a caller's navigation races it -> ERR_ABORTED), then for
+  // the header to settle.
+  await page.waitAwayFrom('/login/remembered', { timeout: 10000 });
   await page.waitFor('header.site-header', { timeout: 10000 });
 }
 
