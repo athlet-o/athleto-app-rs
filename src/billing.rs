@@ -36,9 +36,7 @@ fn request(
     method: reqwest::Method,
     path: &str,
 ) -> reqwest::RequestBuilder {
-    let mut builder = state
-        .http
-        .request(method, format!("{}{}", cfg.url, path));
+    let mut builder = state.http.request(method, format!("{}{}", cfg.url, path));
     if let Some(key) = &cfg.api_key {
         builder = builder.bearer_auth(key);
     }
@@ -49,7 +47,10 @@ fn request(
 /// within the tenant. Falls back to the latest login email.
 async fn user_email(state: &SharedState, user_id: Uuid) -> Option<String> {
     let pool = state.pool.as_ref()?;
-    db::latest_email_for_user(pool, user_id).await.ok().flatten()
+    db::latest_email_for_user(pool, user_id)
+        .await
+        .ok()
+        .flatten()
 }
 
 async fn ensure_customer(
@@ -202,8 +203,16 @@ async fn order_invoice_tx(
         &format!("AthletO order {order_id}"),
         &order_id.to_string(),
         &[
-            Posting { account_code: &ar_code, direction: "debit", amount_cents },
-            Posting { account_code: "revenue/athleto", direction: "credit", amount_cents },
+            Posting {
+                account_code: &ar_code,
+                direction: "debit",
+                amount_cents,
+            },
+            Posting {
+                account_code: "revenue/athleto",
+                direction: "credit",
+                amount_cents,
+            },
         ],
     )
     .await
@@ -240,8 +249,16 @@ async fn payment_tx(
         &description,
         provider_ref,
         &[
-            Posting { account_code: &cash_code, direction: "debit", amount_cents },
-            Posting { account_code: &ar_code, direction: "credit", amount_cents },
+            Posting {
+                account_code: &cash_code,
+                direction: "debit",
+                amount_cents,
+            },
+            Posting {
+                account_code: &ar_code,
+                direction: "credit",
+                amount_cents,
+            },
         ],
     )
     .await
@@ -252,13 +269,10 @@ async fn payment_tx(
 
 /// Post the AR invoice for an order (billable event). Safe to call more than
 /// once — the idempotency key collapses replays.
-pub fn spawn_order_invoice(
-    state: &SharedState,
-    user_id: Uuid,
-    order_id: Uuid,
-    amount_cents: i64,
-) {
-    let Some(cfg) = state.config.billing.clone() else { return };
+pub fn spawn_order_invoice(state: &SharedState, user_id: Uuid, order_id: Uuid, amount_cents: i64) {
+    let Some(cfg) = state.config.billing.clone() else {
+        return;
+    };
     let state = state.clone();
     tokio::spawn(async move {
         if let Err(err) = order_invoice_tx(&state, &cfg, user_id, order_id, amount_cents).await {
@@ -276,12 +290,22 @@ pub fn spawn_payment(
     provider_ref: &str,
     amount_cents: i64,
 ) {
-    let Some(cfg) = state.config.billing.clone() else { return };
+    let Some(cfg) = state.config.billing.clone() else {
+        return;
+    };
     let state = state.clone();
     let provider_ref = provider_ref.to_string();
     tokio::spawn(async move {
-        if let Err(err) =
-            payment_tx(&state, &cfg, user_id, provider, &provider_ref, amount_cents, order_id).await
+        if let Err(err) = payment_tx(
+            &state,
+            &cfg,
+            user_id,
+            provider,
+            &provider_ref,
+            amount_cents,
+            order_id,
+        )
+        .await
         {
             tracing::warn!(error = %err, "ledger payment posting failed");
         }
@@ -297,7 +321,9 @@ pub fn spawn_subscription_cycle(
     provider_ref: &str,
     amount_cents: i64,
 ) {
-    let Some(cfg) = state.config.billing.clone() else { return };
+    let Some(cfg) = state.config.billing.clone() else {
+        return;
+    };
     let state = state.clone();
     let provider_ref = provider_ref.to_string();
     tokio::spawn(async move {
@@ -318,12 +344,29 @@ pub fn spawn_subscription_cycle(
                 "AthletO subscription cycle",
                 &provider_ref,
                 &[
-                    Posting { account_code: &ar_code, direction: "debit", amount_cents },
-                    Posting { account_code: "revenue/athleto", direction: "credit", amount_cents },
+                    Posting {
+                        account_code: &ar_code,
+                        direction: "debit",
+                        amount_cents,
+                    },
+                    Posting {
+                        account_code: "revenue/athleto",
+                        direction: "credit",
+                        amount_cents,
+                    },
                 ],
             )
             .await?;
-            payment_tx(&state, &cfg, user_id, provider, &provider_ref, amount_cents, None).await
+            payment_tx(
+                &state,
+                &cfg,
+                user_id,
+                provider,
+                &provider_ref,
+                amount_cents,
+                None,
+            )
+            .await
         }
         .await;
         if let Err(err) = result {
@@ -433,8 +476,16 @@ mod tests {
             "AthletO order x",
             "x",
             &[
-                Posting { account_code: &ar, direction: "debit", amount_cents: 12345 },
-                Posting { account_code: "revenue/athleto", direction: "credit", amount_cents: 12345 },
+                Posting {
+                    account_code: &ar,
+                    direction: "debit",
+                    amount_cents: 12345,
+                },
+                Posting {
+                    account_code: "revenue/athleto",
+                    direction: "credit",
+                    amount_cents: 12345,
+                },
             ],
         );
         assert_eq!(imbalance(&invoice), 0);
@@ -447,8 +498,16 @@ mod tests {
             "AthletO payment",
             "pi_1",
             &[
-                Posting { account_code: "cash/stripe", direction: "debit", amount_cents: 12345 },
-                Posting { account_code: &ar, direction: "credit", amount_cents: 12345 },
+                Posting {
+                    account_code: "cash/stripe",
+                    direction: "debit",
+                    amount_cents: 12345,
+                },
+                Posting {
+                    account_code: &ar,
+                    direction: "credit",
+                    amount_cents: 12345,
+                },
             ],
         );
         assert_eq!(imbalance(&payment), 0);
@@ -480,7 +539,10 @@ mod tests {
         .expect("full payload");
         assert_eq!(full.outstanding_balance_minor, 4500);
         assert_eq!(full.credit_memos_minor + full.unallocated_cash_minor, 1250);
-        assert_eq!(full.last_payment.as_ref().map(|p| p.amount_minor), Some(8999));
+        assert_eq!(
+            full.last_payment.as_ref().map(|p| p.amount_minor),
+            Some(8999)
+        );
 
         let minimal: BillingSummary = serde_json::from_str(
             r#"{

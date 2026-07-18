@@ -54,11 +54,17 @@ async fn authenticate(
     let user_id = match db::api_key_user(pool, &hash_key(token)).await {
         Ok(Some(user_id)) => user_id,
         Ok(None) => {
-            return Err(error_response(StatusCode::UNAUTHORIZED, "unknown or revoked API key"))
+            return Err(error_response(
+                StatusCode::UNAUTHORIZED,
+                "unknown or revoked API key",
+            ))
         }
         Err(err) => {
             tracing::error!(error = %err, "api key lookup failed");
-            return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "lookup failed"));
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "lookup failed",
+            ));
         }
     };
     match db::get_profile(pool, user_id).await {
@@ -69,7 +75,10 @@ async fn authenticate(
         )),
         Err(err) => {
             tracing::error!(error = %err, "profile lookup failed");
-            Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "lookup failed"))
+            Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "lookup failed",
+            ))
         }
     }
 }
@@ -83,6 +92,9 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
             == 0
 }
 
+// The handler must short-circuit with a fully formed HTTP response. Boxing it
+// just to shrink the enum would allocate on each rejected request.
+#[allow(clippy::result_large_err)]
 fn operations_authorized(state: &SharedState, headers: &HeaderMap) -> Result<(), Response> {
     let Some(expected) = state.config.operations_api_key.as_deref() else {
         return Err(error_response(
@@ -155,15 +167,20 @@ pub async fn orders_list(State(state): State<SharedState>, headers: HeaderMap) -
     };
     let mut items_by_order: HashMap<Uuid, Vec<serde_json::Value>> = HashMap::new();
     for item in items {
-        items_by_order.entry(item.order_id).or_default().push(json!({
-            "name": item.name,
-            "subname": item.subname,
-            "format": item.format.label(),
-            "qty": item.qty,
-            "unit_price_cents": item.unit_price_cents,
-        }));
+        items_by_order
+            .entry(item.order_id)
+            .or_default()
+            .push(json!({
+                "name": item.name,
+                "subname": item.subname,
+                "format": item.format.label(),
+                "qty": item.qty,
+                "unit_price_cents": item.unit_price_cents,
+            }));
     }
-    let shipments = db::shipments_for_user(pool, user_id).await.unwrap_or_default();
+    let shipments = db::shipments_for_user(pool, user_id)
+        .await
+        .unwrap_or_default();
     let mut ship_by_order: HashMap<Uuid, db::Shipment> = HashMap::new();
     for row in &shipments {
         ship_by_order.insert(row.order_id, row.shipment());
@@ -366,7 +383,11 @@ pub async fn orders_create(
         request.frequency,
         db::OrderChannel::B2bApi,
         db::ShipMethod::Freight,
-        request.po_number.as_deref().map(str::trim).filter(|po| !po.is_empty()),
+        request
+            .po_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|po| !po.is_empty()),
         &lines,
         None,
     )
@@ -419,8 +440,7 @@ mod tests {
     // this same vector, or keys minted on /account would never authenticate
     // here. Both tests assert the identical constant.
     const VECTOR_INPUT: &str = "athk_test_vector_001";
-    const VECTOR_SHA256: &str =
-        "66adca3c7ae7f126ff03b7cc7daba157a1b9705447faaabd4fc1c2995c0d308a";
+    const VECTOR_SHA256: &str = "66adca3c7ae7f126ff03b7cc7daba157a1b9705447faaabd4fc1c2995c0d308a";
 
     #[test]
     fn hash_key_matches_shared_vector_and_is_deterministic() {

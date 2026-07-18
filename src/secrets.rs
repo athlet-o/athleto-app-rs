@@ -96,7 +96,10 @@ pub fn seal_envelope(key: &[u8; 32], plaintext: &str) -> Option<String> {
     let ciphertext = cipher.encrypt(&nonce, plaintext.as_bytes()).ok()?;
     let mut blob = nonce.to_vec();
     blob.extend_from_slice(&ciphertext);
-    Some(format!("v1:{}", base64::engine::general_purpose::STANDARD.encode(blob)))
+    Some(format!(
+        "v1:{}",
+        base64::engine::general_purpose::STANDARD.encode(blob)
+    ))
 }
 
 /// Unwrap a `v1:` envelope. Returns `None` on any format/auth failure — an
@@ -126,7 +129,9 @@ pub struct SecretSource {
 impl SecretSource {
     /// No overlay: pure env passthrough.
     pub fn env_only() -> Self {
-        Self { overlay: HashMap::new() }
+        Self {
+            overlay: HashMap::new(),
+        }
     }
 
     #[cfg(test)]
@@ -202,12 +207,18 @@ mod tests {
     fn overlay_fills_gaps_but_env_wins() {
         let mut map = HashMap::new();
         // A name that is never a real env var in tests.
-        map.insert("ATHLETO_TEST_ONLY_SENTINEL".to_string(), "from-kv".to_string());
+        map.insert(
+            "ATHLETO_TEST_ONLY_SENTINEL".to_string(),
+            "from-kv".to_string(),
+        );
         // PATH is guaranteed set in any test environment.
         map.insert("PATH".to_string(), "kv-should-never-win".to_string());
         let source = SecretSource::with_overlay(map);
 
-        assert_eq!(source.get("ATHLETO_TEST_ONLY_SENTINEL").as_deref(), Some("from-kv"));
+        assert_eq!(
+            source.get("ATHLETO_TEST_ONLY_SENTINEL").as_deref(),
+            Some("from-kv")
+        );
         let path = source.get("PATH").expect("PATH is set");
         assert_ne!(path, "kv-should-never-win");
         assert!(source.get("ATHLETO_TOTALLY_UNSET").is_none());
@@ -255,7 +266,10 @@ mod tests {
             "ATHLETO_SQUARE_ACCESS_TOKEN",
             "ATHLETO_BILLING_TENANT_ID",
         ] {
-            assert!(MANAGED_KEYS.contains(&name), "{name} missing from MANAGED_KEYS");
+            assert!(
+                MANAGED_KEYS.contains(&name),
+                "{name} missing from MANAGED_KEYS"
+            );
         }
         // And nothing dangerous snuck in.
         assert!(!MANAGED_KEYS.contains(&"PATH"));

@@ -7,13 +7,15 @@ deployment and Git history stay stable.
 The AthletO shop app serves performance gelatin protein cups. *Wobble hard.
 Recover clean.*
 
-A self-contained Rust web app on the "mash" stack:
+A self-contained Rust web app on the "MASH" stack:
 
 - **M**aud — server-rendered HTML (inline dark athletic theme, no asset pipeline)
-- **A**xum — HTTP server and routing
-- **S**QLx — runtime Postgres queries + embedded migrations (Supabase pooled Postgres)
-- Supabase — GoTrue email/password auth via its REST API
-- **H**TMX — add-to-cart / remove-from-cart fragment swaps
+- **A**xum — HTTP server and routing (plus a websocket endpoint pushing HTML fragments)
+- **S**eaORM — entity query builders over the Supabase pooled Postgres (raw SQL kept
+  for the transactional hold/checkout paths; SQLx remains underneath for the
+  embedded migrations)
+- Supabase — GoTrue passwordless (magic link + MFA) auth via its REST API
+- **H**TMX — add-to-cart / remove-from-cart fragment swaps (vendored, served same-origin)
 
 Products: **Athlet-O Starter** (20g gelatin protein, inulin fiber, vitamin C, electrolytes),
 **Recover-O**, and **Pre-Game-O** — each as a ready cup (just add water was already done for you)
@@ -27,6 +29,11 @@ and a powder packet (just add water).
 | `GET /product/{slug}` | Product detail |
 | `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase GoTrue auth; session tokens in HttpOnly Secure SameSite=Lax cookies |
 | `GET /cart`, `POST /cart/items`, `POST /cart/items/{id}/delete` | Cart pages + htmx fragments; keyed by Supabase user id or anonymous cart cookie |
+| `POST /checkout`, `GET /orders`, `GET /orders/{id}`, `POST /orders/{id}/reorder` | Checkout (one-time/recurring, ship method, B2B PO), order history with status/ETA/tracking + B2B filters, printable receipt, reorder |
+| `GET|POST /quick-order` | B2B case-quantity grid straight into the cart |
+| `GET|POST /api/v1/...` | ERP JSON API (hashed `athk_` keys): products, orders (list/create), `POST /api/v1/orders/{id}/fulfillment` records carrier + tracking (856-style) |
+| `GET /ws` | Authenticated websocket pushing HTML fragments (htmx ws extension, `hx-swap-oob`): live cart-hold countdown; `GET /cart/hold` polling remains the fallback |
+| `GET /static/...` | Vendored htmx + ws extension, served same-origin with immutable caching |
 | `GET /healthz` | Liveness/readiness — always `ok`, no dependencies |
 
 ## Environment
@@ -39,6 +46,7 @@ and a powder packet (just add water).
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
 | `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical browser origins for B2C and B2B redirects |
+| `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
 | `ATHLETO_OPERATIONS_API_KEY` | *(unset)* | Dedicated bearer credential for warehouse-only fulfillment writes |
 | `ATHLETO_STRIPE_SECRET_KEY` | *(unset)* | Stripe API secret key (`sk_test_…` / `sk_live_…`); enables card checkout, B2B ACH debit, and Net-30 hosted invoices |
 | `ATHLETO_STRIPE_PUBLISHABLE_KEY` | *(unset)* | Stripe publishable key (`pk_…`); reserved for client-side elements — hosted checkout doesn't need it server-side |
@@ -129,11 +137,10 @@ inserts the 3 products x 2 formats.
 To run them manually instead: `cargo install sqlx-cli --no-default-features --features rustls,postgres`
 then `sqlx migrate run`.
 
-All queries are runtime `sqlx::query`/`query_as` calls (no compile-time `query!`
-macros), so the crate builds without a live `DATABASE_URL`. **New data access is
-written with SeaORM** (`src/entities.rs`, over the same pool via
-`AppState::orm`); the legacy sqlx queries in `db.rs` are being ported
-incrementally.
+Application queries go through SeaORM (`src/entities/` + `src/db.rs`); the
+hold-claim and checkout transactions stay hand-written SQL executed via
+`sea_orm::Statement` to preserve their locking semantics. Everything runs at
+runtime against the pool, so the crate builds without a live `DATABASE_URL`.
 
 ### Go-forward: declarative migrations (dpm)
 

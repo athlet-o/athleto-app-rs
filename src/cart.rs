@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::auth::{self, Biz, MaybeUser};
 use crate::db::{self, CartLine, CartOwner, CustomerProfile, HoldOutcome};
+use crate::security;
 use crate::{orders, pages, AppError, SharedState};
 
 pub const CART_COOKIE: &str = "athleto_cart";
@@ -107,9 +108,14 @@ fn cart_contents(lines: &[CartLine]) -> Markup {
     }
 }
 
-fn hold_banner(seconds_left: i64) -> Markup {
+/// The countdown banner itself. With `oob` set the fragment carries
+/// `hx-swap-oob` so the htmx ws extension swaps it in place by id when
+/// pushed over /ws.
+pub fn hold_banner_div(seconds_left: i64, oob: bool) -> Markup {
     html! {
-        div #hold-banner .hold-banner .expired[seconds_left <= 0] data-seconds=(seconds_left.max(0)) {
+        div #hold-banner .hold-banner .expired[seconds_left <= 0]
+            data-seconds=(seconds_left.max(0))
+            hx-swap-oob=[oob.then_some("true")] {
             span { "Items reserved for you: " }
             strong #hold-left {
                 @if seconds_left > 0 {
@@ -120,7 +126,13 @@ fn hold_banner(seconds_left: i64) -> Markup {
             }
             span .muted-inline { "(holds last " (db::HOLD_MINUTES) " minutes from your last cart change)" }
         }
-        script { (PreEscaped(pages::CART_HOLD_JS)) }
+    }
+}
+
+fn hold_banner(seconds_left: i64) -> Markup {
+    html! {
+        (hold_banner_div(seconds_left, false))
+        script nonce=(crate::security::csp_nonce()) { (PreEscaped(pages::CART_HOLD_JS)) }
     }
 }
 
@@ -163,7 +175,15 @@ fn cart_page_markup(
                     }
                 }
                 @if let Some(seconds) = hold_seconds {
-                    @if !lines.is_empty() { (hold_banner(seconds)) }
+                    @if !lines.is_empty() {
+                        // Signed-in carts get live pushes over /ws (the
+                        // banner script keeps polling as the fallback).
+                        @if user.as_ref().is_some() {
+                            div hx-ext="ws" ws-connect="/ws" { (hold_banner(seconds)) }
+                        } @else {
+                            (hold_banner(seconds))
+                        }
+                    }
                 }
                 (cart_contents(lines))
                 @if user.as_ref().is_some() && !lines.is_empty() {
@@ -229,8 +249,16 @@ pub async fn cart_page(
         Some(auth_user) => auth::load_profile(&state, auth_user.id).await,
         None => None,
     };
-    Ok(cart_page_markup(&state.config, &user, biz, profile.as_ref(), &lines, hold_seconds, &params)
-        .into_response())
+    Ok(cart_page_markup(
+        &state.config,
+        &user,
+        biz,
+        profile.as_ref(),
+        &lines,
+        hold_seconds,
+        &params,
+    )
+    .into_response())
 }
 
 /// GET /cart/hold -- lease-status poll for the countdown banner.
@@ -266,6 +294,17 @@ fn default_qty() -> i32 {
     1
 }
 
+/// Upper bound on a single cart line's quantity. Well above any real
+/// storefront or bulk B2B line (10 cases of 24), but low enough that one
+/// request cannot reserve a product's whole on-hand stock.
+pub(crate) const MAX_QTY_PER_LINE: i32 = 240;
+
+/// Clamp a client-supplied quantity into `[1, MAX_QTY_PER_LINE]`, folding zero,
+/// negative, and absurdly large values into the allowed range.
+pub(crate) fn clamp_line_qty(qty: i32) -> i32 {
+    qty.clamp(1, MAX_QTY_PER_LINE)
+}
+
 /// POST /cart/items -- add an item and claim/refresh its stock hold. Returns
 /// an htmx fragment for hx-post requests, or redirects to /cart otherwise.
 pub async fn add_item(
@@ -286,6 +325,31 @@ pub async fn add_item(
         return Ok(cart_not_configured(&user, biz).into_response());
     };
 
+    // This endpoint reserves stock holds and is reachable anonymously, so an
+    // unthrottled script could mass-reserve inventory (hold everything
+    // "sold out" for HOLD_MINUTES). Throttle per client IP; the window is
+    // generous enough that real add-to-cart bursts are unaffected.
+    let ip = security::client_ip(&headers);
+    if !state.cart_limiter.check(
+        &format!("cart:{ip}"),
+        40,
+        std::time::Duration::from_secs(60),
+    ) {
+        let message = "Too many cart updates -- slow down for a moment and try again.";
+        if is_htmx(&headers) {
+            return Ok((
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                html! { span .added { (message) } },
+            )
+                .into_response());
+        }
+        return Ok((
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Redirect::to("/cart"),
+        )
+            .into_response());
+    }
+
     // Reuse the existing owner (user id or anon cookie), or mint a new
     // anonymous cart cookie on first add.
     let (owner, jar) = match cart_owner(&user, &jar) {
@@ -297,7 +361,10 @@ pub async fn add_item(
     };
 
     let cart_id = db::find_or_create_cart(pool, &owner).await?;
-    let requested = input.qty.max(1);
+    // Clamp the per-line quantity: a single line above this is never a real
+    // storefront order, and the ceiling stops one request from reserving a
+    // product's entire on-hand stock in one shot.
+    let requested = clamp_line_qty(input.qty);
     let already_in_cart = db::cart_lines(pool, cart_id)
         .await?
         .iter()
@@ -326,6 +393,8 @@ pub async fn add_item(
 
     db::add_cart_item(pool, cart_id, input.product_id, requested).await?;
     let count = db::cart_count(pool, cart_id).await?;
+    // Nudge any open /ws connections to push the refreshed hold countdown.
+    let _ = state.cart_events.send(cart_id);
 
     if is_htmx(&headers) {
         let fragment = html! {
@@ -369,6 +438,7 @@ pub async fn delete_item(
     if let Some(product_id) = removed_product {
         db::release_hold(pool, cart_id, product_id).await?;
     }
+    let _ = state.cart_events.send(cart_id);
 
     if is_htmx(&headers) {
         let lines = db::cart_lines(pool, cart_id).await?;
@@ -409,5 +479,18 @@ mod tests {
 
         let expired = hold_banner(0).into_string();
         assert!(expired.contains("hold-banner expired"));
+    }
+
+    #[test]
+    fn clamp_line_qty_bounds_hold_quantity() {
+        assert_eq!(clamp_line_qty(1), 1);
+        assert_eq!(clamp_line_qty(24), 24);
+        assert_eq!(clamp_line_qty(MAX_QTY_PER_LINE), MAX_QTY_PER_LINE);
+        // Zero/negative fold up to 1; a stock-DoS-sized request folds down to
+        // the ceiling so one add can never reserve a whole product's inventory.
+        assert_eq!(clamp_line_qty(0), 1);
+        assert_eq!(clamp_line_qty(-5), 1);
+        assert_eq!(clamp_line_qty(1_000_000), MAX_QTY_PER_LINE);
+        assert_eq!(clamp_line_qty(i32::MAX), MAX_QTY_PER_LINE);
     }
 }

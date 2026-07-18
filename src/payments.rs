@@ -135,7 +135,11 @@ fn decimal_to_cents(value: &str) -> Option<i64> {
         Some((whole, frac)) => (whole, frac),
         None => (value, ""),
     };
-    let whole: i64 = if whole.is_empty() { 0 } else { whole.parse().ok()? };
+    let whole: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
     let frac: i64 = match frac.len() {
         0 => 0,
         1 => frac.parse::<i64>().ok()? * 10,
@@ -204,6 +208,10 @@ async fn provider_error(response: reqwest::Response) -> PaymentError {
 /// Create the provider-side checkout artifact for an already-placed order and
 /// say where to send the customer. The order keeps `payment_status =
 /// pending` until a verified return or webhook settles it.
+// The values are independently security-relevant (owner, canonical return
+// origin, approved-business state, and PO), so a catch-all parameter object
+// would make provider-boundary reviews less clear.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_payment(
     state: &SharedState,
     base_url: &str,
@@ -214,16 +222,18 @@ pub async fn start_payment(
     is_b2b: bool,
     po_number: Option<&str>,
 ) -> Result<StartOutcome, PaymentError> {
-    let (Some(pool), Some(orm)) = (&state.pool, &state.orm) else {
+    let Some(orm) = &state.pool else {
         return Ok(StartOutcome::NotConfigured);
     };
     let Some(facts) = db::order_payment_facts(orm, order_id).await? else {
         return Err(PaymentError::Provider("order not found".into()));
     };
     if facts.user_id != user_id {
-        return Err(PaymentError::Provider("order does not belong to the current customer".into()));
+        return Err(PaymentError::Provider(
+            "order does not belong to the current customer".into(),
+        ));
     }
-    let items = db::order_items(pool, order_id).await?;
+    let items = db::order_items(orm, order_id).await?;
     let shipping_cents = facts.total_cents
         - items
             .iter()
@@ -236,7 +246,14 @@ pub async fn start_payment(
                 return Ok(StartOutcome::NotConfigured);
             };
             let url = stripe_checkout_session(
-                state, cfg, base_url, &facts, &items, shipping_cents, email, is_b2b,
+                state,
+                cfg,
+                base_url,
+                &facts,
+                &items,
+                shipping_cents,
+                email,
+                is_b2b,
             )
             .await?;
             Ok(StartOutcome::Redirect(url))
@@ -257,10 +274,9 @@ pub async fn start_payment(
             let Some(cfg) = &state.config.square else {
                 return Ok(StartOutcome::NotConfigured);
             };
-            let url = square_payment_link(
-                state, cfg, base_url, &facts, &items, shipping_cents, email,
-            )
-            .await?;
+            let url =
+                square_payment_link(state, cfg, base_url, &facts, &items, shipping_cents, email)
+                    .await?;
             Ok(StartOutcome::Redirect(url))
         }
         PayMethod::Invoice => {
@@ -269,7 +285,11 @@ pub async fn start_payment(
                     "Net-30 invoices require an approved business account".into(),
                 ));
             }
-            if po_number.map(str::trim).filter(|po| !po.is_empty()).is_none() {
+            if po_number
+                .map(str::trim)
+                .filter(|po| !po.is_empty())
+                .is_none()
+            {
                 return Err(PaymentError::Provider(
                     "Net-30 invoices require a purchase-order number".into(),
                 ));
@@ -292,6 +312,9 @@ pub async fn start_payment(
 
 const STRIPE_API: &str = "https://api.stripe.com";
 
+// Keep the payment boundary inputs explicit: they map directly to the hosted
+// Checkout payload and make accidental amount/owner substitution reviewable.
+#[allow(clippy::too_many_arguments)]
 async fn stripe_checkout_session(
     state: &SharedState,
     cfg: &StripeConfig,
@@ -310,7 +333,12 @@ async fn stripe_checkout_session(
     let mut form: Vec<(String, String)> = vec![
         (
             "mode".into(),
-            if recurring.is_some() { "subscription" } else { "payment" }.into(),
+            if recurring.is_some() {
+                "subscription"
+            } else {
+                "payment"
+            }
+            .into(),
         ),
         ("client_reference_id".into(), facts.id.to_string()),
         (
@@ -345,32 +373,33 @@ async fn stripe_checkout_session(
     }
 
     let mut line = 0usize;
-    let mut push_line = |form: &mut Vec<(String, String)>, name: &str, unit_cents: i64, qty: i64| {
-        form.push((format!("line_items[{line}][quantity]"), qty.to_string()));
-        form.push((
-            format!("line_items[{line}][price_data][currency]"),
-            "usd".into(),
-        ));
-        form.push((
-            format!("line_items[{line}][price_data][unit_amount]"),
-            unit_cents.to_string(),
-        ));
-        form.push((
-            format!("line_items[{line}][price_data][product_data][name]"),
-            name.into(),
-        ));
-        if let Some((interval, count)) = recurring {
+    let mut push_line =
+        |form: &mut Vec<(String, String)>, name: &str, unit_cents: i64, qty: i64| {
+            form.push((format!("line_items[{line}][quantity]"), qty.to_string()));
             form.push((
-                format!("line_items[{line}][price_data][recurring][interval]"),
-                interval.into(),
+                format!("line_items[{line}][price_data][currency]"),
+                "usd".into(),
             ));
             form.push((
-                format!("line_items[{line}][price_data][recurring][interval_count]"),
-                count.to_string(),
+                format!("line_items[{line}][price_data][unit_amount]"),
+                unit_cents.to_string(),
             ));
-        }
-        line += 1;
-    };
+            form.push((
+                format!("line_items[{line}][price_data][product_data][name]"),
+                name.into(),
+            ));
+            if let Some((interval, count)) = recurring {
+                form.push((
+                    format!("line_items[{line}][price_data][recurring][interval]"),
+                    interval.into(),
+                ));
+                form.push((
+                    format!("line_items[{line}][price_data][recurring][interval_count]"),
+                    count.to_string(),
+                ));
+            }
+            line += 1;
+        };
     for item in items {
         push_line(
             &mut form,
@@ -400,9 +429,15 @@ async fn stripe_checkout_session(
         .ok_or_else(|| PaymentError::Provider("checkout session has no url".into()))?
         .to_string();
 
-    if let Some(orm) = &state.orm {
-        db::set_order_payment(orm, facts.id, PaymentProvider::Stripe, &session_id, PaymentStatus::Pending)
-            .await?;
+    if let Some(orm) = &state.pool {
+        db::set_order_payment(
+            orm,
+            facts.id,
+            PaymentProvider::Stripe,
+            &session_id,
+            PaymentStatus::Pending,
+        )
+        .await?;
     }
     Ok(url)
 }
@@ -528,7 +563,7 @@ async fn stripe_net30_invoice(
         }
     }
 
-    if let Some(orm) = &state.orm {
+    if let Some(orm) = &state.pool {
         db::set_order_payment(
             orm,
             facts.id,
@@ -567,7 +602,9 @@ fn stripe_signature_valid(secret: &str, header: &str, body: &[u8], now: i64) -> 
             _ => {}
         }
     }
-    let Some(timestamp) = timestamp else { return false };
+    let Some(timestamp) = timestamp else {
+        return false;
+    };
     // Freshness first: a valid HMAC over a stale timestamp is a replay.
     match timestamp.parse::<i64>() {
         Ok(signed_at) if (now - signed_at).abs() <= WEBHOOK_TOLERANCE_SECS => {}
@@ -599,7 +636,9 @@ pub async fn stripe_webhook(
     // signing secret means no webhook processing (return-URL verification
     // still settles payments in the meantime).
     let Some(secret) = &cfg.webhook_secret else {
-        tracing::warn!("stripe webhook received but ATHLETO_STRIPE_WEBHOOK_SECRET is unset; rejecting");
+        tracing::warn!(
+            "stripe webhook received but ATHLETO_STRIPE_WEBHOOK_SECRET is unset; rejecting"
+        );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let header = headers
@@ -609,7 +648,7 @@ pub async fn stripe_webhook(
     if !stripe_signature_valid(secret, header, &body, now_unix()) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let Some(orm) = state.orm.clone() else {
+    let Some(orm) = state.pool.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(event) = serde_json::from_slice::<Value>(&body) else {
@@ -633,7 +672,9 @@ pub async fn stripe_webhook(
                 let order_id = object["metadata"]["order_id"]
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok());
-                let Some(order_id) = order_id else { return Ok(()) };
+                let Some(order_id) = order_id else {
+                    return Ok(());
+                };
                 if let Some(subscription) = object["subscription"].as_str() {
                     if let Ok(Some(facts)) = db::order_payment_facts(&orm, order_id).await {
                         if let Some(freq) = facts.frequency {
@@ -657,8 +698,16 @@ pub async fn stripe_webhook(
                         .or_else(|| object["id"].as_str())
                         .unwrap_or_default();
                     let charged = charged_minor(&object["amount_total"], &object["currency"]);
-                    settle_order(&state, &orm, order_id, PaymentProvider::Stripe, reference, PaymentKind::Charge, charged)
-                        .await?;
+                    settle_order(
+                        &state,
+                        &orm,
+                        order_id,
+                        PaymentProvider::Stripe,
+                        reference,
+                        PaymentKind::Charge,
+                        charged,
+                    )
+                    .await?;
                 } else {
                     // ACH debit initiated; settles via async_payment_succeeded.
                     db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
@@ -681,8 +730,16 @@ pub async fn stripe_webhook(
                 {
                     // Our hosted Net-30 invoice.
                     let charged = charged_minor(&object["amount_paid"], &object["currency"]);
-                    settle_order(&state, &orm, order_id, PaymentProvider::Invoice, invoice_id, PaymentKind::Charge, charged)
-                        .await?;
+                    settle_order(
+                        &state,
+                        &orm,
+                        order_id,
+                        PaymentProvider::Invoice,
+                        invoice_id,
+                        PaymentKind::Charge,
+                        charged,
+                    )
+                    .await?;
                 } else if let Some(subscription) = object["subscription"].as_str() {
                     record_subscription_cycle(
                         &state,
@@ -735,10 +792,7 @@ pub async fn stripe_webhook(
 // ---------------------------------------------------------------------------
 // PayPal.
 
-async fn paypal_token(
-    state: &SharedState,
-    cfg: &PayPalConfig,
-) -> Result<String, PaymentError> {
+async fn paypal_token(state: &SharedState, cfg: &PayPalConfig) -> Result<String, PaymentError> {
     let response = state
         .http
         .post(format!("{}/v1/oauth2/token", cfg.api_base))
@@ -800,9 +854,15 @@ async fn paypal_order(
     }
     let order: Value = response.json().await?;
     let paypal_order_id = order["id"].as_str().unwrap_or_default();
-    if let Some(orm) = &state.orm {
-        db::set_order_payment(orm, facts.id, PaymentProvider::Paypal, paypal_order_id, PaymentStatus::Pending)
-            .await?;
+    if let Some(orm) = &state.pool {
+        db::set_order_payment(
+            orm,
+            facts.id,
+            PaymentProvider::Paypal,
+            paypal_order_id,
+            PaymentStatus::Pending,
+        )
+        .await?;
     }
     paypal_approval_link(&order)
         .ok_or_else(|| PaymentError::Provider("paypal order had no approval link".into()))
@@ -880,9 +940,15 @@ async fn paypal_subscription(
     let subscription: Value = response.json().await?;
     let subscription_id = subscription["id"].as_str().unwrap_or_default();
 
-    if let Some(orm) = &state.orm {
-        db::set_order_payment(orm, facts.id, PaymentProvider::Paypal, subscription_id, PaymentStatus::Pending)
-            .await?;
+    if let Some(orm) = &state.pool {
+        db::set_order_payment(
+            orm,
+            facts.id,
+            PaymentProvider::Paypal,
+            subscription_id,
+            PaymentStatus::Pending,
+        )
+        .await?;
         db::upsert_subscription(
             orm,
             facts.user_id,
@@ -907,7 +973,7 @@ pub async fn paypal_webhook(
     let Some(cfg) = &state.config.paypal else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Some(orm) = state.orm.clone() else {
+    let Some(orm) = state.pool.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(event) = serde_json::from_slice::<Value>(&body) else {
@@ -981,10 +1047,20 @@ pub async fn paypal_webhook(
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok())
                 {
-                    let charged =
-                        charged_decimal(&resource["amount"]["value"], &resource["amount"]["currency_code"]);
-                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge, charged)
-                        .await?;
+                    let charged = charged_decimal(
+                        &resource["amount"]["value"],
+                        &resource["amount"]["currency_code"],
+                    );
+                    settle_order(
+                        &state,
+                        &orm,
+                        order_id,
+                        PaymentProvider::Paypal,
+                        capture_id,
+                        PaymentKind::Charge,
+                        charged,
+                    )
+                    .await?;
                 }
             }
             "PAYMENT.SALE.COMPLETED" => {
@@ -996,33 +1072,63 @@ pub async fn paypal_webhook(
                     .and_then(decimal_to_cents)
                     .unwrap_or_default();
                 if let Some(subscription) = resource["billing_agreement_id"].as_str() {
-                    record_subscription_cycle(&state, &orm, PaymentProvider::Paypal, subscription, sale_id, amount)
-                        .await?;
+                    record_subscription_cycle(
+                        &state,
+                        &orm,
+                        PaymentProvider::Paypal,
+                        subscription,
+                        sale_id,
+                        amount,
+                    )
+                    .await?;
                 }
             }
             "BILLING.SUBSCRIPTION.ACTIVATED" => {
                 let subscription = resource["id"].as_str().unwrap_or_default();
-                db::set_subscription_status(&orm, PaymentProvider::Paypal, subscription, SubscriptionStatus::Active)
-                    .await?;
+                db::set_subscription_status(
+                    &orm,
+                    PaymentProvider::Paypal,
+                    subscription,
+                    SubscriptionStatus::Active,
+                )
+                .await?;
                 if let Some(order_id) = resource["custom_id"]
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok())
                 {
                     // Activation itself carries no charge amount; the first
                     // cycle's PAYMENT.SALE.COMPLETED verifies the money.
-                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, subscription, PaymentKind::Charge, None)
-                        .await?;
+                    settle_order(
+                        &state,
+                        &orm,
+                        order_id,
+                        PaymentProvider::Paypal,
+                        subscription,
+                        PaymentKind::Charge,
+                        None,
+                    )
+                    .await?;
                 }
             }
             "BILLING.SUBSCRIPTION.CANCELLED" | "BILLING.SUBSCRIPTION.SUSPENDED" => {
                 let subscription = resource["id"].as_str().unwrap_or_default();
-                db::set_subscription_status(&orm, PaymentProvider::Paypal, subscription, SubscriptionStatus::Cancelled)
-                    .await?;
+                db::set_subscription_status(
+                    &orm,
+                    PaymentProvider::Paypal,
+                    subscription,
+                    SubscriptionStatus::Cancelled,
+                )
+                .await?;
             }
             "BILLING.SUBSCRIPTION.PAYMENT.FAILED" => {
                 let subscription = resource["id"].as_str().unwrap_or_default();
-                db::set_subscription_status(&orm, PaymentProvider::Paypal, subscription, SubscriptionStatus::PastDue)
-                    .await?;
+                db::set_subscription_status(
+                    &orm,
+                    PaymentProvider::Paypal,
+                    subscription,
+                    SubscriptionStatus::PastDue,
+                )
+                .await?;
             }
             _ => {}
         }
@@ -1112,9 +1218,15 @@ async fn square_payment_link(
         .ok_or_else(|| PaymentError::Provider("square payment link had no url".into()))?
         .to_string();
 
-    if let Some(orm) = &state.orm {
-        db::set_order_payment(orm, facts.id, PaymentProvider::Square, square_order_id, PaymentStatus::Pending)
-            .await?;
+    if let Some(orm) = &state.pool {
+        db::set_order_payment(
+            orm,
+            facts.id,
+            PaymentProvider::Square,
+            square_order_id,
+            PaymentStatus::Pending,
+        )
+        .await?;
     }
     Ok(url)
 }
@@ -1226,7 +1338,7 @@ pub async fn square_webhook(
             return StatusCode::BAD_REQUEST.into_response();
         }
     }
-    let Some(orm) = state.orm.clone() else {
+    let Some(orm) = state.pool.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Ok(event) = serde_json::from_slice::<Value>(&body) else {
@@ -1255,14 +1367,23 @@ pub async fn square_webhook(
                     return Ok(());
                 };
                 if let Some(order_id) =
-                    db::find_order_by_payment_ref(&orm, PaymentProvider::Square, square_order).await?
+                    db::find_order_by_payment_ref(&orm, PaymentProvider::Square, square_order)
+                        .await?
                 {
                     let charged = charged_minor(
                         &payment["amount_money"]["amount"],
                         &payment["amount_money"]["currency"],
                     );
-                    settle_order(&state, &orm, order_id, PaymentProvider::Square, payment_id, PaymentKind::Charge, charged)
-                        .await?;
+                    settle_order(
+                        &state,
+                        &orm,
+                        order_id,
+                        PaymentProvider::Square,
+                        payment_id,
+                        PaymentKind::Charge,
+                        charged,
+                    )
+                    .await?;
                 }
             }
             "subscription.created" | "subscription.updated" => {
@@ -1299,8 +1420,13 @@ pub async fn square_webhook(
                         }
                     }
                 } else {
-                    db::set_subscription_status(&orm, PaymentProvider::Square, subscription_id, status)
-                        .await?;
+                    db::set_subscription_status(
+                        &orm,
+                        PaymentProvider::Square,
+                        subscription_id,
+                        status,
+                    )
+                    .await?;
                 }
             }
             "invoice.payment_made" => {
@@ -1310,8 +1436,15 @@ pub async fn square_webhook(
                     .as_i64()
                     .unwrap_or_default();
                 if let Some(subscription) = invoice["subscription_id"].as_str() {
-                    record_subscription_cycle(&state, &orm, PaymentProvider::Square, subscription, invoice_id, amount)
-                        .await?;
+                    record_subscription_cycle(
+                        &state,
+                        &orm,
+                        PaymentProvider::Square,
+                        subscription,
+                        invoice_id,
+                        amount,
+                    )
+                    .await?;
                 }
             }
             _ => {}
@@ -1438,7 +1571,8 @@ async fn record_subscription_cycle(
     else {
         return Ok(());
     };
-    db::set_subscription_status(orm, provider, subscription_ref, SubscriptionStatus::Active).await?;
+    db::set_subscription_status(orm, provider, subscription_ref, SubscriptionStatus::Active)
+        .await?;
     let amount = if amount_cents > 0 {
         amount_cents
     } else if let Some(order_id) = order_id {
@@ -1488,7 +1622,7 @@ pub async fn pay_success(
     State(state): State<SharedState>,
     Query(params): Query<ReturnParams>,
 ) -> Response {
-    let Some(orm) = state.orm.clone() else {
+    let Some(orm) = state.pool.clone() else {
         return Redirect::to("/orders").into_response();
     };
     let order_id = params.order;
@@ -1536,13 +1670,22 @@ pub async fn pay_success(
                             .or_else(|| session["subscription"].as_str())
                             .unwrap_or(session_id);
                         let charged = charged_minor(&session["amount_total"], &session["currency"]);
-                        settle_order(&state, &orm, order_id, PaymentProvider::Stripe, reference, PaymentKind::Charge, charged)
-                            .await?;
+                        settle_order(
+                            &state,
+                            &orm,
+                            order_id,
+                            PaymentProvider::Stripe,
+                            reference,
+                            PaymentKind::Charge,
+                            charged,
+                        )
+                        .await?;
                         Ok(PaymentStatus::Paid)
                     }
                     _ => {
                         // ACH debit still clearing.
-                        db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
+                        db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing)
+                            .await?;
                         Ok(PaymentStatus::Processing)
                     }
                 }
@@ -1555,16 +1698,30 @@ pub async fn pay_success(
                     let token = paypal_token(&state, cfg).await?;
                     let subscription: Value = state
                         .http
-                        .get(format!("{}/v1/billing/subscriptions/{subscription_id}", cfg.api_base))
+                        .get(format!(
+                            "{}/v1/billing/subscriptions/{subscription_id}",
+                            cfg.api_base
+                        ))
                         .bearer_auth(&token)
                         .send()
                         .await?
                         .json()
                         .await?;
-                    if matches!(subscription["status"].as_str(), Some("ACTIVE") | Some("APPROVED")) {
+                    if matches!(
+                        subscription["status"].as_str(),
+                        Some("ACTIVE") | Some("APPROVED")
+                    ) {
                         // Approval carries no charge amount; cycle webhooks verify money.
-                        settle_order(&state, &orm, order_id, PaymentProvider::Paypal, subscription_id, PaymentKind::Charge, None)
-                            .await?;
+                        settle_order(
+                            &state,
+                            &orm,
+                            order_id,
+                            PaymentProvider::Paypal,
+                            subscription_id,
+                            PaymentKind::Charge,
+                            None,
+                        )
+                        .await?;
                         return Ok(PaymentStatus::Paid);
                     }
                     db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
@@ -1576,7 +1733,10 @@ pub async fn pay_success(
                 let token = paypal_token(&state, cfg).await?;
                 let response = state
                     .http
-                    .post(format!("{}/v2/checkout/orders/{paypal_order}/capture", cfg.api_base))
+                    .post(format!(
+                        "{}/v2/checkout/orders/{paypal_order}/capture",
+                        cfg.api_base
+                    ))
                     .bearer_auth(&token)
                     .header("content-type", "application/json")
                     .send()
@@ -1585,10 +1745,20 @@ pub async fn pay_success(
                 if capture["status"].as_str() == Some("COMPLETED") {
                     let capture = &capture["purchase_units"][0]["payments"]["captures"][0];
                     let capture_id = capture["id"].as_str().unwrap_or(paypal_order);
-                    let charged =
-                        charged_decimal(&capture["amount"]["value"], &capture["amount"]["currency_code"]);
-                    settle_order(&state, &orm, order_id, PaymentProvider::Paypal, capture_id, PaymentKind::Charge, charged)
-                        .await?;
+                    let charged = charged_decimal(
+                        &capture["amount"]["value"],
+                        &capture["amount"]["currency_code"],
+                    );
+                    settle_order(
+                        &state,
+                        &orm,
+                        order_id,
+                        PaymentProvider::Paypal,
+                        capture_id,
+                        PaymentKind::Charge,
+                        charged,
+                    )
+                    .await?;
                     Ok(PaymentStatus::Paid)
                 } else {
                     db::set_order_payment_status(&orm, order_id, PaymentStatus::Processing).await?;
@@ -1620,8 +1790,16 @@ pub async fn pay_success(
                         &order["order"]["total_money"]["amount"],
                         &order["order"]["total_money"]["currency"],
                     );
-                    settle_order(&state, &orm, order_id, PaymentProvider::Square, reference, PaymentKind::Charge, charged)
-                        .await?;
+                    settle_order(
+                        &state,
+                        &orm,
+                        order_id,
+                        PaymentProvider::Square,
+                        reference,
+                        PaymentKind::Charge,
+                        charged,
+                    )
+                    .await?;
                     Ok(PaymentStatus::Paid)
                 } else {
                     // The webhook will finish this once Square marks it paid.
@@ -1727,7 +1905,10 @@ mod tests {
             Some("https://paypal.com/act")
         );
 
-        assert_eq!(paypal_approval_link(&serde_json::json!({"links": []})), None);
+        assert_eq!(
+            paypal_approval_link(&serde_json::json!({"links": []})),
+            None
+        );
         assert_eq!(paypal_approval_link(&serde_json::json!({})), None);
     }
 
@@ -1743,7 +1924,10 @@ mod tests {
         };
         assert_eq!(item_display_name(&branded), "AthletO recover (ready cup)");
 
-        let plain = db::OrderItemRow { subname: None, ..branded };
+        let plain = db::OrderItemRow {
+            subname: None,
+            ..branded
+        };
         assert_eq!(item_display_name(&plain), "AthletO (ready cup)");
     }
 
@@ -1770,7 +1954,12 @@ mod tests {
         assert!(!stripe_signature_valid(secret, "", body, now));
         assert!(!stripe_signature_valid(secret, "t=,v1=", body, now));
         // Wrong-length signature can't pass the constant-time compare.
-        assert!(!stripe_signature_valid(secret, "t=1700000000,v1=abcd", body, now));
+        assert!(!stripe_signature_valid(
+            secret,
+            "t=1700000000,v1=abcd",
+            body,
+            now
+        ));
     }
 
     #[test]
@@ -1799,7 +1988,12 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         // Signed for one URL must not verify for another (Square hashes the
         // notification URL into the signature).
-        assert!(!square_signature_valid(key, "https://biz.athleto.store/webhooks/square", &signature, body));
+        assert!(!square_signature_valid(
+            key,
+            "https://biz.athleto.store/webhooks/square",
+            &signature,
+            body
+        ));
         assert!(!square_signature_valid("other_key", url, &signature, body));
         assert!(!square_signature_valid(key, url, "", body));
     }
@@ -1833,23 +2027,47 @@ mod tests {
         let signed_at = 1_700_000_000;
         let header = stripe_header(secret, body, signed_at);
         // Within tolerance: fine.
-        assert!(stripe_signature_valid(secret, &header, body, signed_at + WEBHOOK_TOLERANCE_SECS));
+        assert!(stripe_signature_valid(
+            secret,
+            &header,
+            body,
+            signed_at + WEBHOOK_TOLERANCE_SECS
+        ));
         // Replayed later than tolerance: rejected.
-        assert!(!stripe_signature_valid(secret, &header, body, signed_at + WEBHOOK_TOLERANCE_SECS + 1));
+        assert!(!stripe_signature_valid(
+            secret,
+            &header,
+            body,
+            signed_at + WEBHOOK_TOLERANCE_SECS + 1
+        ));
         // Timestamp far in the future (skew/forgery): rejected.
-        assert!(!stripe_signature_valid(secret, &header, body, signed_at - WEBHOOK_TOLERANCE_SECS - 1));
+        assert!(!stripe_signature_valid(
+            secret,
+            &header,
+            body,
+            signed_at - WEBHOOK_TOLERANCE_SECS - 1
+        ));
     }
 
     #[test]
     fn charge_matching_enforces_amount_and_usd() {
-        let ok = Charged { amount_cents: 1599, currency: "usd".into() };
+        let ok = Charged {
+            amount_cents: 1599,
+            currency: "usd".into(),
+        };
         assert!(charge_matches(&ok, 1599));
         // Stripe sends lowercase, PayPal/Square uppercase — both accepted.
-        let upper = Charged { amount_cents: 1599, currency: "USD".into() };
+        let upper = Charged {
+            amount_cents: 1599,
+            currency: "USD".into(),
+        };
         assert!(charge_matches(&upper, 1599));
         // Wrong amount or wrong currency is refused.
         assert!(!charge_matches(&ok, 1600));
-        let eur = Charged { amount_cents: 1599, currency: "eur".into() };
+        let eur = Charged {
+            amount_cents: 1599,
+            currency: "eur".into(),
+        };
         assert!(!charge_matches(&eur, 1599));
     }
 
@@ -1860,7 +2078,8 @@ mod tests {
         assert_eq!(minor.amount_cents, 1599);
         assert_eq!(minor.currency, "usd");
         // PayPal: decimal string + currency_code.
-        let decimal = charged_decimal(&serde_json::json!("15.99"), &serde_json::json!("USD")).unwrap();
+        let decimal =
+            charged_decimal(&serde_json::json!("15.99"), &serde_json::json!("USD")).unwrap();
         assert_eq!(decimal.amount_cents, 1599);
         // Missing/!string fields yield None (settle then skips the cross-check).
         assert!(charged_minor(&serde_json::Value::Null, &serde_json::json!("usd")).is_none());
@@ -1875,7 +2094,8 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).unwrap();
         mac.update(url.as_bytes());
         mac.update(body);
-        let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let expected =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         assert!(square_signature_valid(key, url, &expected, body));
         assert!(!square_signature_valid(key, url, &expected, b"tampered"));
     }
