@@ -6,6 +6,8 @@
 // harness reports `hasAuth() === false` and the auth suites skip, so the
 // no-auth suites still run (in CI without secrets, and offline).
 
+import { createHmac } from 'node:crypto';
+
 export const BASE_URL = (process.env.E2E_BASE_URL || 'http://localhost:8145').replace(/\/$/, '');
 // The biz storefront: a real host by default, or the local server with a
 // rewritten Host header when E2E_BIZ_VIA_HOST_HEADER=1.
@@ -98,6 +100,29 @@ export async function loginBrowser(page, email) {
   // the header to settle.
   await page.waitAwayFrom('/login/remembered', { timeout: 10000 });
   await page.waitFor('header.site-header', { timeout: 10000 });
+}
+
+/** Compute a TOTP code (RFC 6238: HMAC-SHA1, 30s step, 6 digits) from a
+ * base32 secret -- for driving the authenticator-app 2FA enrollment. */
+export function totp(secret, atMs = Date.now()) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const clean = secret.replace(/=+$/,'').replace(/\s/g,'').toUpperCase();
+  let bits = '';
+  for (const ch of clean) {
+    const v = alphabet.indexOf(ch);
+    if (v < 0) continue;
+    bits += v.toString(2).padStart(5, '0');
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+  const key = Buffer.from(bytes);
+  const counter = Math.floor(atMs / 1000 / 30);
+  const cbuf = Buffer.alloc(8);
+  cbuf.writeBigInt64BE(BigInt(counter));
+  const h = createHmac('sha1', key).update(cbuf).digest();
+  const off = h[h.length - 1] & 0x0f;
+  const bin = ((h[off] & 0x7f) << 24) | (h[off + 1] << 16) | (h[off + 2] << 8) | h[off + 3];
+  return String(bin % 1_000_000).padStart(6, '0');
 }
 
 /** Read the readable (non-HttpOnly) CSRF token cookie inside the page. */

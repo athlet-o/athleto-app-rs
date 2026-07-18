@@ -80,6 +80,12 @@ jobs:
           done
           psql "$DATABASE_URL" -tAc "SELECT count(*) FROM products" || (cat app.log; exit 1)
 
+      # DB-backed Rust tests (ignored by default) exercise the money/stock
+      # paths a degraded `cargo test` can't -- e.g. the recurring runner's
+      # provider-subscription guard. The Postgres above already has the schema.
+      - name: DB-backed Rust tests
+        run: cargo test --test recurring_runner_db -- --ignored --nocapture
+
       - name: Install Google Chrome
         uses: browser-actions/setup-chrome@19ae4b339ee18925ab85cf12c1041150ea4a44c8 # v1
         with:
