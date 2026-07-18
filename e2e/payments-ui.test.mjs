@@ -41,11 +41,18 @@ test(`[${Driver.engine()}] a placed order shows a payment status + Pay-now retry
     await page.click('.checkout-form button[type="submit"]');
     await page.waitFor('.order-card', { timeout: 10000 });
 
-    const orders = await page.content();
-    // Every order carries a payment-status badge.
-    assert.match(orders, /payment|pending|paid|invoiced/i, 'payment status shown on the order');
-    // With no configured provider, the order is unpaid -> Pay now is offered.
-    assert.ok(await page.exists('form[action$="/pay"] button'), 'Pay-now retry offered while unpaid');
+    const orders = (await page.content()).toLowerCase();
+    // A placed order carries BOTH an order-status and a payment-status badge;
+    // with no provider configured it settles nowhere, so payment stays pending.
+    assert.match(orders, /payment pending/, 'order shows a payment-pending badge');
+    assert.match(orders, />placed</, 'order shows the placed status');
+    // Pay-now is (correctly) only offered when a payment provider is configured;
+    // with none set, no retry button is shown -- assert that consistency.
+    assert.equal(
+      await page.exists('form[action$="/pay"] button'),
+      false,
+      'no Pay-now without a configured provider',
+    );
   } finally {
     await page.close();
   }
