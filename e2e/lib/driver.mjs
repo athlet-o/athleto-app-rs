@@ -102,6 +102,15 @@ class Page {
     return this._page.evaluate(fn, ...args);
   }
 
+  /** Set a cookie for `url` (both engines accept HttpOnly here). */
+  async setCookie({ name, value, url, path = '/', httpOnly = false, sameSite = 'Lax' }) {
+    if (this.engine === 'playwright') {
+      await this._ctx.addCookies([{ name, value, url, path, httpOnly, sameSite }]);
+    } else {
+      await this._page.setCookie({ name, value, url, path, httpOnly, sameSite });
+    }
+  }
+
   async screenshot(path) {
     try {
       await this._page.screenshot({ path });
