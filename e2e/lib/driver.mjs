@@ -102,12 +102,13 @@ class Page {
     return this._page.evaluate(fn, ...args);
   }
 
-  /** Set a cookie for `url` (both engines accept HttpOnly here). */
-  async setCookie({ name, value, url, path = '/', httpOnly = false, sameSite = 'Lax' }) {
+  /** Set a cookie for `url` (both engines accept HttpOnly here). `url`
+   * implies the path, so we never pass both (Playwright rejects url+path). */
+  async setCookie({ name, value, url, httpOnly = false, sameSite = 'Lax' }) {
     if (this.engine === 'playwright') {
-      await this._ctx.addCookies([{ name, value, url, path, httpOnly, sameSite }]);
+      await this._ctx.addCookies([{ name, value, url, httpOnly, sameSite }]);
     } else {
-      await this._page.setCookie({ name, value, url, path, httpOnly, sameSite });
+      await this._page.setCookie({ name, value, url, httpOnly, sameSite });
     }
   }
 
