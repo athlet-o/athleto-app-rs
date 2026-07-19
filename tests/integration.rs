@@ -613,3 +613,58 @@ fn host_allowlist_is_permissive_only_when_unset() {
     assert!(!locked.host_allowed("evil.example"));
     assert!(!locked.host_allowed("app.athleto.store.evil.example"));
 }
+
+/// End-to-end proof that the Host allowlist is ENFORCED by the middleware,
+/// not merely available on Config. This is the gap the audit found: the
+/// module documented an allowlist that nothing consulted.
+#[tokio::test]
+async fn host_allowlist_is_enforced_by_the_router() {
+    let state = Arc::new(AppState::new(
+        None,
+        reqwest::Client::new(),
+        Config {
+            allowed_hosts: Some(vec!["app.athleto.store".to_string()]),
+            ..Config::default()
+        },
+    ));
+
+    // A Host outside the allowlist is refused before any handler runs.
+    let rejected = send(
+        &state,
+        Request::get("/")
+            .header(header::HOST, "evil.example")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::MISDIRECTED_REQUEST);
+    // Security headers still ride along on the rejection.
+    assert!(rejected.headers().contains_key("content-security-policy"));
+
+    // The configured Host is served normally.
+    let allowed = send(
+        &state,
+        Request::get("/")
+            .header(header::HOST, "app.athleto.store")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(allowed.status(), StatusCode::OK);
+}
+
+/// With ALLOWED_HOSTS unset (dev / degraded boot), any Host is served — the
+/// property the README's zero-secrets boot promise depends on.
+#[tokio::test]
+async fn host_allowlist_unset_serves_any_host() {
+    let state = test_state();
+    let response = send(
+        &state,
+        Request::get("/")
+            .header(header::HOST, "anything.example")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
