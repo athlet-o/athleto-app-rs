@@ -26,6 +26,18 @@ re-grep the named function/symbol.
   `db::run_due_recurring_orders` to skip any order with a `payment_subscriptions`
   row. Covered by `tests/recurring_runner_db.rs`.
 - **Migration 0006 checksum drift** — see [Migration discipline](#migration-discipline).
+- **Login/IP throttles were replica-local and trusted any `X-Forwarded-For`.**
+  They now use the modular `rate_limit` service (Fiducia-backed and fail-closed
+  when configured), and `request_trust` accepts forwarding headers only from
+  configured direct-proxy CIDRs.
+- **Magic links could silently create accounts and email-spam an arbitrary
+  address.** Existing-account login now sends `create_user: false`; self-signup
+  requires explicit enablement plus a successful server-side Turnstile proof.
+- **MFA and CSRF browser state was mutable.** The pending SMS challenge is a
+  short-lived HMAC-signed, user-bound cookie, while the CSRF cookie is now
+  HttpOnly and its synchronizer token is supplied through the rendered DOM.
+- **AAL was read from an unverified JWT payload.** GoTrue's authenticated
+  `/auth/v1/factors` response now supplies the assurance level and factors.
 
 ---
 
@@ -94,38 +106,69 @@ re-grep the named function/symbol.
 
 ---
 
+## Robustness & infra gaps (non-functional)
+
+### 7. Latent request-path panics on the API auth guard
+- `src/api.rs` (`orders_list`, `create_order`) —
+  `state.pool.as_ref().expect("authenticate checked pool")`. Guarded today by the
+  preceding `authenticate` (which requires a pool), but if that invariant ever breaks
+  it's a 500-panic, not a clean error.
+- **Fix:** `let Some(pool) = state.pool.as_ref() else { return Err(AppError::unavailable("db")) };`
+
+### 8. The `@athleto/sync` local-first SDK is not wired in
+- No references to `@athleto/sync`, the `athleto-optimistic` htmx extension, or an
+  `/api/sync` catch-up endpoint anywhere in `src/`. The cart uses the app's own `/ws`
+  (`src/ws.rs`) with the **stock** htmx ws extension (`src/assets.rs`), not the SDK's
+  optimistic IndexedDB client — so the offline/optimistic sync layer in the
+  `athleto-sync` repo is currently unused here.
+- **Fix (decision):** either adopt it (mount `startSync` +
+  `registerOptimisticExtension` on the cart, add `/api/sync` + Postgres
+  `version`/`sync_sequence` columns — see `athleto-sync/docs/adoption.md`), or document
+  that the bespoke `/ws` is the intended path and the SDK is out of scope here. Don't
+  leave it ambiguous.
+
+### 9. CI lint is non-blocking; one transitive advisory
+- `.github/workflows/ci.yml` runs `fmt` + `clippy` as `continue-on-error: true` — drop
+  that once the tree is clean so lint regressions block merge (athleto-sync already
+  gates on clippy).
+- `cargo audit`: `RUSTSEC-2023-0071` (rsa 0.9 "Marvin Attack" timing sidechannel,
+  medium) via the SQLx/SeaORM MySQL stack — no upstream fix. If the MySQL driver is
+  unused, disabling that SeaORM feature removes the `rsa` dependency; otherwise track.
+  Plus `proc-macro-error2` unmaintained (warning).
+
+### 10. nginx `/jello` gateway not yet cut over to this app
+- `~/codes/ores/k8s-cluster/remote/argocd/dd-next-runtime/dd-remote-gateway.configmap.yaml`:
+  `location = /jello` and `/jello/sample` still set their upstream (`$dd_up_3` /
+  `$dd_up_4`) to `dd-remote-web-home.default.svc.cluster.local:8080`. Athleto is
+  reachable only via its dedicated Ingress (`jello-ws:8145`).
+- **Fix:** repoint those upstreams to `jello-ws.default.svc.cluster.local:8145` and
+  update the guard in `remote/tests/general/athleto-app-config.test.ts` (which asserts
+  the old wiring on purpose).
+
+---
+
 ## Migration discipline
 
-The shared Supabase DB runs the embedded `sqlx::migrate!` migrations. **Never
-edit a migration that has already been applied** — sqlx stores each migration's
-SHA-384 checksum and aborts the *entire* run at the first modified one, so every
-later migration silently stops applying. This bit us: `0006_payments.sql` was
-edited after it was applied, so `0007` (which adds `customer_profiles.b2b_approved_at`)
-and `0008` never ran → account setup broke at runtime with `column ... does not
-exist`.
+The numbered files under `migrations/` are a frozen history of the original
+Supabase rollout. A historical checksum edit in `0006_payments.sql` prevented
+`0007` and `0008` from applying and caused runtime column drift; do not edit or
+extend that trail for production schema changes.
 
-- To add a change: **write a new numbered migration**, never touch an old one.
-- If a checksum has already drifted and the schema is confirmed correct, reconcile
-  the recorded checksum (this is what unblocked us):
-  ```sh
-  NEW=$(shasum -a 384 migrations/000N_name.sql | awk '{print $1}')
-  psql "$DATABASE_URL" -c "UPDATE _sqlx_migrations SET checksum = decode('$NEW','hex') WHERE version = N;"
-  # then reboot the app; sqlx applies any pending migrations
-  ```
-  Only do this after verifying the migration's objects already exist in the DB.
-- The migrator takes an advisory lock through the Supabase session pooler; under
-  contention it can hit the pooler's ~120s `statement_timeout` (harmless when no
-  migrations are pending, but noisy). Prefer running migrations on a direct
-  (non-pooler) connection with a bounded `lock_timeout`.
-- Go-forward: the [README](../README.md) "declarative migrations (dpm)" section
-  and the shared `k8s-libs-and-shared-defs/pg-defs` contract are the target;
-  moving this schema to the shared RDS (own `athleto` database) is the plan.
+- The current source of truth is
+  `k8s-cluster/remote/libs/pg-defs/schema/databases/athleto/schema.sql`, targeting
+  the dedicated `athleto` database.
+- Change the declarative contract, then use `scripts/dpm.sh diff`, `verify`, and
+  `review`. `apply` is an explicit human-reviewed release action.
+- The application never runs DDL at boot. This avoids startup races, pooler
+  advisory-lock timeouts, and one replica migrating beneath another.
+- CI may apply the frozen files to create an isolated compatibility fixture;
+  that does not make them the production migration authority.
 
 ---
 
 ## Hardening posture already in place (don't regress)
 
-- **CSRF**: double-submit token on every state-changing form + htmx header;
+- **CSRF**: HttpOnly synchronizer token on every state-changing form + htmx header;
   `/api/v1` is the only exemption (bearer-auth, no ambient cookie); webhooks are
   exempt but verify provider signatures. Constant-time token compare.
 - **Payment webhooks fail closed**: no signing secret ⇒ reject; HMAC over the
@@ -135,3 +178,5 @@ exist`.
 - **Login-flow pinning**: `athleto_login_flow` cookie must match the `flow` param
   on confirm, so a leaked magic link can't be completed in another browser.
 - **B2B requires approval *then* 2FA** before ordering/API (`require_b2b_ready`).
+- **B2B host selection is presentation-only**; authorization continues to
+  require `CustomerProfile::is_b2b_approved()` and the verified-MFA gate.

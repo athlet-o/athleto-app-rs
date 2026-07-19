@@ -1,9 +1,9 @@
 //! Supabase GoTrue auth: passwordless magic-link login, MFA session
 //! upgrades, session cookies, and the current-user extractor.
 //!
-//! There are no passwords. POST /login asks GoTrue to email a magic link
-//! (`create_user: true`, so first sign-in doubles as signup). The default
-//! email template points at GoTrue's own /verify, which 302s back to
+//! There are no passwords. POST /login asks GoTrue to email a magic link;
+//! only explicitly enabled, Turnstile-verified self-signup may create a new
+//! user. The default email template points at GoTrue's own /verify, which 302s back to
 //! /auth/callback with tokens in the URL fragment; inline JS forwards them to
 //! POST /auth/session, which validates the token against /auth/v1/user before
 //! setting HttpOnly cookies. /auth/confirm additionally supports the cleaner
@@ -14,6 +14,8 @@
 //! to upgrade the session to AAL2. B2B accounts are required to enroll a
 //! factor before they can order (enforced by `require_full`).
 
+use std::time::Duration;
+
 use axum::extract::{FromRequestParts, Query, State};
 use axum::http::header::HOST;
 use axum::http::request::Parts;
@@ -21,13 +23,16 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use base64::Engine;
 use maud::{html, Markup, PreEscaped};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::db::{self, CustomerProfile};
-use crate::{pages, security, SharedState};
+use crate::{
+    anti_abuse, mfa_state, pages,
+    request_trust::{self, PeerAddress},
+    security, Config, SharedState,
+};
 
 pub const ACCESS_COOKIE: &str = "sb_access_token";
 pub const REFRESH_COOKIE: &str = "sb_refresh_token";
@@ -36,7 +41,7 @@ pub const REFRESH_COOKIE: &str = "sb_refresh_token";
 /// are minted, preventing a link initiated in another browser from logging a
 /// recipient in unexpectedly.
 const LOGIN_FLOW_COOKIE: &str = "athleto_login_flow";
-/// Pending SMS challenge, stored as "{factor_id}:{challenge_id}".
+/// Signed, short-lived binding for a pending SMS MFA challenge.
 const MFA_CHALLENGE_COOKIE: &str = "sb_mfa_challenge";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,21 +105,36 @@ impl MaybeUser {
 struct GotrueUser {
     id: String,
     email: Option<String>,
-    #[serde(default)]
-    factors: Vec<Factor>,
 }
 
-/// Best-effort read of the `aal` claim from a JWT payload. The token is not
-/// trusted on this alone -- every request still validates it against
-/// /auth/v1/user -- so skipping signature verification here is fine.
-fn jwt_aal(token: &str) -> String {
-    let payload = token.split('.').nth(1).unwrap_or_default();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|claims| claims.get("aal").and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_else(|| "aal1".to_string())
+#[derive(Debug, Default, Deserialize)]
+struct GotrueMfaState {
+    #[serde(default)]
+    factors: Vec<Factor>,
+    #[serde(default)]
+    current_level: Option<String>,
+}
+
+async fn fetch_mfa_state(state: &SharedState, token: &str) -> Option<GotrueMfaState> {
+    let (base, key) = state.config.supabase()?;
+    let response = state
+        .http
+        .get(format!("{base}/auth/v1/factors"))
+        .header("apikey", key)
+        .bearer_auth(token)
+        .send()
+        .await;
+    match response {
+        Ok(response) if response.status().is_success() => response.json().await.ok(),
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "GoTrue MFA state request rejected");
+            None
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "GoTrue MFA state request failed");
+            None
+        }
+    }
 }
 
 async fn fetch_user(state: &SharedState, token: &str) -> Option<AuthUser> {
@@ -130,13 +150,16 @@ async fn fetch_user(state: &SharedState, token: &str) -> Option<AuthUser> {
     match response {
         Ok(response) if response.status().is_success() => {
             match response.json::<GotrueUser>().await {
-                Ok(user) => Uuid::parse_str(&user.id).ok().map(|id| AuthUser {
-                    id,
-                    email: user.email,
-                    aal: jwt_aal(token),
-                    factors: user.factors,
-                    access_token: token.to_string(),
-                }),
+                Ok(user) => {
+                    let mfa = fetch_mfa_state(state, token).await?;
+                    Uuid::parse_str(&user.id).ok().map(|id| AuthUser {
+                        id,
+                        email: user.email,
+                        aal: mfa.current_level.unwrap_or_else(|| "aal1".to_string()),
+                        factors: mfa.factors,
+                        access_token: token.to_string(),
+                    })
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "failed to decode GoTrue user payload");
                     None
@@ -276,10 +299,26 @@ pub async fn login_page(State(state): State<SharedState>, user: MaybeUser, biz: 
     if state.config.supabase().is_none() {
         return not_configured_page(&user, "Sign in | AthletO", "Sign in").into_response();
     }
-    login_form(biz, None).into_response()
+    login_form_for(&state.config, biz, None).into_response()
 }
 
 fn login_form(biz: Biz, notice: Option<Markup>) -> Markup {
+    login_form_with_turnstile(biz, notice, None)
+}
+
+fn login_form_for(config: &Config, biz: Biz, notice: Option<Markup>) -> Markup {
+    let site_key = config
+        .self_signup_ready()
+        .then_some(config.turnstile_site_key.as_deref())
+        .flatten();
+    login_form_with_turnstile(biz, notice, site_key)
+}
+
+fn login_form_with_turnstile(
+    biz: Biz,
+    notice: Option<Markup>,
+    turnstile_site_key: Option<&str>,
+) -> Markup {
     pages::layout_for(
         "Sign in | AthletO",
         None,
@@ -290,8 +329,7 @@ fn login_form(biz: Biz, notice: Option<Markup>) -> Markup {
                     p .eyebrow { @if biz.0 { "Business portal" } @else { "Athletes only (and everyone else)" } }
                     h2 { "Sign in with a magic link" }
                     p .auth-lede {
-                        "No passwords here. Type your email and we'll send you a one-time link -- "
-                        "first-time emails get an account automatically."
+                        "No passwords here. Type the email associated with your account and we'll send a one-time link."
                     }
                     @if let Some(notice) = notice { (notice) }
                     div #past-logins .past-logins {}
@@ -302,7 +340,14 @@ fn login_form(biz: Biz, notice: Option<Markup>) -> Markup {
                             input #login-email type="email" name="email" required
                                 autocomplete="email" placeholder="you@club.example";
                         }
+                        @if let Some(site_key) = turnstile_site_key {
+                            div .cf-turnstile data-sitekey=(site_key) {}
+                            script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer {}
+                        }
                         button .primary type="submit" { "Email me a sign-in link" }
+                    }
+                    @if turnstile_site_key.is_none() {
+                        p .auth-alt { "New accounts are created by invitation or an approved business onboarding flow." }
                     }
                     p .auth-alt {
                         @if biz.0 {
@@ -321,6 +366,8 @@ fn login_form(biz: Biz, notice: Option<Markup>) -> Markup {
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     email: String,
+    #[serde(rename = "cf-turnstile-response", default)]
+    turnstile_response: String,
 }
 
 /// POST /login -- ask GoTrue to send the magic link.
@@ -328,28 +375,30 @@ pub async fn login_submit(
     State(state): State<SharedState>,
     biz: Biz,
     headers: HeaderMap,
+    peer: PeerAddress,
     jar: CookieJar,
     Form(request): Form<LoginRequest>,
 ) -> Response {
     let email = request.email.trim().to_lowercase();
 
     // Throttle before anything touches GoTrue: each accepted submit sends an
-    // email (and `create_user: true` mints an account for unknown addresses),
-    // so this endpoint must not be free to hammer.
-    let ip = security::client_ip(&headers);
-    let ip_ok =
-        state
-            .login_limiter
-            .check(&format!("ip:{ip}"), 5, std::time::Duration::from_secs(60));
-    let email_ok = state.login_limiter.check(
-        &format!("email:{email}"),
-        3,
-        std::time::Duration::from_secs(5 * 60),
-    );
+    // email, so this endpoint must not be free to hammer. The only forwarded
+    // address accepted here is one supplied by an explicitly trusted proxy.
+    let peer_ip = peer.0.map(|peer| peer.ip());
+    let ip = request_trust::client_ip(&headers, peer.0, &state.config.trusted_proxy_networks);
+    let ip_ok = state
+        .rate_limits
+        .check("login-ip", &ip, 5, Duration::from_secs(60))
+        .await;
+    let email_ok = state
+        .rate_limits
+        .check("login-email", &email, 3, Duration::from_secs(5 * 60))
+        .await;
     if !ip_ok || !email_ok {
         return (
             axum::http::StatusCode::TOO_MANY_REQUESTS,
-            login_form(
+            login_form_for(
+                &state.config,
                 biz,
                 Some(html! { div .notice .error {
                     "Too many sign-in attempts. Wait a few minutes and try again."
@@ -364,8 +413,56 @@ pub async fn login_submit(
             .into_response();
     };
 
-    // `create_user: true` stays: magic-link login doubling as signup is the
-    // product's only signup path, so removing it would strand new users.
+    let create_user = if state.config.self_signup_enabled {
+        if !state.config.self_signup_ready() {
+            tracing::error!("self-signup enabled without complete Turnstile configuration");
+            return login_form_for(
+                &state.config,
+                biz,
+                Some(html! { div .notice .error { "Sign-up is temporarily unavailable. Please try again later." } }),
+            )
+            .into_response();
+        }
+        let Some(turnstile_secret) = state.config.turnstile_secret.as_deref() else {
+            tracing::error!("self-signup enabled without ATHLETO_TURNSTILE_SECRET");
+            return login_form_for(
+                &state.config,
+                biz,
+                Some(html! { div .notice .error { "Sign-up is temporarily unavailable. Please try again later." } }),
+            )
+            .into_response();
+        };
+        match anti_abuse::verify_turnstile(
+            &state.http,
+            turnstile_secret,
+            &request.turnstile_response,
+            peer_ip,
+        )
+        .await
+        {
+            Ok(true) => true,
+            Ok(false) => {
+                return login_form_for(
+                    &state.config,
+                    biz,
+                    Some(html! { div .notice .error { "Please complete the anti-abuse check and try again." } }),
+                )
+                .into_response()
+            }
+            Err(err) => {
+                tracing::warn!(error = err, "Turnstile verification failed");
+                return login_form_for(
+                    &state.config,
+                    biz,
+                    Some(html! { div .notice .error { "Unable to verify the anti-abuse check. Try again shortly." } }),
+                )
+                .into_response()
+            }
+        }
+    } else {
+        false
+    };
+
     let flow = Uuid::new_v4().to_string();
     let redirect_to = format!(
         "{}/auth/callback?flow={flow}",
@@ -376,7 +473,7 @@ pub async fn login_submit(
         .post(format!("{base}/auth/v1/otp"))
         .query(&[("redirect_to", redirect_to.as_str())])
         .header("apikey", key)
-        .json(&serde_json::json!({ "email": email, "create_user": true }))
+        .json(&serde_json::json!({ "email": email, "create_user": create_user }))
         .send()
         .await;
 
@@ -409,7 +506,8 @@ pub async fn login_submit(
         Ok(response) => {
             let message = gotrue_error_message(response).await;
             tracing::warn!(%message, "magic link request rejected by Supabase");
-            login_form(
+            login_form_for(
+                &state.config,
                 biz,
                 Some(html! { div .notice .error { "Could not send a sign-in link. Check your email and try again shortly." } }),
             )
@@ -417,7 +515,8 @@ pub async fn login_submit(
         }
         Err(err) => {
             tracing::error!(error = %err, "magic link request to Supabase failed");
-            login_form(
+            login_form_for(
+                &state.config,
                 biz,
                 Some(html! { div .notice .error { "Could not reach the auth service. Try again shortly." } }),
             )
@@ -755,27 +854,66 @@ pub struct ChallengeRequest {
     factor_id: String,
 }
 
+fn verified_factor<'a>(user: &'a AuthUser, factor_id: &str) -> Option<&'a Factor> {
+    user.verified_factors()
+        .find(|factor| factor.id == factor_id)
+}
+
 /// POST /login/2fa/send -- create a challenge for an SMS factor (GoTrue sends
 /// the text) and stash the challenge id for the verify step.
 pub async fn login_2fa_send(
     State(state): State<SharedState>,
     user: MaybeUser,
+    biz: Biz,
     jar: CookieJar,
     Form(request): Form<ChallengeRequest>,
 ) -> Response {
     let Some(user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
-    // Each send triggers an SMS; throttle per user so a live AAL1 session can't
-    // be used to spam the victim's phone (toll/SMS-bomb).
-    if !state.login_limiter.check(
-        &format!("2fa-send:{}", user.id),
-        3,
-        std::time::Duration::from_secs(5 * 60),
-    ) {
+    let Some(factor) = verified_factor(user, &request.factor_id) else {
         return two_fa_form(
             user,
-            Biz(false),
+            biz,
+            false,
+            Some(html! { div .notice .error { "Choose one of the verified factors on this account." } }),
+        )
+        .into_response();
+    };
+    if factor.factor_type != "phone" {
+        return two_fa_form(
+            user,
+            biz,
+            false,
+            Some(html! { div .notice .error { "Authenticator-app codes do not need a text message." } }),
+        )
+        .into_response();
+    }
+    let Some(state_key) = state.config.mfa_state_key.as_ref() else {
+        tracing::error!("ATHLETO_MFA_STATE_KEY is required for SMS MFA");
+        return two_fa_form(
+            user,
+            biz,
+            false,
+            Some(html! { div .notice .error { "Text-message verification is temporarily unavailable." } }),
+        )
+        .into_response();
+    };
+    // Each send triggers an SMS; throttle per user so a live AAL1 session can't
+    // be used to spam the victim's phone (toll/SMS-bomb).
+    if !state
+        .rate_limits
+        .check(
+            "mfa-send",
+            &user.id.to_string(),
+            3,
+            Duration::from_secs(5 * 60),
+        )
+        .await
+    {
+        return two_fa_form(
+            user,
+            biz,
             false,
             Some(html! { div .notice .error {
                 "Too many code requests. Wait a few minutes and try again."
@@ -785,20 +923,31 @@ pub async fn login_2fa_send(
     }
     match create_challenge(&state, &user.access_token, &request.factor_id).await {
         Ok(challenge_id) => {
-            let cookie = Cookie::build((
-                MFA_CHALLENGE_COOKIE,
-                format!("{}:{}", request.factor_id, challenge_id),
-            ))
-            .path("/")
-            .http_only(true)
-            .secure(true)
-            .same_site(SameSite::Lax)
-            .build();
+            let state = mfa_state::new_challenge(user.id, request.factor_id, challenge_id);
+            let value = match mfa_state::seal(state_key, &state) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::error!(error = %error, "could not seal SMS MFA challenge state");
+                    return two_fa_form(
+                        user,
+                        biz,
+                        false,
+                        Some(html! { div .notice .error { "Text-message verification is temporarily unavailable." } }),
+                    )
+                    .into_response();
+                }
+            };
+            let cookie = Cookie::build((MFA_CHALLENGE_COOKIE, value))
+                .path("/")
+                .http_only(true)
+                .secure(true)
+                .same_site(SameSite::Lax)
+                .build();
             (jar.add(cookie), Redirect::to("/login/2fa?sent=1")).into_response()
         }
         Err(message) => two_fa_form(
             user,
-            Biz(false),
+            biz,
             false,
             Some(html! { div .notice .error { (message) } }),
         )
@@ -823,18 +972,26 @@ pub async fn login_2fa_submit(
     let Some(user) = user.as_ref() else {
         return Redirect::to("/login").into_response();
     };
+    let Some(factor) = verified_factor(user, &request.factor_id) else {
+        return two_fa_form(
+            user,
+            biz,
+            false,
+            Some(html! { div .notice .error { "Choose one of the verified factors on this account." } }),
+        )
+        .into_response();
+    };
 
     // SMS challenges were created by /login/2fa/send; TOTP challenges can be
     // minted right before verification.
-    let stored = jar.get(MFA_CHALLENGE_COOKIE).and_then(|cookie| {
-        cookie
-            .value()
-            .split_once(':')
-            .map(|(f, c)| (f.to_string(), c.to_string()))
+    let stored = state.config.mfa_state_key.as_ref().and_then(|state_key| {
+        jar.get(MFA_CHALLENGE_COOKIE)
+            .and_then(|cookie| mfa_state::open(state_key, cookie.value(), user.id).ok())
     });
     let challenge_id = match stored {
-        Some((factor_id, challenge_id)) if factor_id == request.factor_id => challenge_id,
-        _ => match create_challenge(&state, &user.access_token, &request.factor_id).await {
+        Some(stored) if stored.factor_id == request.factor_id => stored.challenge_id,
+        _ if factor.factor_type == "totp" => {
+            match create_challenge(&state, &user.access_token, &request.factor_id).await {
             Ok(challenge_id) => challenge_id,
             Err(message) => {
                 return two_fa_form(
@@ -845,7 +1002,17 @@ pub async fn login_2fa_submit(
                 )
                 .into_response()
             }
-        },
+            }
+        }
+        _ => {
+            return two_fa_form(
+                user,
+                biz,
+                false,
+                Some(html! { div .notice .error { "Request a new text-message code before verifying." } }),
+            )
+            .into_response()
+        }
     };
 
     match verify_challenge(
@@ -1068,7 +1235,6 @@ pub async fn logout(State(state): State<SharedState>, jar: CookieJar) -> Respons
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
 
     fn factor(status: &str, kind: &str) -> Factor {
         Factor {
@@ -1087,24 +1253,6 @@ mod tests {
             factors,
             access_token: "t".into(),
         }
-    }
-
-    #[test]
-    fn jwt_aal_reads_claim_and_defaults_to_aal1() {
-        let enc = |v: &serde_json::Value| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap())
-        };
-        let token = format!(
-            "header.{}.sig",
-            enc(&serde_json::json!({ "aal": "aal2", "sub": "x" }))
-        );
-        assert_eq!(jwt_aal(&token), "aal2");
-        // Missing claim, malformed token, and empty string all fall back safely.
-        assert_eq!(
-            jwt_aal(&format!("h.{}.s", enc(&serde_json::json!({})))),
-            "aal1"
-        );
-        assert_eq!(jwt_aal("not-a-jwt"), "aal1");
     }
 
     #[test]

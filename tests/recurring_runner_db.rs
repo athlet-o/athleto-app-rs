@@ -17,7 +17,7 @@ fn stmt(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
 #[ignore]
 async fn runner_fires_owned_recurring_but_skips_provider_subscription() {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    let conn = db::build_pool(&url).expect("pool");
+    let conn = db::build_pool(&url).await.expect("pool");
     let user = Uuid::new_v4();
 
     // Two recurring orders, both due a day ago, product 3, weekly.
@@ -30,8 +30,20 @@ async fn runner_fires_owned_recurring_but_skips_provider_subscription() {
             vec![user.into(), channel.into()],
         )
     };
-    let owned: Uuid = conn.query_one(mk("b2b_portal")).await.unwrap().unwrap().try_get("", "id").unwrap();
-    let provider: Uuid = conn.query_one(mk("d2c_web")).await.unwrap().unwrap().try_get("", "id").unwrap();
+    let owned: Uuid = conn
+        .query_one(mk("b2b_portal"))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap();
+    let provider: Uuid = conn
+        .query_one(mk("d2c_web"))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap();
     for oid in [owned, provider] {
         conn.execute(stmt(
             "INSERT INTO order_items (order_id, product_id, qty, unit_price_cents) VALUES ($1, 3, 1, 499)",
@@ -45,11 +57,24 @@ async fn runner_fires_owned_recurring_but_skips_provider_subscription() {
         vec![user.into(), provider.into()],
     )).await.unwrap();
 
-    let due_before = |id: Uuid| stmt("SELECT next_run_at <= now() AS due FROM orders WHERE id = $1", vec![id.into()]);
-    assert!(get_bool(&conn, due_before(owned)).await, "owned is due before");
-    assert!(get_bool(&conn, due_before(provider)).await, "provider is due before");
+    let due_before = |id: Uuid| {
+        stmt(
+            "SELECT next_run_at <= now() AS due FROM orders WHERE id = $1",
+            vec![id.into()],
+        )
+    };
+    assert!(
+        get_bool(&conn, due_before(owned)).await,
+        "owned is due before"
+    );
+    assert!(
+        get_bool(&conn, due_before(provider)).await,
+        "provider is due before"
+    );
 
-    let created = db::run_due_recurring_orders(&conn).await.expect("runner ok");
+    let created = db::run_due_recurring_orders(&conn)
+        .await
+        .expect("runner ok");
     println!("runner created {created} child order(s)");
 
     // Owned order fired: it has a child and its cursor advanced to the future.
@@ -57,18 +82,42 @@ async fn runner_fires_owned_recurring_but_skips_provider_subscription() {
     let provider_children = count(&conn, provider).await;
     println!("children -> owned: {owned_children}, provider: {provider_children}");
     assert_eq!(owned_children, 1, "owned recurring order should fire once");
-    assert_eq!(provider_children, 0, "provider-managed subscription must NOT be fired internally");
-    assert!(!get_bool(&conn, due_before(owned)).await, "owned cursor advanced");
-    assert!(get_bool(&conn, due_before(provider)).await, "provider cursor untouched (still 'due', ignored)");
+    assert_eq!(
+        provider_children, 0,
+        "provider-managed subscription must NOT be fired internally"
+    );
+    assert!(
+        !get_bool(&conn, due_before(owned)).await,
+        "owned cursor advanced"
+    );
+    assert!(
+        get_bool(&conn, due_before(provider)).await,
+        "provider cursor untouched (still 'due', ignored)"
+    );
 
     // Cleanup.
     conn.execute(stmt("DELETE FROM orders WHERE user_id = $1 OR recurs_from IN (SELECT id FROM orders WHERE user_id = $1)", vec![user.into()])).await.ok();
-    conn.execute(stmt("DELETE FROM payment_subscriptions WHERE user_id = $1", vec![user.into()])).await.ok();
-    conn.execute(stmt("DELETE FROM orders WHERE user_id = $1", vec![user.into()])).await.ok();
+    conn.execute(stmt(
+        "DELETE FROM payment_subscriptions WHERE user_id = $1",
+        vec![user.into()],
+    ))
+    .await
+    .ok();
+    conn.execute(stmt(
+        "DELETE FROM orders WHERE user_id = $1",
+        vec![user.into()],
+    ))
+    .await
+    .ok();
 }
 
 async fn get_bool(conn: &sea_orm::DatabaseConnection, s: Statement) -> bool {
-    conn.query_one(s).await.unwrap().unwrap().try_get::<bool>("", "due").unwrap()
+    conn.query_one(s)
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<bool>("", "due")
+        .unwrap()
 }
 
 async fn count(conn: &sea_orm::DatabaseConnection, parent: Uuid) -> i64 {

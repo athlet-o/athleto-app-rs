@@ -34,8 +34,8 @@ async fn body_string(response: Response<Body>) -> String {
     String::from_utf8_lossy(&bytes).to_string()
 }
 
-/// Mint a CSRF token the way a browser would: request any page and read the
-/// double-submit cookie off the response.
+/// Mint a CSRF token the way a browser receives it: request any page and
+/// retain the HttpOnly cookie value for a subsequent form submission.
 async fn mint_csrf(state: &SharedState) -> String {
     let response = get(state, "/").await;
     let set_cookie = response
@@ -269,9 +269,26 @@ async fn forms_embed_the_csrf_cookie_token() {
     let response = send(&state, request).await;
     let body = body_string(response).await;
     assert!(body.contains(&format!("name=\"csrf_token\" value=\"{token}\"")));
+    assert!(body.contains(&format!("data-csrf-token=\"{token}\"")));
     // And the layout hands it to htmx via hx-headers on <body>.
     assert!(body.contains("hx-headers"));
     assert!(body.contains("x-csrf-token"));
+}
+
+#[tokio::test]
+async fn csrf_cookie_is_httponly_and_callback_uses_rendered_token() {
+    let state = test_state();
+    let response = get(&state, "/").await;
+    let set_cookie = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with("athleto_csrf="))
+        .expect("csrf cookie set on first response");
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(!athleto_app_rs::pages::CALLBACK_JS.contains("document.cookie"));
+    assert!(athleto_app_rs::pages::CALLBACK_JS.contains("data-csrf-token"));
 }
 
 // ---------------------------------------------------------------------------
@@ -402,13 +419,15 @@ async fn login_throttles_per_ip_after_five_attempts() {
     let response = send(&state, post(6)).await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
-    // A different client IP is unaffected.
+    // The test router has no trusted socket peer, so forwarding headers are
+    // deliberately ignored. An attacker cannot evade the bucket by spoofing
+    // a new X-Forwarded-For value.
     let mut request = form_post("/login", Some(&token), "email=other%40club.example");
     request
         .headers_mut()
         .insert("x-forwarded-for", "198.51.100.7".parse().unwrap());
     let response = send(&state, request).await;
-    assert_ne!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 // ---------------------------------------------------------------------------

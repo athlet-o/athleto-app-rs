@@ -1,20 +1,13 @@
-//! Cross-cutting request hardening: CSRF double-submit tokens, security
-//! headers (CSP with a per-request nonce), login rate limiting, and the
-//! ALLOWED_HOSTS allowlist.
+//! Cross-cutting request hardening: CSRF synchronizer tokens, security
+//! headers (CSP with a per-request nonce), and the ALLOWED_HOSTS allowlist.
 //!
-//! CSRF model: a random token lives in a `SameSite=Lax` cookie that is *not*
-//! HttpOnly (the auth-callback script must read it to authenticate its
-//! token-forwarding POST to /auth/session). Every server-rendered form embeds
-//! the same token as a hidden `csrf_token` field via `pages::csrf_field`, and
-//! the layout stamps it on `<body hx-headers=...>` so every htmx request
-//! carries it as an `x-csrf-token` header. The middleware rejects any
-//! state-changing request whose field/header does not match the cookie. The
-//! JSON API under /api/v1 authenticates with bearer API keys (no ambient
-//! cookie credentials), so it is exempt.
-
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+//! CSRF model: a random token lives in an HttpOnly `SameSite=Lax` cookie and
+//! is mirrored only into the HTML response. Server-rendered forms embed the
+//! token via `pages::csrf_field`; the layout stamps it on `<body>` for htmx,
+//! and the magic-link callback reads that DOM attribute. The middleware
+//! rejects state-changing requests whose field/header does not match the
+//! cookie. The JSON API under /api/v1 authenticates with bearer API keys (no
+//! ambient cookie credentials), so it is exempt.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -218,10 +211,10 @@ fn finish(
 ) -> Response {
     if let Some((nonce, hsts)) = headers {
         let csp = format!(
-            "default-src 'self'; script-src 'self' 'nonce-{nonce}'; \
+            "default-src 'self'; script-src 'self' 'nonce-{nonce}' https://challenges.cloudflare.com; \
              style-src 'self' 'nonce-{nonce}'; img-src 'self' data:; \
-             connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; \
-             form-action 'self'; object-src 'none'"
+             connect-src 'self'; frame-src https://challenges.cloudflare.com; \
+             frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
         );
         let headers = response.headers_mut();
         if let Ok(value) = HeaderValue::from_str(&csp) {
@@ -244,10 +237,9 @@ fn finish(
         }
     }
     if set_cookie {
-        // Readable by the auth-callback script (see module docs), hence no
-        // HttpOnly; the token authorizes nothing by itself.
         let cookie = Cookie::build((CSRF_COOKIE, token.to_string()))
             .path("/")
+            .http_only(true)
             .secure(true)
             .same_site(SameSite::Lax)
             .build();
@@ -256,56 +248,6 @@ fn finish(
         }
     }
     response
-}
-
-// ---------------------------------------------------------------------------
-// Login rate limiting.
-
-/// Sliding-window in-memory throttle keyed by arbitrary strings ("ip:..." /
-/// "email:..."). Single-replica scope, same as the hold sweeper.
-#[derive(Debug, Default)]
-pub struct RateLimiter {
-    entries: Mutex<HashMap<String, Vec<Instant>>>,
-}
-
-impl RateLimiter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Record an attempt for `key`; returns false when the attempt exceeds
-    /// `max` within `window` (the rejected attempt still counts).
-    pub fn check(&self, key: &str, max: usize, window: Duration) -> bool {
-        self.check_at(key, max, window, Instant::now())
-    }
-
-    fn check_at(&self, key: &str, max: usize, window: Duration, now: Instant) -> bool {
-        let mut entries = self.entries.lock().expect("rate limiter lock");
-        // Opportunistic pruning keeps the map from growing without bound.
-        entries.retain(|_, attempts| {
-            attempts.retain(|at| now.duration_since(*at) < window);
-            !attempts.is_empty()
-        });
-        let attempts = entries.entry(key.to_string()).or_default();
-        attempts.push(now);
-        attempts.len() <= max
-    }
-}
-
-/// Best-effort client address for throttling: the **last** (right-most) hop of
-/// x-forwarded-for. Only the trusted proxy directly in front of us (the
-/// ingress) can control the value it appends; a client can forge additional
-/// left-most hops, so taking the first entry would let an attacker mint a fresh
-/// throttle bucket per request. With a single trusted proxy the right-most
-/// entry is the real client address.
-pub fn client_ip(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next_back())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "local".to_string())
 }
 
 #[cfg(test)]
@@ -340,34 +282,5 @@ mod tests {
         assert_eq!(form_value(body, "email").as_deref(), Some("a%40b.co"));
         assert_eq!(form_value(body, "missing"), None);
         assert_eq!(form_value("", "csrf_token"), None);
-    }
-
-    #[test]
-    fn rate_limiter_blocks_after_max_and_recovers_after_window() {
-        let limiter = RateLimiter::new();
-        let window = Duration::from_secs(60);
-        let start = Instant::now();
-        for _ in 0..3 {
-            assert!(limiter.check_at("ip:1.2.3.4", 3, window, start));
-        }
-        // Fourth attempt inside the window: blocked.
-        assert!(!limiter.check_at("ip:1.2.3.4", 3, window, start));
-        // Other keys are unaffected.
-        assert!(limiter.check_at("ip:5.6.7.8", 3, window, start));
-        // After the window has passed, the key is clean again.
-        assert!(limiter.check_at("ip:1.2.3.4", 3, window, start + window * 2));
-    }
-
-    #[test]
-    fn client_ip_uses_trusted_last_forwarded_hop() {
-        let mut headers = axum::http::HeaderMap::new();
-        assert_eq!(client_ip(&headers), "local");
-        // The right-most hop is the one our trusted proxy appended; a client
-        // that forges a left-most "1.2.3.4" cannot escape its real bucket.
-        headers.insert(
-            "x-forwarded-for",
-            "1.2.3.4, 9.9.9.9, 10.0.0.1".parse().unwrap(),
-        );
-        assert_eq!(client_ip(&headers), "10.0.0.1");
     }
 }

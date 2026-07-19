@@ -3,22 +3,18 @@
 //! SeaORM edition: straightforward lookups go through the entity query
 //! builders in `crate::entities`; upserts and the two transactional hot paths
 //! (`ensure_hold`, `place_order`) stay as raw SQL via `sea_orm::Statement` so
-//! their locking/conflict semantics are byte-for-byte what they were under
-//! SQLx. Everything still executes at runtime against the pool, so the crate
-//! builds without a live DATABASE_URL, and the embedded `sqlx::migrate!`
-//! migrations keep running on the connection's underlying sqlx pool.
+//! their locking/conflict semantics remain explicit. Connection construction,
+//! entities, transactions, and statements all use SeaORM's public API.
 
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection,
-    DbBackend, DbErr, DeriveActiveEnum, EntityTrait, EnumIter, FromQueryResult, QueryFilter,
-    QueryOrder, QuerySelect, Set, SqlxPostgresConnector, Statement, TransactionTrait,
-    TryInsertResult, Value,
+    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectOptions, ConnectionTrait, Database,
+    DatabaseConnection, DbBackend, DbErr, DeriveActiveEnum, EntityTrait, EnumIter, FromQueryResult,
+    QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait, TryInsertResult, Value,
 };
-use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 use crate::entities::{
@@ -87,17 +83,17 @@ impl CartLine {
     }
 }
 
-/// Build a lazy connection: never connects at startup, so the app boots and
-/// serves pages even when the database is unreachable. The sqlx pool inside
-/// stays reachable (`get_postgres_connection_pool`) for the embedded
-/// migrations.
-pub fn build_pool(database_url: &str) -> Option<DatabaseConnection> {
-    match PgPoolOptions::new()
+/// Build a SeaORM lazy connection. It validates configuration without waiting
+/// for the database, preserving the app's degraded-start behavior.
+pub async fn build_pool(database_url: &str) -> Option<DatabaseConnection> {
+    let mut options = ConnectOptions::new(database_url.to_string());
+    options
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(5))
-        .connect_lazy(database_url)
-    {
-        Ok(pool) => Some(SqlxPostgresConnector::from_sqlx_postgres_pool(pool)),
+        .connect_lazy(true);
+
+    match Database::connect(options).await {
+        Ok(connection) => Some(connection),
         Err(err) => {
             tracing::error!(error = %err, "invalid DATABASE_URL; continuing without a database");
             None

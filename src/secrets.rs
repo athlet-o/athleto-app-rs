@@ -12,22 +12,14 @@
 //! failure degrades to "not configured" exactly like a missing env var —
 //! fiducia being down must never stop the app from booting.
 //!
-//! **Confidentiality (see docs/secrets-management.md).** A 2026-07 security
-//! audit confirmed the fiducia KV stores values in *cleartext* on every
-//! node's disk (Raft log + snapshots) and over the plain-HTTP peer network —
-//! it is not an encrypted vault. So this overlay never trusts the KV with a
-//! usable plaintext secret: values are **client-side envelope-encrypted**
-//! (AES-256-GCM, `v1:` prefix) and decrypted here with a key
-//! (`ATHLETO_SECRETS_KEY`) that lives *outside* fiducia (AWS Secrets Manager
-//! / secrets.env). A KV-disk or peer-network compromise therefore yields only
-//! opaque ciphertext. Without that key the overlay is disabled (env-only), so
-//! we can never accidentally read a plaintext secret out of the KV. AWS
-//! Secrets Manager remains production secrets-of-record; this is a
-//! cross-provider bootstrap convenience, not a replacement.
-//!
-//! When a real encrypted `/v1/secrets/*` fiducia API ships, the seam is
-//! `FiduciaClient::kv_get` + `decrypt_envelope` — swap those two, nothing
-//! else changes.
+//! **Confidentiality (see docs/secrets-management.md).** Fiducia now protects
+//! KV values before they enter Raft using either a versioned local keyring or
+//! cloud-neutral HashiCorp Vault Transit, and reports `protection.at_rest` on
+//! reads. This overlay accepts those decrypted-at-the-API values, including an
+//! explicitly plaintext entry when an operator intentionally chose that mode.
+//! Legacy client-side AES-256-GCM `v1:` envelopes remain supported for staged
+//! migration; they still require `ATHLETO_SECRETS_KEY` from an external source.
+//! Raw values from an old node with no protection metadata are rejected.
 
 use std::collections::HashMap;
 
@@ -35,7 +27,7 @@ use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
 use base64::Engine;
 
-use crate::coordinate::FiduciaClient;
+use crate::coordinate::{FiduciaClient, FiduciaKvValue, KvAtRest};
 
 /// Env vars the overlay may supply. Deliberately explicit: nothing outside
 /// this list is ever read from the KV, so a compromised KV entry can't
@@ -45,6 +37,8 @@ pub const MANAGED_KEYS: &[&str] = &[
     "SUPABASE_ANON_KEY",
     "DATABASE_URL",
     "ATHLETO_OPERATIONS_API_KEY",
+    "ATHLETO_TURNSTILE_SECRET",
+    "ATHLETO_MFA_STATE_KEY",
     "ATHLETO_STRIPE_SECRET_KEY",
     "ATHLETO_STRIPE_PUBLISHABLE_KEY",
     "ATHLETO_STRIPE_WEBHOOK_SECRET",
@@ -73,10 +67,9 @@ fn env_opt(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// The 32-byte AES-256 key that unwraps KV envelopes, base64 in
-/// `ATHLETO_SECRETS_KEY`. Sourced from env only (AWS SM / secrets.env) — the
-/// root of trust must never live in fiducia, since fiducia is what we're
-/// protecting the values from.
+/// The 32-byte AES-256 key that unwraps legacy client-side KV envelopes,
+/// base64 in `ATHLETO_SECRETS_KEY`. Sourced from env only; new deployments can
+/// instead let Fiducia's Vault Transit or local-keyring backend own encryption.
 fn secrets_key() -> Option<[u8; 32]> {
     let raw = env_opt("ATHLETO_SECRETS_KEY")?;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -120,6 +113,19 @@ fn decrypt_envelope(key: &[u8; 32], value: &str) -> Option<String> {
     String::from_utf8(plaintext).ok()
 }
 
+fn decode_fiducia_value(key: Option<&[u8; 32]>, entry: &FiduciaKvValue) -> Option<String> {
+    let value = entry.value.trim();
+    if value.starts_with("v1:") {
+        return key
+            .and_then(|key| decrypt_envelope(key, value))
+            .filter(|value| !value.is_empty());
+    }
+    match entry.at_rest {
+        KvAtRest::Encrypted | KvAtRest::Plaintext if !value.is_empty() => Some(value.to_string()),
+        KvAtRest::Encrypted | KvAtRest::Plaintext | KvAtRest::Unknown => None,
+    }
+}
+
 /// Env-first configuration lookup with an optional fiducia-KV overlay behind
 /// it. Built once at boot; `get` is then cheap and deterministic.
 pub struct SecretSource {
@@ -139,25 +145,16 @@ impl SecretSource {
         Self { overlay }
     }
 
-    /// Fetch every managed key the environment does NOT set from the fiducia
-    /// KV, decrypting each `v1:` envelope with `ATHLETO_SECRETS_KEY`. Disabled
-    /// (env-only) when that key is absent, because the KV holds ciphertext we
-    /// couldn't read — and must never hold usable plaintext. All failures
-    /// degrade to "unset".
+    /// Fetch every managed key the environment does NOT set from Fiducia KV.
+    /// Node-protected encrypted and explicitly plaintext entries are accepted;
+    /// legacy `v1:` envelopes require `ATHLETO_SECRETS_KEY`. All failures
+    /// degrade to "unset" so the storefront keeps its zero-secret boot posture.
     pub async fn load(client: Option<&FiduciaClient>) -> Self {
         let mut overlay = HashMap::new();
         let Some(client) = client else {
             return Self { overlay };
         };
-        let Some(key) = secrets_key() else {
-            tracing::warn!(
-                "fiducia KV secret overlay disabled: ATHLETO_SECRETS_KEY is unset. The fiducia \
-                 KV stores values in cleartext, so secrets must be envelope-encrypted and this \
-                 app refuses to read plaintext from it; using environment only. See \
-                 docs/secrets-management.md"
-            );
-            return Self { overlay };
-        };
+        let key = secrets_key();
         for name in MANAGED_KEYS {
             if env_opt(name).is_some() {
                 continue; // env wins; don't even ask
@@ -165,14 +162,15 @@ impl SecretSource {
             let Some(value) = client.kv_get(&kv_key(name)).await else {
                 continue;
             };
-            match decrypt_envelope(&key, value.trim()) {
-                Some(plaintext) if !plaintext.is_empty() => {
+            match decode_fiducia_value(key.as_ref(), &value) {
+                Some(plaintext) => {
                     overlay.insert((*name).to_string(), plaintext);
                 }
                 _ => tracing::warn!(
                     key = *name,
-                    "fiducia KV value is not a decryptable v1 envelope; ignoring (plaintext \
-                     values are never accepted as secrets)"
+                    protection = ?value.at_rest,
+                    "fiducia KV value lacks trusted protection metadata or a decryptable legacy \
+                     envelope; ignoring"
                 ),
             }
         }
@@ -180,7 +178,7 @@ impl SecretSource {
             // Names only — never values.
             let mut names: Vec<&str> = overlay.keys().map(String::as_str).collect();
             names.sort_unstable();
-            tracing::info!(keys = ?names, "config filled from fiducia KV overlay (decrypted)");
+            tracing::info!(keys = ?names, "config filled from fiducia KV overlay");
         }
         Self { overlay }
     }
@@ -259,12 +257,52 @@ mod tests {
     }
 
     #[test]
-    fn managed_keys_cover_every_payment_and_billing_var() {
+    fn fiducia_values_support_node_encryption_plaintext_and_legacy_envelopes() {
+        let direct_encrypted = FiduciaKvValue {
+            value: "node-decrypted-secret".into(),
+            at_rest: KvAtRest::Encrypted,
+        };
+        assert_eq!(
+            decode_fiducia_value(None, &direct_encrypted).as_deref(),
+            Some("node-decrypted-secret")
+        );
+
+        let explicit_plaintext = FiduciaKvValue {
+            value: "non-sensitive-config".into(),
+            at_rest: KvAtRest::Plaintext,
+        };
+        assert_eq!(
+            decode_fiducia_value(None, &explicit_plaintext).as_deref(),
+            Some("non-sensitive-config")
+        );
+
+        let unknown_raw = FiduciaKvValue {
+            value: "untrusted-legacy-raw".into(),
+            at_rest: KvAtRest::Unknown,
+        };
+        assert!(decode_fiducia_value(None, &unknown_raw).is_none());
+
+        let key = [7u8; 32];
+        let legacy = FiduciaKvValue {
+            value: seal_envelope(&key, "legacy-secret").unwrap(),
+            at_rest: KvAtRest::Unknown,
+        };
+        assert!(decode_fiducia_value(None, &legacy).is_none());
+        assert_eq!(
+            decode_fiducia_value(Some(&key), &legacy).as_deref(),
+            Some("legacy-secret")
+        );
+    }
+
+    #[test]
+    fn managed_keys_cover_every_payment_billing_and_auth_secret() {
         for name in [
             "ATHLETO_STRIPE_SECRET_KEY",
             "ATHLETO_PAYPAL_CLIENT_SECRET",
             "ATHLETO_SQUARE_ACCESS_TOKEN",
             "ATHLETO_BILLING_TENANT_ID",
+            "ATHLETO_TURNSTILE_SECRET",
+            "ATHLETO_MFA_STATE_KEY",
         ] {
             assert!(
                 MANAGED_KEYS.contains(&name),

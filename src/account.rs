@@ -31,12 +31,16 @@ fn new_api_key() -> String {
 // First-login setup: choose personal vs business.
 
 /// GET /account/setup
+///
+/// Goes through `require_full` like every other account route: an AAL1
+/// session belonging to a 2FA-enrolled user must finish step-up first. See
+/// the note on [`setup_submit`] for why this matters here specifically.
 pub async fn setup_page(State(state): State<SharedState>, user: MaybeUser, biz: Biz) -> Response {
-    let Some(auth_user) = user.as_ref() else {
-        return Redirect::to("/login").into_response();
+    let (auth_user, profile) = match auth::require_full(&state, &user).await {
+        Ok(pair) => pair,
+        Err(response) => return response,
     };
-    let profile = auth::load_profile(&state, auth_user.id).await;
-    setup_form(auth_user, biz, profile.as_ref(), None).into_response()
+    setup_form(&auth_user, biz, profile.as_ref(), None).into_response()
 }
 
 fn setup_form(
