@@ -90,7 +90,7 @@ jobs:
           DATABASE_URL="$DATABASE_URL" PORT=8145 ATHLETO_PUBLIC_BASE_URL=http://localhost:8145 \
             ./target/debug/athleto-app-rs > app.log 2>&1 &
           echo "waiting for /healthz + seeded products..."
-          for i in $(seq 1 40); do
+          for _ in $(seq 1 40); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8145/healthz || true)
             n=$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM products" 2>/dev/null || echo 0)
             if [ "$code" = "200" ] && [ "${n:-0}" -ge 1 ]; then echo "ready ($n products)"; break; fi
@@ -120,7 +120,7 @@ jobs:
         working-directory: e2e
         env:
           E2E_ENGINE: ${{ matrix.engine }}
-        run: node --test --test-timeout=60000 --test-concurrency=1 *.test.mjs
+        run: node --test --test-timeout=60000 --test-concurrency=1 ./*.test.mjs
 
       - name: App log on failure
         if: failure()
