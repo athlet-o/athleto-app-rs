@@ -1102,9 +1102,32 @@ pub async fn cart_hold_until(
 
 /// Hygiene only: the claim/availability queries already ignore expired rows.
 pub async fn sweep_expired_holds(conn: &DatabaseConnection) -> Result<u64, DbErr> {
-    let result = conn
+    // Self-guard so concurrent replicas don't all issue the same DELETE, using
+    // a TRANSACTION-scoped advisory lock (pg_try_advisory_xact_lock) acquired
+    // and released within this one transaction. That is the only advisory-lock
+    // shape safe through the Supabase transaction pooler: a session-scoped lock
+    // can have its acquire and release routed to different pooled backends,
+    // leaking the lock permanently. This mirrors run_due_recurring_orders'
+    // per-order guard, and it is what lets coordinate::run_singleton run this
+    // job directly when no cross-cluster lease (fiducia) is configured.
+    let tx = conn.begin().await?;
+    let got: bool = tx
+        .query_one(stmt(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS got",
+            ["hold-sweeper".into()],
+        ))
+        .await?
+        .ok_or_else(|| DbErr::RecordNotFound("advisory lock returned no row".to_string()))?
+        .try_get("", "got")?;
+    if !got {
+        // Another replica is sweeping this tick; nothing for us to do.
+        tx.rollback().await?;
+        return Ok(0);
+    }
+    let result = tx
         .execute(stmt("DELETE FROM stock_holds WHERE held_until < now()", []))
         .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
