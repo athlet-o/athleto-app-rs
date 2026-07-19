@@ -41,9 +41,10 @@ async fn order_items_and_shipments_are_scoped_to_the_owner() {
     ))
     .await
     .expect("seed order item");
+    // status defaults to 'packing'; carrier is nullable — keep the seed to
+    // columns that exist so the test stays valid against the schema contract.
     conn.execute(stmt(
-        "INSERT INTO shipments (order_id, carrier, status) \
-         VALUES ($1, 'ups', 'pending')",
+        "INSERT INTO shipments (order_id, carrier) VALUES ($1, 'ups')",
         vec![order_id.into()],
     ))
     .await
