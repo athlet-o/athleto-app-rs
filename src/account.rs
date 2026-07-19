@@ -96,15 +96,24 @@ pub struct SetupRequest {
 }
 
 /// POST /account/setup
+///
+/// Gated by `require_full`, not just a session check. This handler calls
+/// `db::upsert_profile`, which clears `b2b_approved_at` on a downgrade to
+/// b2c. Without the AAL2 gate, someone holding a magic link for a
+/// 2FA-enrolled account could reach a live AAL1 session and destroy a vetted
+/// B2B account's approval before ever completing step-up — an ops re-approval
+/// round trip triggered pre-2FA.
 pub async fn setup_submit(
     State(state): State<SharedState>,
     user: MaybeUser,
     biz: Biz,
     Form(request): Form<SetupRequest>,
 ) -> Response {
-    let Some(auth_user) = user.as_ref() else {
-        return Redirect::to("/login").into_response();
+    let (auth_user, _) = match auth::require_full(&state, &user).await {
+        Ok(pair) => pair,
+        Err(response) => return response,
     };
+    let auth_user = &auth_user;
     let Some(pool) = &state.pool else {
         return pages::layout_for(
             "Account setup | AthletO",
