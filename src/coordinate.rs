@@ -450,12 +450,37 @@ fn parse_rate_limit(body: &serde_json::Value) -> Result<bool, FiduciaRequestErro
 mod tests {
     use super::*;
 
-    #[test]
-    fn advisory_key_is_stable_and_distinct_per_job() {
-        assert_eq!(advisory_key("hold-sweeper"), advisory_key("hold-sweeper"));
-        assert_ne!(
-            advisory_key("hold-sweeper"),
-            advisory_key("recurring-runner")
+    #[tokio::test]
+    async fn run_singleton_runs_work_when_fiducia_is_unset() {
+        // No fiducia config -> the job runs directly (its own transaction-
+        // scoped advisory lock is the guard) and its output is returned.
+        let config = Config::default();
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let out = run_singleton(&config, "hold-sweeper", 120, || async {
+            ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            7u64
+        })
+        .await;
+        assert_eq!(out, Some(7));
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn run_singleton_skips_work_on_invalid_fiducia_config() {
+        // Partial fiducia config is an operator error: skip the tick, and do
+        // NOT run the work unguarded.
+        let mut config = Config::default();
+        config.fiducia_url = Some("https://hetzner.lb.fiducia.cloud".into());
+        // api key intentionally left unset -> PartialConfiguration
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let out: Option<()> = run_singleton(&config, "hold-sweeper", 120, || async {
+            ran.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(out, None);
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "work must not run when fiducia config is invalid"
         );
     }
 
