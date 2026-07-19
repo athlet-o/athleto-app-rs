@@ -469,9 +469,11 @@ mod tests {
     async fn run_singleton_skips_work_on_invalid_fiducia_config() {
         // Partial fiducia config is an operator error: skip the tick, and do
         // NOT run the work unguarded.
-        let mut config = Config::default();
-        config.fiducia_url = Some("https://hetzner.lb.fiducia.cloud".into());
-        // api key intentionally left unset -> PartialConfiguration
+        // fiducia_url set, api key intentionally unset -> PartialConfiguration
+        let config = Config {
+            fiducia_url: Some("https://hetzner.lb.fiducia.cloud".into()),
+            ..Config::default()
+        };
         let ran = std::sync::atomic::AtomicBool::new(false);
         let out: Option<()> = run_singleton(&config, "hold-sweeper", 120, || async {
             ran.store(true, std::sync::atomic::Ordering::SeqCst);
