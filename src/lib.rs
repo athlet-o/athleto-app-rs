@@ -330,9 +330,14 @@ pub fn router(state: SharedState) -> Router {
             REQUEST_TIMEOUT,
         ))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        // CSRF enforcement + security headers on every route (incl. the 404
-        // fallback); /api/v1 is CSRF-exempt inside the middleware.
-        .layer(axum::middleware::from_fn(security::apply))
+        // CSRF enforcement + security headers + Host allowlist on every route
+        // (incl. the 404 fallback); /api/v1 is CSRF-exempt inside the
+        // middleware. The allowlist is fed as middleware state so the check
+        // does not need the whole AppState.
+        .layer(axum::middleware::from_fn_with_state(
+            state.config.allowed_hosts.clone().map(std::sync::Arc::new),
+            security::apply,
+        ))
         // Outermost request instrumentation extracts W3C trace context and
         // records route-bounded OTEL spans/metrics for the collector.
         .layer(axum::middleware::from_fn(telemetry::track_http_request))
