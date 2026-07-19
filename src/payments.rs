@@ -230,7 +230,7 @@ pub async fn start_payment(
             "order does not belong to the current customer".into(),
         ));
     }
-    let items = db::order_items(pool, order_id).await?;
+    let items = db::order_items(pool, user_id, order_id).await?;
     let shipping_cents = facts.total_cents
         - items
             .iter()
