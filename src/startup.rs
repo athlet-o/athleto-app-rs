@@ -208,17 +208,22 @@ fn spawn_background_jobs(pool: &sea_orm::DatabaseConnection, config: &Config) {
         let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             ticker.tick().await;
-            let Some(lead) =
-                coordinate::try_lead(&sweep_pool, &sweep_config, "hold-sweeper", 120).await
-            else {
-                continue;
-            };
-            match db::sweep_expired_holds(&sweep_pool).await {
-                Ok(0) => {}
-                Ok(swept) => tracing::info!(swept, job.name = "hold-sweeper", "job completed"),
-                Err(err) => tracing::warn!(error = %err, job.name = "hold-sweeper", "job failed"),
+            // run_singleton returns None when another replica holds this tick's
+            // fiducia lease; Some(job_result) when we ran (fiducia leader, or
+            // no fiducia and the DELETE self-guarded via its xact advisory lock).
+            match coordinate::run_singleton(&sweep_config, "hold-sweeper", 120, || {
+                db::sweep_expired_holds(&sweep_pool)
+            })
+            .await
+            {
+                None | Some(Ok(0)) => {}
+                Some(Ok(swept)) => {
+                    tracing::info!(swept, job.name = "hold-sweeper", "job completed")
+                }
+                Some(Err(err)) => {
+                    tracing::warn!(error = %err, job.name = "hold-sweeper", "job failed")
+                }
             }
-            lead.release().await;
         }
     });
 
@@ -229,23 +234,21 @@ fn spawn_background_jobs(pool: &sea_orm::DatabaseConnection, config: &Config) {
         let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             ticker.tick().await;
-            let Some(lead) =
-                coordinate::try_lead(&recur_pool, &recur_config, "recurring-runner", 120).await
-            else {
-                continue;
-            };
-            match db::run_due_recurring_orders(&recur_pool).await {
-                Ok(0) => {}
-                Ok(materialized) => {
+            match coordinate::run_singleton(&recur_config, "recurring-runner", 120, || {
+                db::run_due_recurring_orders(&recur_pool)
+            })
+            .await
+            {
+                None | Some(Ok(0)) => {}
+                Some(Ok(materialized)) => {
                     tracing::info!(materialized, job.name = "recurring-runner", "job completed")
                 }
-                Err(err) => tracing::warn!(
+                Some(Err(err)) => tracing::warn!(
                     error = %err,
                     job.name = "recurring-runner",
                     "job failed"
                 ),
             }
-            lead.release().await;
         }
     });
 }
