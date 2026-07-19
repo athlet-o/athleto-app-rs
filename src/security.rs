@@ -10,7 +10,7 @@
 //! ambient cookie credentials), so it is exempt.
 
 use axum::body::Body;
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -18,6 +18,21 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use uuid::Uuid;
 
 use crate::pages;
+
+/// The Host allowlist, cloned out of `Config` so the middleware is `State`-fed
+/// rather than reaching for the whole `AppState`. `None` means unset.
+pub type HostAllowlist = Option<std::sync::Arc<Vec<String>>>;
+
+/// Whether an inbound Host is acceptable. Ports are ignored so a dev
+/// `localhost:8080` matches an allowlisted `localhost`. An unset allowlist is
+/// permissive by design (dev / degraded boot); production sets ALLOWED_HOSTS.
+fn host_is_allowed(allowlist: &HostAllowlist, host: &str) -> bool {
+    let Some(allowed) = allowlist else {
+        return true;
+    };
+    let bare = host.split(':').next().unwrap_or(host);
+    allowed.iter().any(|entry| entry.eq_ignore_ascii_case(bare))
+}
 
 pub const CSRF_COOKIE: &str = "athleto_csrf";
 pub const CSRF_FORM_FIELD: &str = "csrf_token";

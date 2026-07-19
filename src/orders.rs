@@ -484,8 +484,8 @@ pub async fn order_detail_page(
     let Some(order) = db::get_order(pool, auth_user.id, order_id).await? else {
         return Ok(Redirect::to("/orders").into_response());
     };
-    let items = db::order_items(pool, order_id).await?;
-    let shipments = db::shipments_for_order(pool, order_id).await?;
+    let items = db::order_items(pool, auth_user.id, order_id).await?;
+    let shipments = db::shipments_for_order(pool, auth_user.id, order_id).await?;
     let primary_shipment = shipments.first();
 
     Ok(pages::layout_for(
