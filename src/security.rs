@@ -125,7 +125,12 @@ fn csrf_rejection() -> Response {
 /// Single security middleware: mints the per-request CSRF token + CSP nonce,
 /// enforces CSRF on state-changing requests, and stamps security headers on
 /// every response.
-pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
+pub async fn apply(
+    State(allowlist): State<HostAllowlist>,
+    jar: CookieJar,
+    request: Request,
+    next: Next,
+) -> Response {
     let cookie_token = jar
         .get(CSRF_COOKIE)
         .map(|cookie| cookie.value().to_string())
@@ -136,6 +141,27 @@ pub async fn apply(jar: CookieJar, request: Request, next: Next) -> Response {
     // Computed up front so the early CSRF/oversize rejections below carry the
     // same security headers as a normal response (they used to skip them).
     let hsts = wants_hsts(&request);
+
+    // Reject a Host the deployment does not claim, before any handler runs.
+    // This module's doc has always advertised the allowlist, but nothing
+    // enforced it: an arbitrary Host was served, enabling cache-poisoning and
+    // absolute-URL confusion if a cache or proxy is ever keyed on Host. The
+    // allowlist is populated from ALLOWED_HOSTS (set in production); when it
+    // is unset this is a no-op, preserving dev and degraded-boot behaviour.
+    if let Some(host) = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    {
+        if !host_is_allowed(&allowlist, host) {
+            return finish(
+                StatusCode::MISDIRECTED_REQUEST.into_response(),
+                &token,
+                is_new_token,
+                Some((nonce.clone(), hsts)),
+            );
+        }
+    }
 
     let state_changing = matches!(
         *request.method(),
