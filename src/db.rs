@@ -1347,15 +1347,21 @@ impl UserShipmentRow {
 const SHIPMENT_COLUMNS: &str = "s.id, s.status::text AS status, s.carrier, s.tracking_number, \
      s.ship_date, s.eta_earliest, s.eta_latest, s.delivered_at";
 
+/// Shipments for one of `user_id`'s orders. The `orders` join scopes the read
+/// to the owner for the same reason as [`order_items`]: RLS is bypassed, so
+/// this predicate is the authorization boundary, not a redundant check.
 pub async fn shipments_for_order(
     conn: &DatabaseConnection,
+    user_id: Uuid,
     order_id: Uuid,
 ) -> Result<Vec<Shipment>, DbErr> {
     Shipment::find_by_statement(stmt(
         &format!(
-            "SELECT {SHIPMENT_COLUMNS} FROM shipments s WHERE s.order_id = $1 ORDER BY s.created_at"
+            "SELECT {SHIPMENT_COLUMNS} FROM shipments s \
+             JOIN orders o ON o.id = s.order_id \
+             WHERE s.order_id = $1 AND o.user_id = $2 ORDER BY s.created_at"
         ),
-        [order_id.into()],
+        [order_id.into(), user_id.into()],
     ))
     .all(conn)
     .await
