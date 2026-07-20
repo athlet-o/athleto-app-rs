@@ -549,11 +549,20 @@ mod tests {
     fn hash_key_is_lowercase_hex_never_leaks_plaintext_and_avalanches() {
         let digest = hash_key("athk_live_super_secret_value");
         assert_eq!(digest.len(), 64);
-        assert!(digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
         assert!(!digest.contains("secret"));
         let near = hash_key("athk_live_super_secret_valuf"); // one char different
-        let differing = digest.chars().zip(near.chars()).filter(|(a, b)| a != b).count();
-        assert!(differing > 20, "weak avalanche: only {differing} hex chars changed");
+        let differing = digest
+            .chars()
+            .zip(near.chars())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differing > 20,
+            "weak avalanche: only {differing} hex chars changed"
+        );
     }
 
     // An order item may carry both product_id and slug (resolved by id first) or
@@ -561,9 +570,10 @@ mod tests {
     // the handler owns the semantics, not serde.
     #[test]
     fn api_order_item_tolerates_ambiguous_and_empty_id_forms() {
-        let both: ApiOrderItem =
-            serde_json::from_value(serde_json::json!({ "product_id": 7, "slug": "wobble-24", "qty": 3 }))
-                .unwrap();
+        let both: ApiOrderItem = serde_json::from_value(
+            serde_json::json!({ "product_id": 7, "slug": "wobble-24", "qty": 3 }),
+        )
+        .unwrap();
         assert_eq!(both.product_id, Some(7));
         assert_eq!(both.slug.as_deref(), Some("wobble-24"));
         let neither: ApiOrderItem =

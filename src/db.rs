@@ -1578,7 +1578,12 @@ pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, 
 
         let lines = tx
             .query_all(stmt(
-                "SELECT product_id, qty, unit_price_cents FROM order_items WHERE order_id = $1",
+                // Ordered by product_id so the FOR UPDATE loop below takes
+                // inventory rows in the same ascending order as `place_order`
+                // (which sorts its lines for exactly this reason). Two writers
+                // that lock overlapping products in opposite orders deadlock.
+                "SELECT product_id, qty, unit_price_cents FROM order_items \
+                 WHERE order_id = $1 ORDER BY product_id",
                 [subscription_id.into()],
             ))
             .await?
@@ -1604,7 +1609,22 @@ pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, 
                 ))
                 .await?;
             if let Some(on_hand_row) = on_hand {
-                if on_hand_row.try_get::<i32>("", "on_hand")? < *qty {
+                // Subtract live cart holds, the same way `place_order` does.
+                // Comparing against raw on_hand lets a recurring cycle consume
+                // stock a shopper is actively holding, turning their checkout
+                // into a shortage on stock they had reserved.
+                let held = tx
+                    .query_one(stmt(
+                        "SELECT COALESCE(SUM(qty), 0)::BIGINT AS held FROM stock_holds \
+                         WHERE product_id = $1 AND held_until > now()",
+                        [(*product_id).into()],
+                    ))
+                    .await?
+                    .map(|row| row.try_get::<i64>("", "held"))
+                    .transpose()?
+                    .unwrap_or(0);
+                let available = i64::from(on_hand_row.try_get::<i32>("", "on_hand")?) - held;
+                if available < i64::from(*qty) {
                     short = true;
                     break;
                 }
@@ -1712,6 +1732,20 @@ pub async fn set_order_payment_status(
     let Some(row) = order::Entity::find_by_id(order_id).one(conn).await? else {
         return Ok(());
     };
+    // Settlement is terminal. Providers redeliver webhooks out of order, and the
+    // customer's return-URL landing races the webhook for the same payment, so
+    // without this guard a late `checkout.session.completed` or a second
+    // `/pay/success` can walk a Paid order back to Processing/Pending and show
+    // the customer an unpaid order they have already been charged for. Only a
+    // refund may supersede Paid.
+    if row.payment_status == PaymentStatus::Paid && status != PaymentStatus::Refunded {
+        tracing::debug!(
+            %order_id,
+            attempted = ?status,
+            "ignoring a payment-status write that would regress a paid order"
+        );
+        return Ok(());
+    }
     let stamp_paid = status == PaymentStatus::Paid && row.paid_at.is_none();
     let mut active: order::ActiveModel = row.into();
     active.payment_status = Set(status);
@@ -2079,7 +2113,10 @@ mod payment_enum_tests {
         .map(|f| f.interval_days())
         .collect();
         assert!(days.iter().all(|&d| d > 0));
-        assert!(days.windows(2).all(|w| w[0] < w[1]), "cadence not monotonic: {days:?}");
+        assert!(
+            days.windows(2).all(|w| w[0] < w[1]),
+            "cadence not monotonic: {days:?}"
+        );
     }
 
     // Cents math: a single line can hold the extreme (i32::MAX price x i32::MAX
@@ -2103,6 +2140,9 @@ mod payment_enum_tests {
             i64::from(i32::MAX) * i64::from(i32::MAX)
         );
         let one = line.line_total_cents();
-        assert!(one.checked_add(one).and_then(|s| s.checked_add(one)).is_none());
+        assert!(one
+            .checked_add(one)
+            .and_then(|s| s.checked_add(one))
+            .is_none());
     }
 }
