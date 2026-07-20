@@ -225,6 +225,13 @@ pub async fn checkout(
             ))
             .into_response())
         }
+        Err(db::OrderError::AlreadyPlaced) => {
+            // A concurrent or double-submitted checkout already placed this
+            // cart's order. Idempotent: send the customer to their orders rather
+            // than creating (or erroring on) a duplicate.
+            let _ = state.cart_events.send(cart_id);
+            Ok((jar, Redirect::to("/orders?placed=1")).into_response())
+        }
         Err(db::OrderError::Db(err)) => Err(AppError::Db(err)),
     }
 }

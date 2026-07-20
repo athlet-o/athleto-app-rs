@@ -1150,6 +1150,10 @@ pub struct InsufficientLine {
 #[derive(Debug)]
 pub enum OrderError {
     Insufficient(Vec<InsufficientLine>),
+    /// The cart was already checked out by a concurrent or earlier request (its
+    /// items were consumed under the cart lock). Idempotent no-op — no new order
+    /// was created, so callers should treat it like a benign "already placed".
+    AlreadyPlaced,
     Db(DbErr),
 }
 
@@ -1179,6 +1183,32 @@ pub async fn place_order(
     sorted.sort_by_key(|line| line.product_id);
 
     let tx = conn.begin().await.map_err(OrderError::Db)?;
+
+    // Idempotency for the cart path: serialize concurrent checkouts of the same
+    // cart on the cart row, then confirm the cart still has items *inside* the
+    // transaction. A double-submit / proxy retry / concurrent checkout blocks on
+    // this lock; after the winner commits (which clears cart_items) the loser
+    // re-reads an empty cart and aborts instead of placing a duplicate order and
+    // double-decrementing stock. The API path (cart_id = None) is unaffected.
+    if let Some(cart_id) = cart_id {
+        tx.query_one(stmt(
+            "SELECT id FROM carts WHERE id = $1 FOR UPDATE",
+            [cart_id.into()],
+        ))
+        .await?;
+        let has_items = tx
+            .query_one(stmt(
+                "SELECT 1 AS present FROM cart_items WHERE cart_id = $1 LIMIT 1",
+                [cart_id.into()],
+            ))
+            .await?
+            .is_some();
+        if !has_items {
+            tx.rollback().await.map_err(OrderError::Db)?;
+            return Err(OrderError::AlreadyPlaced);
+        }
+    }
+
     let mut shortages = Vec::new();
     for line in &sorted {
         let on_hand = tx
