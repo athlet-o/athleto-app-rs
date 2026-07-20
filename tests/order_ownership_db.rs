@@ -51,7 +51,9 @@ async fn order_items_and_shipments_are_scoped_to_the_owner() {
     .expect("seed shipment");
 
     // The owner sees the line item and the shipment.
-    let owner_items = db::order_items(&conn, owner, order_id).await.expect("items");
+    let owner_items = db::order_items(&conn, owner, order_id)
+        .await
+        .expect("items");
     assert_eq!(owner_items.len(), 1, "owner must see their own line item");
     let owner_ships = db::shipments_for_order(&conn, owner, order_id)
         .await

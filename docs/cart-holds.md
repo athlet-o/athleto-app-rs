@@ -61,7 +61,26 @@ Notes on edge cases:
 Not in the hold path. Its legitimate roles here, when the app grows past one
 replica: leader election for the sweeper and recurring-order runner, and
 admission control (rate limiting) in front of Postgres for flash-sale spikes.
-Seconds-long leases — the tool's sweet spot. See also RFC 0001
-(`fiducia-cloud/fiducia-node.rs#12`), which proposes a proper long-TTL
-reservations primitive for multi-service inventory; for this single-database
-app, the `held_until` column remains the right answer.
+Seconds-long leases — the tool's sweet spot.
+
+Fiducia's own RFC 0001 (`fiducia-node.rs/docs/rfcs/rfc-0001-reservations.md`,
+still Draft — no `/v1/reservations` routes exist in the node) argues the same
+conclusion from the other side, and is worth quoting because fiducia *will*
+accept a 90-minute lock TTL and its validator has a test blessing exactly that
+shape:
+
+> Today they either misuse a lock (90-minute TTL on a mutex: no capacity
+> semantics, no listing, holder death releases a hold the customer still
+> believes they have) … Crash of the *claiming process* must NOT release the
+> reservation … That single difference (no liveness coupling) is why this cannot
+> be a mode on locks.
+
+So "fiducia accepts it" is not "fiducia is the right home for it". For this
+single-database app the `held_until` column remains the right answer, and it
+would remain the right answer even after the reservations primitive lands —
+until inventory is claimed by more than one service.
+
+Where a lease *does* belong in the order path is mutual exclusion around
+**external, non-transactional side effects** — creating a provider checkout
+session or capturing a payment — because a Postgres transaction cannot roll
+those back. See `known-gaps-and-hardening.md` §6b.
