@@ -309,6 +309,16 @@ pub async fn start_payment(
 
 const STRIPE_API: &str = "https://api.stripe.com";
 
+/// A Stripe Checkout Session id is `cs_` followed by URL-safe chars. Validate
+/// before interpolating a caller-supplied `session_id` into the API path so a
+/// malformed value can't reshape the outbound request.
+fn is_stripe_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.starts_with("cs_")
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 // These values map one-to-one to the hosted checkout payload, so retaining
 // named arguments keeps amount/owner/origin review straightforward.
 #[allow(clippy::too_many_arguments)]
