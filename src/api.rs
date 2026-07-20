@@ -526,4 +526,43 @@ mod tests {
         assert!(matches!(by_id.kind, Some(db::OrderKind::Recurring)));
         assert!(matches!(by_id.frequency, Some(db::OrderFrequency::Monthly)));
     }
+
+    // The ops/warehouse credential is compared with constant_time_eq; a length
+    // leak or early-return would let an attacker time-oracle the key.
+    #[test]
+    fn constant_time_eq_accepts_only_identical_strings() {
+        assert!(constant_time_eq("athk_live_secret", "athk_live_secret"));
+        assert!(!constant_time_eq("athk_live_secret", "athk_live_secreT")); // one byte, same length
+        assert!(!constant_time_eq("short", "a-much-longer-secret")); // different lengths
+        assert!(constant_time_eq("", "")); // both empty compare equal
+        assert!(!constant_time_eq("", "x"));
+    }
+
+    // API keys are stored only as SHA-256 hashes. The hash must be lowercase hex,
+    // reveal no plaintext, and avalanche so a near-miss key can't be inferred.
+    #[test]
+    fn hash_key_is_lowercase_hex_never_leaks_plaintext_and_avalanches() {
+        let digest = hash_key("athk_live_super_secret_value");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(!digest.contains("secret"));
+        let near = hash_key("athk_live_super_secret_valuf"); // one char different
+        let differing = digest.chars().zip(near.chars()).filter(|(a, b)| a != b).count();
+        assert!(differing > 20, "weak avalanche: only {differing} hex chars changed");
+    }
+
+    // An order item may carry both product_id and slug (resolved by id first) or
+    // neither (rejected 422 at resolve time) — both must at least deserialize so
+    // the handler owns the semantics, not serde.
+    #[test]
+    fn api_order_item_tolerates_ambiguous_and_empty_id_forms() {
+        let both: ApiOrderItem =
+            serde_json::from_value(serde_json::json!({ "product_id": 7, "slug": "wobble-24", "qty": 3 }))
+                .unwrap();
+        assert_eq!(both.product_id, Some(7));
+        assert_eq!(both.slug.as_deref(), Some("wobble-24"));
+        let neither: ApiOrderItem =
+            serde_json::from_value(serde_json::json!({ "qty": 1 })).unwrap();
+        assert!(neither.product_id.is_none() && neither.slug.is_none());
+    }
 }
