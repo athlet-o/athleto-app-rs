@@ -2034,6 +2034,81 @@ pub async fn latest_email_for_user(
 }
 
 #[cfg(test)]
+mod db_tls_tests {
+    use super::*;
+
+    #[test]
+    fn public_host_defaults_to_verify_full_with_the_pinned_ca() {
+        let decision = decide_db_tls(
+            "aws-0-ca-central-1.pooler.supabase.com",
+            false,
+            None,
+            Some("/tmp/ca.crt".to_string()),
+        );
+        assert_eq!(
+            decision,
+            Some(("verify-full".to_string(), Some("/tmp/ca.crt".to_string())))
+        );
+    }
+
+    #[test]
+    fn public_host_without_a_ca_falls_back_to_require_not_an_outage() {
+        // No CA available -> encrypted but unverified, never a failed connect.
+        let decision = decide_db_tls("db.example.com", false, None, None);
+        assert_eq!(decision, Some(("require".to_string(), None)));
+    }
+
+    #[test]
+    fn local_and_internal_hosts_stay_plaintext() {
+        // CI connects to localhost:5432 with no TLS; dev likewise. These must
+        // be left completely untouched or the whole test/dev flow breaks.
+        for host in ["localhost", "127.0.0.1", "10.1.2.3", "db.default.svc.cluster.local"] {
+            assert_eq!(
+                decide_db_tls(host, false, None, Some("/tmp/ca.crt".to_string())),
+                None,
+                "{host} should stay plaintext"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_sslmode_is_never_overridden() {
+        // If the operator put sslmode in the URL, respect it verbatim.
+        assert_eq!(
+            decide_db_tls("aws-0-ca-central-1.pooler.supabase.com", true, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_override_selects_the_mode() {
+        assert_eq!(
+            decide_db_tls("db.example.com", false, Some("require".to_string()), None),
+            Some(("require".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn enforce_appends_sslmode_for_a_public_host_but_not_localhost() {
+        let local = enforce_db_tls("postgres://postgres:postgres@localhost:5432/athleto_test");
+        assert!(!local.contains("sslmode"), "localhost must be untouched: {local}");
+
+        let public = enforce_db_tls(
+            "postgres://postgres.ref:pw@aws-0-ca-central-1.pooler.supabase.com:5432/postgres",
+        );
+        assert!(public.contains("sslmode=verify-full"), "got: {public}");
+        assert!(public.contains("sslrootcert="), "got: {public}");
+    }
+
+    #[test]
+    fn the_embedded_ca_is_the_supabase_root() {
+        assert!(SUPABASE_ROOT_CA.contains("BEGIN CERTIFICATE"));
+        // Sanity: it's a single PEM cert, not an accidental empty include.
+        assert_eq!(SUPABASE_ROOT_CA.matches("BEGIN CERTIFICATE").count(), 1);
+    }
+}
+
+#[cfg(test)]
 mod order_fulfillment_tests {
     use super::*;
 
