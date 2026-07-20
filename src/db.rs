@@ -1452,11 +1452,17 @@ pub async fn record_fulfillment(
         .ok_or_else(|| DbErr::RecordNotFound("shipment insert returned no row".to_string()))?;
     let shipment_id: Uuid = inserted.try_get("", "id")?;
 
-    tx.execute(stmt(
-        "UPDATE orders SET status = 'fulfilled' WHERE id = $1",
-        [order_id.into()],
-    ))
-    .await?;
+    let updated = tx
+        .execute(stmt(
+            "UPDATE orders SET status = 'fulfilled' WHERE id = $1 AND status <> 'cancelled'",
+            [order_id.into()],
+        ))
+        .await?;
+    if updated.rows_affected() == 0 {
+        // Order is cancelled or gone: roll back so we never persist a shipment
+        // (and an 856 ASN) against an order that can't legitimately ship.
+        return Ok(None);
+    }
     tx.commit().await?;
     Ok(Some(shipment_id))
 }
