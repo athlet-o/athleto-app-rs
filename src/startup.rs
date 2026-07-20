@@ -184,7 +184,17 @@ async fn run_inner() -> anyhow::Result<()> {
         }
     }
 
-    let state: SharedState = Arc::new(AppState::new(pool, reqwest::Client::new(), config));
+    // One hardened outbound client shared by every provider call: a total
+    // timeout so a stalled upstream can't accumulate detached tasks, and no
+    // redirect-follow so a `bearer_auth(secret)` request can never forward the
+    // merchant secret to a redirect target.
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let state: SharedState = Arc::new(AppState::new(pool, http, config));
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "athleto-app-rs listening");
