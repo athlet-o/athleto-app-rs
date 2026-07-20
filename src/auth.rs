@@ -105,6 +105,14 @@ impl MaybeUser {
 struct GotrueUser {
     id: String,
     email: Option<String>,
+    // GoTrue's user object carries the enrolled MFA factors directly. This is
+    // the AUTHORITATIVE factor list and it is parsed here so AAL2 enforcement
+    // does not depend on the shape of the separate /auth/v1/factors response.
+    // A user with no factors yields an empty array, never a missing key, so
+    // defaulting here cannot hide an enrolled factor — it only tolerates the
+    // legitimate no-MFA case.
+    #[serde(default)]
+    factors: Vec<Factor>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -137,6 +145,25 @@ async fn fetch_mfa_state(state: &SharedState, token: &str) -> Option<GotrueMfaSt
     }
 }
 
+/// Combine the factor lists from `/auth/v1/user` and `/auth/v1/factors`,
+/// deduplicating by factor id and preferring whichever copy reports the
+/// stronger (verified) status. A factor known to either endpoint counts, so a
+/// verified factor must be absent from BOTH to escape AAL2 enforcement.
+fn merge_factors(primary: Vec<Factor>, secondary: Vec<Factor>) -> Vec<Factor> {
+    let mut by_id: std::collections::HashMap<String, Factor> = std::collections::HashMap::new();
+    for factor in primary.into_iter().chain(secondary) {
+        match by_id.get(&factor.id) {
+            // Keep the entry that is verified if the two disagree, so a stale
+            // "unverified" copy can never mask a verified one.
+            Some(existing) if existing.is_verified() && !factor.is_verified() => {}
+            _ => {
+                by_id.insert(factor.id.clone(), factor);
+            }
+        }
+    }
+    by_id.into_values().collect()
+}
+
 async fn fetch_user(state: &SharedState, token: &str) -> Option<AuthUser> {
     let (base, key) = state.config.supabase()?;
     let response = state
@@ -152,11 +179,23 @@ async fn fetch_user(state: &SharedState, token: &str) -> Option<AuthUser> {
             match response.json::<GotrueUser>().await {
                 Ok(user) => {
                     let mfa = fetch_mfa_state(state, token).await?;
+                    // Union the two factor sources by id. Previously the
+                    // factor list came ONLY from /auth/v1/factors, so any 200
+                    // response missing/renaming its `factors` key silently
+                    // emptied the list and needs_aal2() went false for EVERY
+                    // enrolled user (a fail-open 2FA bypass). Trusting either
+                    // source means a verified factor has to disappear from
+                    // BOTH to be missed, while a genuine no-MFA user (empty in
+                    // both) still needs no step-up — so this cannot lock anyone
+                    // out. AAL still comes from current_level, defaulting to
+                    // the conservative "aal1" (assume NOT stepped up) when the
+                    // level is absent.
+                    let factors = merge_factors(user.factors, mfa.factors);
                     Uuid::parse_str(&user.id).ok().map(|id| AuthUser {
                         id,
                         email: user.email,
                         aal: mfa.current_level.unwrap_or_else(|| "aal1".to_string()),
-                        factors: mfa.factors,
+                        factors,
                         access_token: token.to_string(),
                     })
                 }
@@ -1253,6 +1292,62 @@ mod tests {
             factors,
             access_token: "t".into(),
         }
+    }
+
+    fn factor_id(id: &str, status: &str) -> Factor {
+        Factor {
+            id: id.into(),
+            factor_type: "totp".into(),
+            status: status.into(),
+            friendly_name: None,
+        }
+    }
+
+    #[test]
+    fn merge_factors_catches_a_verified_factor_present_in_only_one_source() {
+        // The fail-open this closes: /auth/v1/factors returned a 200 whose
+        // `factors` was empty/renamed, so the enrolled factor was invisible.
+        // The user object still carries it, and that must be enough to enforce
+        // AAL2.
+        let from_user = vec![factor_id("f-a", "verified")];
+        let from_factors_endpoint = vec![]; // the endpoint dropped it
+
+        let merged = merge_factors(from_user, from_factors_endpoint);
+        assert!(
+            merged.iter().any(Factor::is_verified),
+            "a verified factor seen by either source must survive the merge"
+        );
+
+        // ...and symmetrically when only the factors endpoint has it.
+        let merged = merge_factors(vec![], vec![factor_id("f-a", "verified")]);
+        assert!(merged.iter().any(Factor::is_verified));
+    }
+
+    #[test]
+    fn merge_factors_does_not_invent_factors_for_a_no_mfa_user() {
+        // Both sources empty (a genuine non-MFA user) -> no factors, no
+        // step-up, no lockout.
+        assert!(merge_factors(vec![], vec![]).is_empty());
+    }
+
+    #[test]
+    fn merge_factors_dedupes_by_id_and_prefers_verified() {
+        // Same factor id reported unverified by one source and verified by the
+        // other must resolve to verified, never masked by the stale copy.
+        let merged = merge_factors(
+            vec![factor_id("f-a", "unverified")],
+            vec![factor_id("f-a", "verified")],
+        );
+        assert_eq!(merged.len(), 1, "same id must not duplicate");
+        assert!(merged[0].is_verified());
+
+        // Order-independent: verified first, unverified second.
+        let merged = merge_factors(
+            vec![factor_id("f-a", "verified")],
+            vec![factor_id("f-a", "unverified")],
+        );
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].is_verified());
     }
 
     #[test]

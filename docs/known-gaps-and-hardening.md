@@ -37,7 +37,16 @@ re-grep the named function/symbol.
   short-lived HMAC-signed, user-bound cookie, while the CSRF cookie is now
   HttpOnly and its synchronizer token is supplied through the rendered DOM.
 - **AAL was read from an unverified JWT payload.** GoTrue's authenticated
-  `/auth/v1/factors` response now supplies the assurance level and factors.
+  `/auth/v1/factors` response supplies the assurance level (`current_level`).
+- **2FA enforcement no longer depends on one endpoint's response shape.** The
+  enrolled-factor list is now taken from BOTH the authoritative
+  `/auth/v1/user` object and `/auth/v1/factors`, unioned by id. Previously a
+  `200` from `/auth/v1/factors` whose `factors` key was absent or renamed
+  emptied the list, so `needs_aal2()` silently went false for every enrolled
+  user — a fail-open 2FA bypass. A verified factor must now be missing from
+  both sources to be overlooked, while a genuine no-MFA user (empty in both)
+  still needs no step-up, so the change cannot lock anyone out. AAL defaults
+  to the conservative `aal1` when `current_level` is absent.
 
 ---
 
