@@ -83,10 +83,114 @@ impl CartLine {
     }
 }
 
+/// Supabase's private root CA (`Supabase Root 2021 CA`, valid to 2031). The
+/// pooler at `*.pooler.supabase.com` presents a chain anchored here, and this
+/// CA is NOT in the Mozilla webpki-roots bundle that sqlx-rustls trusts by
+/// default — so verify-full needs it pinned. The bytes are the officially
+/// published prod-ca-2021.crt (SHA-256 80:70:25:AD:…:CA:FA), confirmed
+/// identical to the cert the live pooler serves. See certs/README.md.
+const SUPABASE_ROOT_CA: &str = include_str!("../certs/supabase-prod-ca-2021.crt");
+
+/// Decide the TLS parameters to append to a Postgres URL.
+///
+/// `None` means leave the URL untouched: either the operator already set
+/// `sslmode`, or the host is local/private/cluster-internal (dev, CI on
+/// `localhost`) where plaintext is an accepted trust boundary. `Some((mode,
+/// ca_path))` means append that `sslmode` (and `sslrootcert` when present).
+///
+/// Pure, so the policy is unit-tested without env or filesystem.
+fn decide_db_tls(
+    host: &str,
+    has_sslmode: bool,
+    override_mode: Option<String>,
+    ca_path: Option<String>,
+) -> Option<(String, Option<String>)> {
+    if has_sslmode {
+        return None; // operator has spoken; never second-guess it
+    }
+    if crate::coordinate::cleartext_internal_host_allowed(host) {
+        return None; // localhost / private / *.svc / *.internal: plaintext ok
+    }
+    match override_mode {
+        // ATHLETO_DB_SSLMODE lets an operator pick a weaker/stronger mode.
+        Some(mode) => Some((mode, ca_path)),
+        // Default for a public host: full verification against the pinned CA
+        // when we have it, otherwise require (still encrypted, just no cert
+        // check) so a missing CA can never turn into a connection outage.
+        None => match ca_path {
+            Some(path) => Some(("verify-full".to_string(), Some(path))),
+            None => Some(("require".to_string(), None)),
+        },
+    }
+}
+
+/// Materialize the embedded Supabase CA to a stable temp path (idempotent),
+/// returning the path sqlx should read it from. `None` if it can't be written
+/// (e.g. read-only fs) — the caller then degrades to `require`.
+fn supabase_ca_path() -> Option<String> {
+    let path = std::env::temp_dir().join("athleto-supabase-prod-ca-2021.crt");
+    // The CA is public, not a secret; a world-readable temp file is fine.
+    // Rewrite only when missing or stale so repeated boots are cheap.
+    if std::fs::read(&path).ok().as_deref() != Some(SUPABASE_ROOT_CA.as_bytes()) {
+        std::fs::write(&path, SUPABASE_ROOT_CA).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// Apply [`decide_db_tls`] to a concrete URL, reading the operator overrides
+/// (`ATHLETO_DB_SSLMODE`, `ATHLETO_DB_SSLROOTCERT`) and materializing the
+/// pinned CA as needed. Returns the URL to actually connect with.
+fn enforce_db_tls(database_url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(database_url) else {
+        return database_url.to_string();
+    };
+    let Some(host) = parsed.host_str().map(str::to_string) else {
+        return database_url.to_string();
+    };
+    let has_sslmode = parsed.query_pairs().any(|(k, _)| k == "sslmode");
+    let override_mode = std::env::var("ATHLETO_DB_SSLMODE").ok().filter(|s| !s.is_empty());
+
+    // Resolve a CA path only when we might need the verify-full default: an
+    // operator-mounted cert wins; otherwise fall back to the embedded one.
+    let needs_default_ca =
+        !has_sslmode && override_mode.is_none() && !crate::coordinate::cleartext_internal_host_allowed(&host);
+    let ca_path = std::env::var("ATHLETO_DB_SSLROOTCERT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| if needs_default_ca { supabase_ca_path() } else { None });
+
+    let Some((mode, ca)) = decide_db_tls(&host, has_sslmode, override_mode, ca_path) else {
+        return database_url.to_string();
+    };
+
+    let sep = if parsed.query().is_some() { '&' } else { '?' };
+    let mut out = format!("{database_url}{sep}sslmode={mode}");
+    if let Some(ca) = &ca {
+        out.push_str("&sslrootcert=");
+        out.push_str(ca);
+    }
+    if mode == "require" && ca.is_none() {
+        tracing::warn!(
+            host,
+            "database TLS enforced as sslmode=require (encrypted, certificate NOT verified); \
+             set ATHLETO_DB_SSLROOTCERT or use the bundled CA for verify-full"
+        );
+    } else {
+        tracing::info!(host, sslmode = %mode, "enforcing TLS for the database connection");
+    }
+    out
+}
+
 /// Build a SeaORM lazy connection. It validates configuration without waiting
 /// for the database, preserving the app's degraded-start behavior.
 pub async fn build_pool(database_url: &str) -> Option<DatabaseConnection> {
-    let mut options = ConnectOptions::new(database_url.to_string());
+    // Never connect in cleartext to a public host: sqlx's default sslmode is
+    // `prefer`, which silently falls back to plaintext and does not verify the
+    // server certificate. Upgrade public hosts to verify-full against the
+    // pinned Supabase CA (or require if unavailable); local/CI hosts and any
+    // URL with an explicit sslmode are left untouched.
+    let database_url = enforce_db_tls(database_url);
+    let mut options = ConnectOptions::new(database_url);
     options
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(5))
@@ -1927,6 +2031,81 @@ pub async fn latest_email_for_user(
         .one(conn)
         .await?
         .map(|row| row.email))
+}
+
+#[cfg(test)]
+mod db_tls_tests {
+    use super::*;
+
+    #[test]
+    fn public_host_defaults_to_verify_full_with_the_pinned_ca() {
+        let decision = decide_db_tls(
+            "aws-0-ca-central-1.pooler.supabase.com",
+            false,
+            None,
+            Some("/tmp/ca.crt".to_string()),
+        );
+        assert_eq!(
+            decision,
+            Some(("verify-full".to_string(), Some("/tmp/ca.crt".to_string())))
+        );
+    }
+
+    #[test]
+    fn public_host_without_a_ca_falls_back_to_require_not_an_outage() {
+        // No CA available -> encrypted but unverified, never a failed connect.
+        let decision = decide_db_tls("db.example.com", false, None, None);
+        assert_eq!(decision, Some(("require".to_string(), None)));
+    }
+
+    #[test]
+    fn local_and_internal_hosts_stay_plaintext() {
+        // CI connects to localhost:5432 with no TLS; dev likewise. These must
+        // be left completely untouched or the whole test/dev flow breaks.
+        for host in ["localhost", "127.0.0.1", "10.1.2.3", "db.default.svc.cluster.local"] {
+            assert_eq!(
+                decide_db_tls(host, false, None, Some("/tmp/ca.crt".to_string())),
+                None,
+                "{host} should stay plaintext"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_sslmode_is_never_overridden() {
+        // If the operator put sslmode in the URL, respect it verbatim.
+        assert_eq!(
+            decide_db_tls("aws-0-ca-central-1.pooler.supabase.com", true, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_override_selects_the_mode() {
+        assert_eq!(
+            decide_db_tls("db.example.com", false, Some("require".to_string()), None),
+            Some(("require".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn enforce_appends_sslmode_for_a_public_host_but_not_localhost() {
+        let local = enforce_db_tls("postgres://postgres:postgres@localhost:5432/athleto_test");
+        assert!(!local.contains("sslmode"), "localhost must be untouched: {local}");
+
+        let public = enforce_db_tls(
+            "postgres://postgres.ref:pw@aws-0-ca-central-1.pooler.supabase.com:5432/postgres",
+        );
+        assert!(public.contains("sslmode=verify-full"), "got: {public}");
+        assert!(public.contains("sslrootcert="), "got: {public}");
+    }
+
+    #[test]
+    fn the_embedded_ca_is_the_supabase_root() {
+        assert!(SUPABASE_ROOT_CA.contains("BEGIN CERTIFICATE"));
+        // Sanity: it's a single PEM cert, not an accidental empty include.
+        assert_eq!(SUPABASE_ROOT_CA.matches("BEGIN CERTIFICATE").count(), 1);
+    }
 }
 
 #[cfg(test)]
