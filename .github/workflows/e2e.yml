@@ -14,9 +14,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -37,22 +42,25 @@ jobs:
 
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/athleto_test
-      # Optional: set these repo secrets to also run the authenticated suites.
-      SUPABASE_URL: ${{ secrets.ATHLETO_SUPABASE_URL }}
-      SUPABASE_ANON_KEY: ${{ secrets.ATHLETO_SUPABASE_ANON_KEY }}
-      SUPABASE_SERVICE_KEY: ${{ secrets.ATHLETO_SUPABASE_SERVICE_KEY }}
-      ATHLETO_TURNSTILE_SECRET: ${{ secrets.ATHLETO_TURNSTILE_SECRET }}
-      ATHLETO_MFA_STATE_KEY: ${{ secrets.ATHLETO_MFA_STATE_KEY }}
+      # PR code never receives deployment secrets. Authenticated suites run on
+      # trusted main and manual runs; guest suites run everywhere.
+      SUPABASE_URL: ${{ github.ref == 'refs/heads/main' && secrets.ATHLETO_SUPABASE_URL || '' }}
+      SUPABASE_ANON_KEY: ${{ github.ref == 'refs/heads/main' && secrets.ATHLETO_SUPABASE_ANON_KEY || '' }}
+      SUPABASE_SERVICE_KEY: ${{ github.ref == 'refs/heads/main' && secrets.ATHLETO_SUPABASE_SERVICE_KEY || '' }}
+      ATHLETO_TURNSTILE_SECRET: ${{ github.ref == 'refs/heads/main' && secrets.ATHLETO_TURNSTILE_SECRET || '' }}
+      ATHLETO_MFA_STATE_KEY: ${{ github.ref == 'refs/heads/main' && secrets.ATHLETO_MFA_STATE_KEY || '' }}
       ATHLETO_ALLOW_SELF_SIGNUP: "0"
       # Enables the ops B2B-approval test; must equal the app's boot value below.
-      ATHLETO_OPERATIONS_API_KEY: ${{ secrets.ATHLETO_OPERATIONS_API_KEY }}
-      E2E_OPS_KEY: ${{ secrets.ATHLETO_OPERATIONS_API_KEY }}
+      ATHLETO_OPERATIONS_API_KEY: ${{ github.ref == 'refs/heads/main' && secrets.ATHLETO_OPERATIONS_API_KEY || '' }}
+      E2E_OPS_KEY: ${{ github.ref == 'refs/heads/main' && secrets.ATHLETO_OPERATIONS_API_KEY || '' }}
       E2E_BASE_URL: http://localhost:8145
       # The biz-host chrome check hits the deployed host; skip it in CI.
       E2E_SKIP_LIVE: "1"
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       # The legacy schema audit trail references Supabase's auth.uid(); stub it
       # so vanilla Postgres can build a test fixture. Production schema changes
@@ -74,7 +82,7 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
 
       - name: Build app
-        run: cargo build --bin athleto-app-rs
+        run: cargo build --locked --bin athleto-app-rs
 
       - name: Boot app against the prepared throwaway Postgres
         run: |
@@ -82,7 +90,7 @@ jobs:
           DATABASE_URL="$DATABASE_URL" PORT=8145 ATHLETO_PUBLIC_BASE_URL=http://localhost:8145 \
             ./target/debug/athleto-app-rs > app.log 2>&1 &
           echo "waiting for /healthz + seeded products..."
-          for i in $(seq 1 40); do
+          for _ in $(seq 1 40); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8145/healthz || true)
             n=$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM products" 2>/dev/null || echo 0)
             if [ "$code" = "200" ] && [ "${n:-0}" -ge 1 ]; then echo "ready ($n products)"; break; fi
@@ -106,13 +114,13 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PUPPETEER_SKIP_DOWNLOAD: "1"
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Run browser E2E (${{ matrix.engine }})
         working-directory: e2e
         env:
           E2E_ENGINE: ${{ matrix.engine }}
-        run: node --test --test-timeout=60000 --test-concurrency=1 *.test.mjs
+        run: node --test --test-timeout=60000 --test-concurrency=1 ./*.test.mjs
 
       - name: App log on failure
         if: failure()

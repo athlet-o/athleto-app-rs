@@ -832,15 +832,25 @@ pub async fn get_order(
         .map(OrderRow::from_model))
 }
 
+/// Line items for one of `user_id`'s orders.
+///
+/// The `user_id` predicate is not redundant with a caller's own ownership
+/// check: because the app connects as the table owner and bypasses RLS, this
+/// join is the only thing standing between a `Path<Uuid>` order id and another
+/// customer's line items and prices. Keeping it in the query means a future
+/// caller cannot reintroduce the IDOR by forgetting to call `get_order` first.
 pub async fn order_items(
     conn: &DatabaseConnection,
+    user_id: Uuid,
     order_id: Uuid,
 ) -> Result<Vec<OrderItemRow>, DbErr> {
     OrderItemRow::find_by_statement(stmt(
         "SELECT oi.order_id, p.name, p.subname, p.format::text AS format, oi.qty, oi.unit_price_cents \
-         FROM order_items oi JOIN products p ON p.id = oi.product_id \
-         WHERE oi.order_id = $1 ORDER BY oi.id",
-        [order_id.into()],
+         FROM order_items oi \
+         JOIN products p ON p.id = oi.product_id \
+         JOIN orders o ON o.id = oi.order_id \
+         WHERE oi.order_id = $1 AND o.user_id = $2 ORDER BY oi.id",
+        [order_id.into(), user_id.into()],
     ))
     .all(conn)
     .await
@@ -1092,9 +1102,32 @@ pub async fn cart_hold_until(
 
 /// Hygiene only: the claim/availability queries already ignore expired rows.
 pub async fn sweep_expired_holds(conn: &DatabaseConnection) -> Result<u64, DbErr> {
-    let result = conn
+    // Self-guard so concurrent replicas don't all issue the same DELETE, using
+    // a TRANSACTION-scoped advisory lock (pg_try_advisory_xact_lock) acquired
+    // and released within this one transaction. That is the only advisory-lock
+    // shape safe through the Supabase transaction pooler: a session-scoped lock
+    // can have its acquire and release routed to different pooled backends,
+    // leaking the lock permanently. This mirrors run_due_recurring_orders'
+    // per-order guard, and it is what lets coordinate::run_singleton run this
+    // job directly when no cross-cluster lease (fiducia) is configured.
+    let tx = conn.begin().await?;
+    let got: bool = tx
+        .query_one(stmt(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS got",
+            ["hold-sweeper".into()],
+        ))
+        .await?
+        .ok_or_else(|| DbErr::RecordNotFound("advisory lock returned no row".to_string()))?
+        .try_get("", "got")?;
+    if !got {
+        // Another replica is sweeping this tick; nothing for us to do.
+        tx.rollback().await?;
+        return Ok(0);
+    }
+    let result = tx
         .execute(stmt("DELETE FROM stock_holds WHERE held_until < now()", []))
         .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -1337,15 +1370,21 @@ impl UserShipmentRow {
 const SHIPMENT_COLUMNS: &str = "s.id, s.status::text AS status, s.carrier, s.tracking_number, \
      s.ship_date, s.eta_earliest, s.eta_latest, s.delivered_at";
 
+/// Shipments for one of `user_id`'s orders. The `orders` join scopes the read
+/// to the owner for the same reason as [`order_items`]: RLS is bypassed, so
+/// this predicate is the authorization boundary, not a redundant check.
 pub async fn shipments_for_order(
     conn: &DatabaseConnection,
+    user_id: Uuid,
     order_id: Uuid,
 ) -> Result<Vec<Shipment>, DbErr> {
     Shipment::find_by_statement(stmt(
         &format!(
-            "SELECT {SHIPMENT_COLUMNS} FROM shipments s WHERE s.order_id = $1 ORDER BY s.created_at"
+            "SELECT {SHIPMENT_COLUMNS} FROM shipments s \
+             JOIN orders o ON o.id = s.order_id \
+             WHERE s.order_id = $1 AND o.user_id = $2 ORDER BY s.created_at"
         ),
-        [order_id.into()],
+        [order_id.into(), user_id.into()],
     ))
     .all(conn)
     .await
