@@ -405,6 +405,14 @@ pub async fn orders_create(
         if item.qty <= 0 {
             return error_response(StatusCode::UNPROCESSABLE_ENTITY, "qty must be positive");
         }
+        if item.qty > crate::cart::MAX_QTY_PER_LINE {
+            // Match the storefront's per-line ceiling so an ERP/EDI caller can't
+            // push an absurd quantity past the catalog/stock checks.
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "qty exceeds the per-line maximum",
+            );
+        }
         let resolved = match (item.product_id, item.slug.as_deref()) {
             (Some(id), _) => by_id.get(&id).map(|price| (id, *price)),
             (None, Some(slug)) => by_slug.get(slug).copied(),
