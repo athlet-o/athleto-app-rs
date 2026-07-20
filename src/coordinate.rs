@@ -8,7 +8,12 @@
 //!   `FIDUCIA_API_KEY` are set, `run_singleton` takes a seconds-long, fenced,
 //!   crash-safe lease so exactly one replica *across clusters* runs the tick.
 //!   Leadership lives in fiducia, so none of the Postgres-pooler hazards below
-//!   apply to it. This is the production path.
+//!   apply to it. This is the production path. The lease is heartbeated for as
+//!   long as the job runs: a lease is a *deadline*, not a mutex, so a job that
+//!   outlives its TTL without renewing would keep working while fiducia reaps
+//!   the grant and promotes another replica. When renewal stops proving we hold
+//!   the grant, the in-flight job is cancelled rather than allowed to finish
+//!   unguarded.
 //! * **Transaction-scoped Postgres advisory locks (in-database guard).** Each
 //!   job body self-guards with `pg_try_advisory_xact_lock`, acquired and
 //!   released inside a single transaction (`db::sweep_expired_holds`,
@@ -66,13 +71,41 @@ where
         Ok(Some(client)) => {
             let holder = format!("athleto:{}:{}", config.replica_id, job);
             let key = format!("athleto:cron:{job}");
-            match client.acquire(&key, &holder, lease_secs * 1000).await {
+            let ttl_ms = lease_secs * 1000;
+            match client.acquire(&key, &holder, ttl_ms).await {
                 Ok(Some(fencing_token)) => {
-                    let output = work().await;
+                    // Heartbeat the lease for as long as `work` runs. Without
+                    // this, a job that outlives `lease_secs` keeps running while
+                    // fiducia reaps the grant and promotes another replica --
+                    // two leaders, silently. `lost` fires when we can no longer
+                    // prove we hold the grant, and cancels `work` by dropping
+                    // its future mid-await.
+                    let (lost_tx, mut lost_rx) = tokio::sync::oneshot::channel();
+                    let heartbeat = tokio::spawn(renew_until_lost(
+                        client.clone(),
+                        key.clone(),
+                        holder.clone(),
+                        fencing_token,
+                        ttl_ms,
+                        lost_tx,
+                    ));
+                    let output = tokio::select! {
+                        biased;
+                        _ = &mut lost_rx => {
+                            tracing::error!(
+                                job,
+                                "lost the fiducia lease while the job was still running; \
+                                 abandoning this tick"
+                            );
+                            None
+                        }
+                        output = work() => Some(output),
+                    };
+                    heartbeat.abort();
                     // Release promptly; on any failure the lease still expires
                     // on its TTL, so leadership can never wedge permanently.
                     client.release(&holder, fencing_token).await;
-                    Some(output)
+                    output
                 }
                 // A competing replica holds the lease. Do NOT fall back to the
                 // in-database guard: that would let a second cross-cluster
@@ -92,6 +125,52 @@ where
         Err(err) => {
             tracing::error!(error = %err, job, "invalid fiducia configuration; skipping singleton tick");
             None
+        }
+    }
+}
+
+/// Renew `fencing_token` every third of its TTL until we can no longer prove we
+/// hold it, then signal `lost`.
+///
+/// A renew that comes back `renewed: false` is definitive -- fiducia reaped or
+/// reassigned the grant -- so it reports loss immediately. Transport errors are
+/// not definitive (the lease may well still be ours), so they are retried, but
+/// only until the lease we last confirmed would have expired: past that point we
+/// cannot distinguish "fiducia is unreachable" from "another replica is already
+/// leading", and the safe assumption is that we lost.
+async fn renew_until_lost(
+    client: FiduciaClient,
+    key: String,
+    holder: String,
+    fencing_token: u64,
+    ttl_ms: u64,
+    lost: tokio::sync::oneshot::Sender<()>,
+) {
+    let period = Duration::from_millis((ttl_ms / 3).max(1_000));
+    let lease = Duration::from_millis(ttl_ms);
+    let mut confirmed = tokio::time::Instant::now();
+    loop {
+        tokio::time::sleep(period).await;
+        match client.renew(&key, &holder, fencing_token, ttl_ms).await {
+            Ok(true) => confirmed = tokio::time::Instant::now(),
+            Ok(false) => {
+                tracing::warn!(key, "fiducia no longer recognises our lease");
+                let _ = lost.send(());
+                return;
+            }
+            Err(err) if confirmed.elapsed() < lease => {
+                tracing::warn!(error = %err, key, "fiducia lease renewal failed; will retry");
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    key,
+                    "fiducia lease renewal has failed for longer than the lease; \
+                     assuming leadership is lost"
+                );
+                let _ = lost.send(());
+                return;
+            }
         }
     }
 }
@@ -142,6 +221,8 @@ pub enum FiduciaRequestError {
     Transport(#[source] reqwest::Error),
     #[error("fiducia returned HTTP {0}")]
     Rejected(u16),
+    #[error("fiducia had no reachable leader after retrying")]
+    NoLeader,
     #[error("fiducia returned an invalid lock-acquire response: {0}")]
     InvalidGrant(&'static str),
     #[error("fiducia returned an invalid rate-limit response: {0}")]
@@ -225,6 +306,59 @@ impl FiduciaClient {
         }
     }
 
+    /// POST a mutating fiducia command, retrying a bounded number of times when
+    /// the node answers `307 not_leader`.
+    ///
+    /// Fiducia returns 307 whenever the request reaches a follower -- routine
+    /// during an election or a deliberate leadership transfer, and entirely
+    /// retryable. Treating it as a hard rejection (as this client used to) makes
+    /// every fail-closed caller deny traffic for the duration of an election:
+    /// logins and cart adds would 429 and singleton ticks would be skipped, for
+    /// a condition that resolves itself in milliseconds.
+    ///
+    /// We deliberately do NOT follow the `Location` header fiducia sends with
+    /// the 307. This client attaches a bearer credential to every request, and
+    /// following a server-named redirect target would forward that credential to
+    /// whatever host the response points at. Retrying the *configured* base URL
+    /// is safe and sufficient: athleto talks to the fiducia load balancer, which
+    /// routes the retry to the new leader.
+    async fn post_command(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, FiduciaRequestError> {
+        const ATTEMPTS: u32 = 3;
+        let url = format!("{}{path}", self.base);
+        let mut backoff = Duration::from_millis(50);
+        for attempt in 1..=ATTEMPTS {
+            let response = self
+                .http
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .json(body)
+                .send()
+                .await
+                .map_err(FiduciaRequestError::Transport)?;
+            let status = response.status();
+            if status.as_u16() == 307 {
+                if attempt == ATTEMPTS {
+                    return Err(FiduciaRequestError::NoLeader);
+                }
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(FiduciaRequestError::Rejected(status.as_u16()));
+            }
+            return response
+                .json::<serde_json::Value>()
+                .await
+                .map_err(FiduciaRequestError::Transport);
+        }
+        Err(FiduciaRequestError::NoLeader)
+    }
+
     /// Acquire (non-blocking) a lease on `key` held by `holder` for `ttl_ms`.
     /// Returns the fencing token on success and `None` only when another holder
     /// already owns the lock. Transport and protocol failures stay distinct so
@@ -235,28 +369,47 @@ impl FiduciaClient {
         holder: &str,
         ttl_ms: u64,
     ) -> Result<Option<u64>, FiduciaRequestError> {
-        let resp = self
-            .http
-            .post(format!("{}/v1/locks/acquire", self.base))
-            .bearer_auth(&self.api_key)
-            .json(&serde_json::json!({
-                "key": key,
-                "holder": holder,
-                "ttl_ms": ttl_ms,
-                "wait": false,
-            }))
-            .send()
-            .await
-            .map_err(FiduciaRequestError::Transport)?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(FiduciaRequestError::Rejected(status.as_u16()));
-        }
-        let body = resp
-            .json::<serde_json::Value>()
-            .await
-            .map_err(FiduciaRequestError::Transport)?;
+        let body = self
+            .post_command(
+                "/v1/locks/acquire",
+                &serde_json::json!({
+                    "key": key,
+                    "holder": holder,
+                    "ttl_ms": ttl_ms,
+                    "wait": false,
+                }),
+            )
+            .await?;
         parse_lock_acquire(&body)
+    }
+
+    /// Extend an already-held lease (`POST /v1/locks/renew`) without minting a
+    /// new fencing token. `Ok(true)` means the lease now runs for another
+    /// `ttl_ms`; `Ok(false)` means fiducia no longer recognises this grant --
+    /// it expired and was reaped, the holder does not match, or the key set
+    /// differs -- so the caller has *lost leadership* and must stop working.
+    ///
+    /// The key set must match the grant exactly; fiducia canonicalizes it, so a
+    /// renew must pass the same key that `acquire` did.
+    pub async fn renew(
+        &self,
+        key: &str,
+        holder: &str,
+        fencing_token: u64,
+        ttl_ms: u64,
+    ) -> Result<bool, FiduciaRequestError> {
+        let body = self
+            .post_command(
+                "/v1/locks/renew",
+                &serde_json::json!({
+                    "key": key,
+                    "holder": holder,
+                    "fencing_token": fencing_token,
+                    "ttl_ms": ttl_ms,
+                }),
+            )
+            .await?;
+        parse_lock_renew(&body)
     }
 
     pub async fn release(&self, holder: &str, fencing_token: u64) {
@@ -269,12 +422,21 @@ impl FiduciaClient {
             .await;
         match result {
             Ok(resp) if resp.status().is_success() => {
+                // `committed: true` only means the command reached the log; a
+                // release that found no matching grant is a committed no-op, so
+                // the real outcome is `result.output.released`.
                 match resp.json::<serde_json::Value>().await {
                     Ok(body)
-                        if body.get("committed").and_then(|value| value.as_bool())
+                        if body
+                            .pointer("/result/output/released")
+                            .and_then(|value| value.as_bool())
                             == Some(true) => {}
-                    Ok(_) => tracing::warn!(
-                        "fiducia release was not committed; lease will expire on TTL"
+                    Ok(body) => tracing::warn!(
+                        reason = body
+                            .pointer("/result/output/reason")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("unknown"),
+                        "fiducia did not release the lease; it will expire on TTL"
                     ),
                     Err(err) => {
                         tracing::warn!(error = %err, "fiducia release response was not JSON; lease will expire on TTL")
@@ -302,26 +464,16 @@ impl FiduciaClient {
     ) -> Result<bool, FiduciaRequestError> {
         let tenant = path_segment(tenant);
         let key = path_segment(key);
-        let response = self
-            .http
-            .post(format!("{}/v1/rate-limit/{tenant}/{key}/check", self.base))
-            .bearer_auth(&self.api_key)
-            .json(&serde_json::json!({
-                "algorithm": "sliding_window",
-                "limit": limit,
-                "window_ms": window_ms,
-            }))
-            .send()
-            .await
-            .map_err(FiduciaRequestError::Transport)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(FiduciaRequestError::Rejected(status.as_u16()));
-        }
-        let body = response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(FiduciaRequestError::Transport)?;
+        let body = self
+            .post_command(
+                &format!("/v1/rate-limit/{tenant}/{key}/check"),
+                &serde_json::json!({
+                    "algorithm": "sliding_window",
+                    "limit": limit,
+                    "window_ms": window_ms,
+                }),
+            )
+            .await?;
         parse_rate_limit(&body)
     }
 }
@@ -431,6 +583,24 @@ fn parse_lock_acquire(body: &serde_json::Value) -> Result<Option<u64>, FiduciaRe
     }
 }
 
+/// `renewed: false` carries a closed set of reasons (`not_found`,
+/// `not_holder`, `key_mismatch`); all of them mean the same thing to us -- this
+/// process no longer holds the grant -- so they collapse to `Ok(false)`.
+fn parse_lock_renew(body: &serde_json::Value) -> Result<bool, FiduciaRequestError> {
+    if body.get("committed").and_then(|value| value.as_bool()) != Some(true) {
+        return Err(FiduciaRequestError::InvalidGrant("renew was not committed"));
+    }
+    let output = body
+        .pointer("/result/output")
+        .ok_or(FiduciaRequestError::InvalidGrant("missing result.output"))?;
+    output
+        .get("renewed")
+        .and_then(|value| value.as_bool())
+        .ok_or(FiduciaRequestError::InvalidGrant(
+            "result.output is missing renewed",
+        ))
+}
+
 fn parse_rate_limit(body: &serde_json::Value) -> Result<bool, FiduciaRequestError> {
     if body.get("committed").and_then(|value| value.as_bool()) != Some(true) {
         return Err(FiduciaRequestError::InvalidRateLimit(
@@ -537,6 +707,41 @@ mod tests {
         });
         assert!(matches!(
             parse_lock_acquire(&unfenced),
+            Err(FiduciaRequestError::InvalidGrant(_))
+        ));
+    }
+
+    #[test]
+    fn renew_reports_loss_for_every_rejection_reason() {
+        let renewed = serde_json::json!({
+            "committed": true,
+            "result": { "output": { "renewed": true, "lease_expires_ms": 1_737_000_000_000u64 } }
+        });
+        assert!(parse_lock_renew(&renewed).unwrap());
+
+        // not_found / not_holder / key_mismatch all mean the same thing to us:
+        // we can no longer prove we hold the grant, so we must stop working.
+        for reason in ["not_found", "not_holder", "key_mismatch"] {
+            let lost = serde_json::json!({
+                "committed": true,
+                "result": { "output": { "renewed": false, "reason": reason } }
+            });
+            assert!(
+                !parse_lock_renew(&lost).unwrap(),
+                "{reason} must report lost leadership"
+            );
+        }
+
+        // A malformed renew is NOT permission to keep running.
+        assert!(matches!(
+            parse_lock_renew(&serde_json::json!({
+                "committed": true,
+                "result": { "output": {} }
+            })),
+            Err(FiduciaRequestError::InvalidGrant(_))
+        ));
+        assert!(matches!(
+            parse_lock_renew(&serde_json::json!({ "committed": false })),
             Err(FiduciaRequestError::InvalidGrant(_))
         ));
     }

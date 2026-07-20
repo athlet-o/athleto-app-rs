@@ -96,6 +96,23 @@ does not run DDL at startup. The current schema authority is the dedicated
 `athleto` database contract at
 `~/codes/ores/k8s-cluster/remote/libs/pg-defs/schema/databases/athleto/schema.sql`.
 
+### Database connection TLS
+
+`sqlx`'s default `sslmode=prefer` silently falls back to **plaintext** if the
+TLS handshake fails and never verifies the server certificate. So on boot,
+`db::build_pool` upgrades the connection unless the URL already sets `sslmode`:
+
+- **Local / private / cluster-internal hosts** (CI's `localhost:5432`, dev):
+  left as plaintext — that network is the trust boundary.
+- **Public hosts** (the Supabase pooler): `sslmode=verify-full` against the
+  pinned **Supabase Root 2021 CA** (`certs/supabase-prod-ca-2021.crt`), which
+  is a private CA absent from the default rustls root store. If the CA cannot
+  be materialized it degrades to `sslmode=require` (encrypted, unverified)
+  rather than failing the connection.
+
+Override with `ATHLETO_DB_SSLMODE` / `ATHLETO_DB_SSLROOTCERT` (see the env
+table). An explicit `?sslmode=` in `DATABASE_URL` disables all of this.
+
 ### Supabase database role and RLS
 
 RLS protects direct PostgREST access today, but it cannot protect a backend
