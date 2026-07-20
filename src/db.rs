@@ -163,10 +163,19 @@ pub async fn add_cart_item(
     product_id: i64,
     qty: i32,
 ) -> Result<(), DbErr> {
+    // Clamp the increment and cap the accumulated line so no caller (notably
+    // `reorder`, which replays a stored qty) can push the line past the per-line
+    // ceiling and overflow the INT column into a 500.
+    let qty = qty.clamp(1, crate::cart::MAX_QTY_PER_LINE);
     conn.execute(stmt(
         "INSERT INTO cart_items (cart_id, product_id, qty) VALUES ($1, $2, $3) \
-         ON CONFLICT (cart_id, product_id) DO UPDATE SET qty = cart_items.qty + EXCLUDED.qty",
-        [cart_id.into(), product_id.into(), qty.into()],
+         ON CONFLICT (cart_id, product_id) DO UPDATE SET qty = LEAST(cart_items.qty + EXCLUDED.qty, $4)",
+        [
+            cart_id.into(),
+            product_id.into(),
+            qty.into(),
+            crate::cart::MAX_QTY_PER_LINE.into(),
+        ],
     ))
     .await?;
     Ok(())
