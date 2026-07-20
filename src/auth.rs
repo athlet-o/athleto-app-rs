@@ -145,6 +145,25 @@ async fn fetch_mfa_state(state: &SharedState, token: &str) -> Option<GotrueMfaSt
     }
 }
 
+/// Combine the factor lists from `/auth/v1/user` and `/auth/v1/factors`,
+/// deduplicating by factor id and preferring whichever copy reports the
+/// stronger (verified) status. A factor known to either endpoint counts, so a
+/// verified factor must be absent from BOTH to escape AAL2 enforcement.
+fn merge_factors(primary: Vec<Factor>, secondary: Vec<Factor>) -> Vec<Factor> {
+    let mut by_id: std::collections::HashMap<String, Factor> = std::collections::HashMap::new();
+    for factor in primary.into_iter().chain(secondary) {
+        match by_id.get(&factor.id) {
+            // Keep the entry that is verified if the two disagree, so a stale
+            // "unverified" copy can never mask a verified one.
+            Some(existing) if existing.is_verified() && !factor.is_verified() => {}
+            _ => {
+                by_id.insert(factor.id.clone(), factor);
+            }
+        }
+    }
+    by_id.into_values().collect()
+}
+
 async fn fetch_user(state: &SharedState, token: &str) -> Option<AuthUser> {
     let (base, key) = state.config.supabase()?;
     let response = state
