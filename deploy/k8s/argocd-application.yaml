@@ -1,0 +1,20 @@
+# Registration pointer. Apply once to the cluster's argocd namespace; ArgoCD
+# then syncs deploy/k8s from this repo. Not auto-applied — the GitOps operator
+# owns cluster state.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: athleto-app-rs
+  namespace: argocd
+spec:
+  project: athleto
+  source:
+    repoURL: git@github.com:athlet-o/athleto-app-rs.git
+    targetRevision: main
+    path: deploy/k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: athleto
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
