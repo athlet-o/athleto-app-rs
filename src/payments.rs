@@ -1881,6 +1881,19 @@ pub async fn pay_cancel(Query(_params): Query<CancelParams>) -> Response {
 mod tests {
     use super::*;
 
+    // The client-supplied session_id is interpolated into the Stripe API path;
+    // only well-formed `cs_...` ids may reach it (no path traversal/whitespace).
+    #[test]
+    fn stripe_session_id_only_accepts_well_formed_ids() {
+        assert!(is_stripe_session_id("cs_test_a1B2c3_XYZ"));
+        assert!(is_stripe_session_id("cs_live_0000"));
+        assert!(!is_stripe_session_id("")); // empty
+        assert!(!is_stripe_session_id("pi_123")); // wrong prefix
+        assert!(!is_stripe_session_id("cs_../../secret")); // path-traversal chars
+        assert!(!is_stripe_session_id("cs_ab cd")); // whitespace
+        assert!(!is_stripe_session_id(&format!("cs_{}", "a".repeat(200)))); // too long
+    }
+
     #[test]
     fn pay_method_parses_form_values() {
         assert_eq!(PayMethod::parse("stripe"), Some(PayMethod::Stripe));
