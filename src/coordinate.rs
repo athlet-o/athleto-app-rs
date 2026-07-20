@@ -375,7 +375,11 @@ fn normalize_base_url(raw: &str) -> Result<String, FiduciaConfigError> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
-fn cleartext_internal_host_allowed(host: &str) -> bool {
+/// Whether `host` is local/private/cluster-internal, i.e. a network where
+/// cleartext is an acceptable trust boundary. Shared with `db::build_pool`,
+/// which uses the same rule to decide when a Postgres connection may skip TLS
+/// (dev/CI on localhost) versus when it must enforce it (a public host).
+pub(crate) fn cleartext_internal_host_allowed(host: &str) -> bool {
     let host = host.to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
