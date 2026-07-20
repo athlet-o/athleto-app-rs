@@ -160,11 +160,23 @@ async fn fetch_user(state: &SharedState, token: &str) -> Option<AuthUser> {
             match response.json::<GotrueUser>().await {
                 Ok(user) => {
                     let mfa = fetch_mfa_state(state, token).await?;
+                    // Union the two factor sources by id. Previously the
+                    // factor list came ONLY from /auth/v1/factors, so any 200
+                    // response missing/renaming its `factors` key silently
+                    // emptied the list and needs_aal2() went false for EVERY
+                    // enrolled user (a fail-open 2FA bypass). Trusting either
+                    // source means a verified factor has to disappear from
+                    // BOTH to be missed, while a genuine no-MFA user (empty in
+                    // both) still needs no step-up — so this cannot lock anyone
+                    // out. AAL still comes from current_level, defaulting to
+                    // the conservative "aal1" (assume NOT stepped up) when the
+                    // level is absent.
+                    let factors = merge_factors(user.factors, mfa.factors);
                     Uuid::parse_str(&user.id).ok().map(|id| AuthUser {
                         id,
                         email: user.email,
                         aal: mfa.current_level.unwrap_or_else(|| "aal1".to_string()),
-                        factors: mfa.factors,
+                        factors,
                         access_token: token.to_string(),
                     })
                 }
