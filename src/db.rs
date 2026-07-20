@@ -1995,4 +1995,75 @@ mod payment_enum_tests {
         assert_eq!(SubscriptionStatus::PastDue.to_value(), "past_due");
         assert_eq!(SubscriptionStatus::Cancelled.to_value(), "cancelled");
     }
+
+    // The /api/v1 wire contract that athleto-clients + athleto-interfaces depend
+    // on: requests use snake_case, the display label keeps the hyphen, and the
+    // hyphenated form must NOT round-trip back in as input.
+    #[test]
+    fn order_kind_wire_contract_is_stable() {
+        assert!(matches!(
+            serde_json::from_value::<OrderKind>(serde_json::json!("one_time")).unwrap(),
+            OrderKind::OneTime
+        ));
+        assert!(matches!(
+            serde_json::from_value::<OrderKind>(serde_json::json!("recurring")).unwrap(),
+            OrderKind::Recurring
+        ));
+        assert!(serde_json::from_value::<OrderKind>(serde_json::json!("one-time")).is_err());
+        assert_eq!(OrderKind::OneTime.as_str(), "one_time");
+        assert_eq!(OrderKind::OneTime.label(), "one-time");
+    }
+
+    #[test]
+    fn order_frequency_wire_and_cadence_contract() {
+        for (wire, freq) in [
+            ("weekly", OrderFrequency::Weekly),
+            ("biweekly", OrderFrequency::Biweekly),
+            ("monthly", OrderFrequency::Monthly),
+            ("quarterly", OrderFrequency::Quarterly),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<OrderFrequency>(serde_json::json!(wire)).unwrap(),
+                freq
+            );
+        }
+        assert_eq!(OrderFrequency::Biweekly.label(), "every 2 weeks");
+        // interval_days must stay positive and strictly increasing (the recurring
+        // scheduler advances next_run_at by these).
+        let days: Vec<i64> = [
+            OrderFrequency::Weekly,
+            OrderFrequency::Biweekly,
+            OrderFrequency::Monthly,
+            OrderFrequency::Quarterly,
+        ]
+        .iter()
+        .map(|f| f.interval_days())
+        .collect();
+        assert!(days.iter().all(|&d| d > 0));
+        assert!(days.windows(2).all(|w| w[0] < w[1]), "cadence not monotonic: {days:?}");
+    }
+
+    // Cents math: a single line can hold the extreme (i32::MAX price x i32::MAX
+    // qty) without overflowing i64, but orders_create/place_order SUM lines with
+    // plain `+`, so a cart of maxed lines can exceed i64 — the order total must
+    // be treated as attacker-influenced (qty is now clamped on both paths).
+    #[test]
+    fn line_total_never_overflows_one_line_but_a_cart_of_maxes_can() {
+        let line = CartLine {
+            item_id: 1,
+            product_id: 1,
+            name: "Wobble".to_string(),
+            subname: None,
+            format: ProductFormat::Cup,
+            calories: 0,
+            price_cents: i32::MAX,
+            qty: i32::MAX,
+        };
+        assert_eq!(
+            line.line_total_cents(),
+            i64::from(i32::MAX) * i64::from(i32::MAX)
+        );
+        let one = line.line_total_cents();
+        assert!(one.checked_add(one).and_then(|s| s.checked_add(one)).is_none());
+    }
 }
