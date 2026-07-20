@@ -26,6 +26,18 @@ re-grep the named function/symbol.
   `db::run_due_recurring_orders` to skip any order with a `payment_subscriptions`
   row. Covered by `tests/recurring_runner_db.rs`.
 - **Migration 0006 checksum drift** — see [Migration discipline](#migration-discipline).
+- **Fiducia leases could not outlive their own TTL.** `run_singleton` acquired a
+  120 s lease and ran the job with no renewal, so a tick that took longer than
+  its TTL kept working while fiducia reaped the grant and promoted another
+  replica — two cross-cluster leaders, silently. The client now implements
+  `POST /v1/locks/renew` and heartbeats at TTL/3 for as long as the job runs,
+  cancelling the in-flight job when renewal stops proving we hold the grant.
+- **A fiducia leader election failed every fail-closed caller.** The client
+  treated `307 not_leader` — routine during an election or leadership transfer,
+  and explicitly retryable — as a hard rejection, so logins, cart adds, and
+  singleton ticks all denied traffic until the election settled. Commands now
+  retry the configured base URL with backoff (never the `Location` header: this
+  client attaches a bearer credential to every request).
 - **Login/IP throttles were replica-local and trusted any `X-Forwarded-For`.**
   They now use the modular `rate_limit` service (Fiducia-backed and fail-closed
   when configured), and `request_trust` accepts forwarding headers only from
@@ -37,7 +49,16 @@ re-grep the named function/symbol.
   short-lived HMAC-signed, user-bound cookie, while the CSRF cookie is now
   HttpOnly and its synchronizer token is supplied through the rendered DOM.
 - **AAL was read from an unverified JWT payload.** GoTrue's authenticated
-  `/auth/v1/factors` response now supplies the assurance level and factors.
+  `/auth/v1/factors` response supplies the assurance level (`current_level`).
+- **2FA enforcement no longer depends on one endpoint's response shape.** The
+  enrolled-factor list is now taken from BOTH the authoritative
+  `/auth/v1/user` object and `/auth/v1/factors`, unioned by id. Previously a
+  `200` from `/auth/v1/factors` whose `factors` key was absent or renamed
+  emptied the list, so `needs_aal2()` silently went false for every enrolled
+  user — a fail-open 2FA bypass. A verified factor must now be missing from
+  both sources to be overlooked, while a genuine no-MFA user (empty in both)
+  still needs no step-up, so the change cannot lock anyone out. AAL defaults
+  to the conservative `aal1` when `current_level` is absent.
 
 ---
 
@@ -105,6 +126,52 @@ re-grep the named function/symbol.
   `Paid` on the first captured cycle payment with a verified amount.
 
 ---
+
+### 6b. Order/checkout coordination gaps (from the fiducia audit)
+
+Ranked; all still open. The storefront cart path is guarded by the cart-row
+`FOR UPDATE` in `place_order` (`db.rs`) — these are the paths it does not cover.
+
+- **The ERP API order path has no idempotency at all.** `POST /api/v1/orders`
+  calls `place_order` with `cart_id = None`, so it takes no cart lock, and
+  `OrderRequest` (`athleto-interfaces/schema/athleto.schema.json`) carries no
+  idempotency key. An ERP client that retries on timeout gets a second order and
+  a second stock decrement. **Fix:** accept an `Idempotency-Key` header, and add
+  an `order_idempotency (user_id, key) → order_id` table with a unique
+  constraint to the declarative schema; return the original order on replay. A
+  fiducia lease keyed on `athleto:order:{user}:{key}` is the right *complement*
+  (it collapses the concurrent case cheaply) but must not be the only guard — a
+  lease is liveness-coupled and cannot survive the claiming process dying.
+- **Webhook claims commit before the work they guard.** All three handlers call
+  `db::record_payment_event` (a correct `INSERT … ON CONFLICT DO NOTHING` on the
+  `(provider, event_id)` PK) on the bare connection, so the claim commits *first*.
+  If the handler then errors or the replica dies, it returns 500 with the claim
+  already durable, and the provider's retry is swallowed as a replay — the order
+  never settles. **Fix:** open one transaction spanning claim + settlement so a
+  rollback un-claims the event. This is the correct layer; a lease does not fix
+  it.
+- **Settlement is three independent autocommit writes** (`set_order_payment_status`,
+  `record_payment`, `upsert_subscription`) with no transaction, so a crash
+  mid-settlement leaves an order marked paid with no `payments` row. Same fix as
+  above.
+- **Checkout reads cart lines outside the order transaction.** `orders::checkout`
+  calls `db::cart_lines` before `place_order` opens its tx, and passes the
+  resulting quantities *and unit prices* in. An add that commits in that window
+  is silently dropped by the cart clear, and a price change in that window is
+  never re-validated. **Fix:** re-read the lines inside the transaction, after
+  the cart `FOR UPDATE`, and price from `products` there.
+- **`/checkout` and `/orders/{id}/pay` are not rate limited.** `cart::add_item`
+  is (`cart-hold-ip`); the endpoints that place orders and initiate payments are
+  not. Cheap win against card-testing and flash-sale stampedes now that the
+  Fiducia-backed limiter exists.
+- **PayPal capture is issued with no already-paid check and no
+  `PayPal-Request-Id`.** PayPal rejects the second capture, so a real double
+  charge is unlikely, but the rejection path is what regressed order status
+  (fixed above).
+- **Stock is decremented at checkout and never restored.** There is no
+  `on_hand = on_hand + n` anywhere in `src/`, so an abandoned checkout, a
+  `/pay/cancel`, or a `Failed` webhook permanently consumes inventory. Ties into
+  gaps #2 and #3 (cancellation and refunds).
 
 ## Robustness & infra gaps (non-functional)
 

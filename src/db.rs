@@ -83,10 +83,114 @@ impl CartLine {
     }
 }
 
+/// Supabase's private root CA (`Supabase Root 2021 CA`, valid to 2031). The
+/// pooler at `*.pooler.supabase.com` presents a chain anchored here, and this
+/// CA is NOT in the Mozilla webpki-roots bundle that sqlx-rustls trusts by
+/// default — so verify-full needs it pinned. The bytes are the officially
+/// published prod-ca-2021.crt (SHA-256 80:70:25:AD:…:CA:FA), confirmed
+/// identical to the cert the live pooler serves. See certs/README.md.
+const SUPABASE_ROOT_CA: &str = include_str!("../certs/supabase-prod-ca-2021.crt");
+
+/// Decide the TLS parameters to append to a Postgres URL.
+///
+/// `None` means leave the URL untouched: either the operator already set
+/// `sslmode`, or the host is local/private/cluster-internal (dev, CI on
+/// `localhost`) where plaintext is an accepted trust boundary. `Some((mode,
+/// ca_path))` means append that `sslmode` (and `sslrootcert` when present).
+///
+/// Pure, so the policy is unit-tested without env or filesystem.
+fn decide_db_tls(
+    host: &str,
+    has_sslmode: bool,
+    override_mode: Option<String>,
+    ca_path: Option<String>,
+) -> Option<(String, Option<String>)> {
+    if has_sslmode {
+        return None; // operator has spoken; never second-guess it
+    }
+    if crate::coordinate::cleartext_internal_host_allowed(host) {
+        return None; // localhost / private / *.svc / *.internal: plaintext ok
+    }
+    match override_mode {
+        // ATHLETO_DB_SSLMODE lets an operator pick a weaker/stronger mode.
+        Some(mode) => Some((mode, ca_path)),
+        // Default for a public host: full verification against the pinned CA
+        // when we have it, otherwise require (still encrypted, just no cert
+        // check) so a missing CA can never turn into a connection outage.
+        None => match ca_path {
+            Some(path) => Some(("verify-full".to_string(), Some(path))),
+            None => Some(("require".to_string(), None)),
+        },
+    }
+}
+
+/// Materialize the embedded Supabase CA to a stable temp path (idempotent),
+/// returning the path sqlx should read it from. `None` if it can't be written
+/// (e.g. read-only fs) — the caller then degrades to `require`.
+fn supabase_ca_path() -> Option<String> {
+    let path = std::env::temp_dir().join("athleto-supabase-prod-ca-2021.crt");
+    // The CA is public, not a secret; a world-readable temp file is fine.
+    // Rewrite only when missing or stale so repeated boots are cheap.
+    if std::fs::read(&path).ok().as_deref() != Some(SUPABASE_ROOT_CA.as_bytes()) {
+        std::fs::write(&path, SUPABASE_ROOT_CA).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// Apply [`decide_db_tls`] to a concrete URL, reading the operator overrides
+/// (`ATHLETO_DB_SSLMODE`, `ATHLETO_DB_SSLROOTCERT`) and materializing the
+/// pinned CA as needed. Returns the URL to actually connect with.
+fn enforce_db_tls(database_url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(database_url) else {
+        return database_url.to_string();
+    };
+    let Some(host) = parsed.host_str().map(str::to_string) else {
+        return database_url.to_string();
+    };
+    let has_sslmode = parsed.query_pairs().any(|(k, _)| k == "sslmode");
+    let override_mode = std::env::var("ATHLETO_DB_SSLMODE").ok().filter(|s| !s.is_empty());
+
+    // Resolve a CA path only when we might need the verify-full default: an
+    // operator-mounted cert wins; otherwise fall back to the embedded one.
+    let needs_default_ca =
+        !has_sslmode && override_mode.is_none() && !crate::coordinate::cleartext_internal_host_allowed(&host);
+    let ca_path = std::env::var("ATHLETO_DB_SSLROOTCERT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| if needs_default_ca { supabase_ca_path() } else { None });
+
+    let Some((mode, ca)) = decide_db_tls(&host, has_sslmode, override_mode, ca_path) else {
+        return database_url.to_string();
+    };
+
+    let sep = if parsed.query().is_some() { '&' } else { '?' };
+    let mut out = format!("{database_url}{sep}sslmode={mode}");
+    if let Some(ca) = &ca {
+        out.push_str("&sslrootcert=");
+        out.push_str(ca);
+    }
+    if mode == "require" && ca.is_none() {
+        tracing::warn!(
+            host,
+            "database TLS enforced as sslmode=require (encrypted, certificate NOT verified); \
+             set ATHLETO_DB_SSLROOTCERT or use the bundled CA for verify-full"
+        );
+    } else {
+        tracing::info!(host, sslmode = %mode, "enforcing TLS for the database connection");
+    }
+    out
+}
+
 /// Build a SeaORM lazy connection. It validates configuration without waiting
 /// for the database, preserving the app's degraded-start behavior.
 pub async fn build_pool(database_url: &str) -> Option<DatabaseConnection> {
-    let mut options = ConnectOptions::new(database_url.to_string());
+    // Never connect in cleartext to a public host: sqlx's default sslmode is
+    // `prefer`, which silently falls back to plaintext and does not verify the
+    // server certificate. Upgrade public hosts to verify-full against the
+    // pinned Supabase CA (or require if unavailable); local/CI hosts and any
+    // URL with an explicit sslmode are left untouched.
+    let database_url = enforce_db_tls(database_url);
+    let mut options = ConnectOptions::new(database_url);
     options
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(5))
@@ -163,10 +267,19 @@ pub async fn add_cart_item(
     product_id: i64,
     qty: i32,
 ) -> Result<(), DbErr> {
+    // Clamp the increment and cap the accumulated line so no caller (notably
+    // `reorder`, which replays a stored qty) can push the line past the per-line
+    // ceiling and overflow the INT column into a 500.
+    let qty = qty.clamp(1, crate::cart::MAX_QTY_PER_LINE);
     conn.execute(stmt(
         "INSERT INTO cart_items (cart_id, product_id, qty) VALUES ($1, $2, $3) \
-         ON CONFLICT (cart_id, product_id) DO UPDATE SET qty = cart_items.qty + EXCLUDED.qty",
-        [cart_id.into(), product_id.into(), qty.into()],
+         ON CONFLICT (cart_id, product_id) DO UPDATE SET qty = LEAST(cart_items.qty + EXCLUDED.qty, $4)",
+        [
+            cart_id.into(),
+            product_id.into(),
+            qty.into(),
+            crate::cart::MAX_QTY_PER_LINE.into(),
+        ],
     ))
     .await?;
     Ok(())
@@ -1141,6 +1254,10 @@ pub struct InsufficientLine {
 #[derive(Debug)]
 pub enum OrderError {
     Insufficient(Vec<InsufficientLine>),
+    /// The cart was already checked out by a concurrent or earlier request (its
+    /// items were consumed under the cart lock). Idempotent no-op — no new order
+    /// was created, so callers should treat it like a benign "already placed".
+    AlreadyPlaced,
     Db(DbErr),
 }
 
@@ -1170,6 +1287,32 @@ pub async fn place_order(
     sorted.sort_by_key(|line| line.product_id);
 
     let tx = conn.begin().await.map_err(OrderError::Db)?;
+
+    // Idempotency for the cart path: serialize concurrent checkouts of the same
+    // cart on the cart row, then confirm the cart still has items *inside* the
+    // transaction. A double-submit / proxy retry / concurrent checkout blocks on
+    // this lock; after the winner commits (which clears cart_items) the loser
+    // re-reads an empty cart and aborts instead of placing a duplicate order and
+    // double-decrementing stock. The API path (cart_id = None) is unaffected.
+    if let Some(cart_id) = cart_id {
+        tx.query_one(stmt(
+            "SELECT id FROM carts WHERE id = $1 FOR UPDATE",
+            [cart_id.into()],
+        ))
+        .await?;
+        let has_items = tx
+            .query_one(stmt(
+                "SELECT 1 AS present FROM cart_items WHERE cart_id = $1 LIMIT 1",
+                [cart_id.into()],
+            ))
+            .await?
+            .is_some();
+        if !has_items {
+            tx.rollback().await.map_err(OrderError::Db)?;
+            return Err(OrderError::AlreadyPlaced);
+        }
+    }
+
     let mut shortages = Vec::new();
     for line in &sorted {
         let on_hand = tx
@@ -1452,11 +1595,17 @@ pub async fn record_fulfillment(
         .ok_or_else(|| DbErr::RecordNotFound("shipment insert returned no row".to_string()))?;
     let shipment_id: Uuid = inserted.try_get("", "id")?;
 
-    tx.execute(stmt(
-        "UPDATE orders SET status = 'fulfilled' WHERE id = $1",
-        [order_id.into()],
-    ))
-    .await?;
+    let updated = tx
+        .execute(stmt(
+            "UPDATE orders SET status = 'fulfilled' WHERE id = $1 AND status <> 'cancelled'",
+            [order_id.into()],
+        ))
+        .await?;
+    if updated.rows_affected() == 0 {
+        // Order is cancelled or gone: roll back so we never persist a shipment
+        // (and an 856 ASN) against an order that can't legitimately ship.
+        return Ok(None);
+    }
     tx.commit().await?;
     Ok(Some(shipment_id))
 }
@@ -1533,7 +1682,12 @@ pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, 
 
         let lines = tx
             .query_all(stmt(
-                "SELECT product_id, qty, unit_price_cents FROM order_items WHERE order_id = $1",
+                // Ordered by product_id so the FOR UPDATE loop below takes
+                // inventory rows in the same ascending order as `place_order`
+                // (which sorts its lines for exactly this reason). Two writers
+                // that lock overlapping products in opposite orders deadlock.
+                "SELECT product_id, qty, unit_price_cents FROM order_items \
+                 WHERE order_id = $1 ORDER BY product_id",
                 [subscription_id.into()],
             ))
             .await?
@@ -1559,7 +1713,22 @@ pub async fn run_due_recurring_orders(conn: &DatabaseConnection) -> Result<u64, 
                 ))
                 .await?;
             if let Some(on_hand_row) = on_hand {
-                if on_hand_row.try_get::<i32>("", "on_hand")? < *qty {
+                // Subtract live cart holds, the same way `place_order` does.
+                // Comparing against raw on_hand lets a recurring cycle consume
+                // stock a shopper is actively holding, turning their checkout
+                // into a shortage on stock they had reserved.
+                let held = tx
+                    .query_one(stmt(
+                        "SELECT COALESCE(SUM(qty), 0)::BIGINT AS held FROM stock_holds \
+                         WHERE product_id = $1 AND held_until > now()",
+                        [(*product_id).into()],
+                    ))
+                    .await?
+                    .map(|row| row.try_get::<i64>("", "held"))
+                    .transpose()?
+                    .unwrap_or(0);
+                let available = i64::from(on_hand_row.try_get::<i32>("", "on_hand")?) - held;
+                if available < i64::from(*qty) {
                     short = true;
                     break;
                 }
@@ -1667,6 +1836,20 @@ pub async fn set_order_payment_status(
     let Some(row) = order::Entity::find_by_id(order_id).one(conn).await? else {
         return Ok(());
     };
+    // Settlement is terminal. Providers redeliver webhooks out of order, and the
+    // customer's return-URL landing races the webhook for the same payment, so
+    // without this guard a late `checkout.session.completed` or a second
+    // `/pay/success` can walk a Paid order back to Processing/Pending and show
+    // the customer an unpaid order they have already been charged for. Only a
+    // refund may supersede Paid.
+    if row.payment_status == PaymentStatus::Paid && status != PaymentStatus::Refunded {
+        tracing::debug!(
+            %order_id,
+            attempted = ?status,
+            "ignoring a payment-status write that would regress a paid order"
+        );
+        return Ok(());
+    }
     let stamp_paid = status == PaymentStatus::Paid && row.paid_at.is_none();
     let mut active: order::ActiveModel = row.into();
     active.payment_status = Set(status);
@@ -1885,6 +2068,81 @@ pub async fn latest_email_for_user(
 }
 
 #[cfg(test)]
+mod db_tls_tests {
+    use super::*;
+
+    #[test]
+    fn public_host_defaults_to_verify_full_with_the_pinned_ca() {
+        let decision = decide_db_tls(
+            "aws-0-ca-central-1.pooler.supabase.com",
+            false,
+            None,
+            Some("/tmp/ca.crt".to_string()),
+        );
+        assert_eq!(
+            decision,
+            Some(("verify-full".to_string(), Some("/tmp/ca.crt".to_string())))
+        );
+    }
+
+    #[test]
+    fn public_host_without_a_ca_falls_back_to_require_not_an_outage() {
+        // No CA available -> encrypted but unverified, never a failed connect.
+        let decision = decide_db_tls("db.example.com", false, None, None);
+        assert_eq!(decision, Some(("require".to_string(), None)));
+    }
+
+    #[test]
+    fn local_and_internal_hosts_stay_plaintext() {
+        // CI connects to localhost:5432 with no TLS; dev likewise. These must
+        // be left completely untouched or the whole test/dev flow breaks.
+        for host in ["localhost", "127.0.0.1", "10.1.2.3", "db.default.svc.cluster.local"] {
+            assert_eq!(
+                decide_db_tls(host, false, None, Some("/tmp/ca.crt".to_string())),
+                None,
+                "{host} should stay plaintext"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_sslmode_is_never_overridden() {
+        // If the operator put sslmode in the URL, respect it verbatim.
+        assert_eq!(
+            decide_db_tls("aws-0-ca-central-1.pooler.supabase.com", true, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_override_selects_the_mode() {
+        assert_eq!(
+            decide_db_tls("db.example.com", false, Some("require".to_string()), None),
+            Some(("require".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn enforce_appends_sslmode_for_a_public_host_but_not_localhost() {
+        let local = enforce_db_tls("postgres://postgres:postgres@localhost:5432/athleto_test");
+        assert!(!local.contains("sslmode"), "localhost must be untouched: {local}");
+
+        let public = enforce_db_tls(
+            "postgres://postgres.ref:pw@aws-0-ca-central-1.pooler.supabase.com:5432/postgres",
+        );
+        assert!(public.contains("sslmode=verify-full"), "got: {public}");
+        assert!(public.contains("sslrootcert="), "got: {public}");
+    }
+
+    #[test]
+    fn the_embedded_ca_is_the_supabase_root() {
+        assert!(SUPABASE_ROOT_CA.contains("BEGIN CERTIFICATE"));
+        // Sanity: it's a single PEM cert, not an accidental empty include.
+        assert_eq!(SUPABASE_ROOT_CA.matches("BEGIN CERTIFICATE").count(), 1);
+    }
+}
+
+#[cfg(test)]
 mod order_fulfillment_tests {
     use super::*;
 
@@ -1988,5 +2246,82 @@ mod payment_enum_tests {
         assert_eq!(SubscriptionStatus::Active.to_value(), "active");
         assert_eq!(SubscriptionStatus::PastDue.to_value(), "past_due");
         assert_eq!(SubscriptionStatus::Cancelled.to_value(), "cancelled");
+    }
+
+    // The /api/v1 wire contract that athleto-clients + athleto-interfaces depend
+    // on: requests use snake_case, the display label keeps the hyphen, and the
+    // hyphenated form must NOT round-trip back in as input.
+    #[test]
+    fn order_kind_wire_contract_is_stable() {
+        assert!(matches!(
+            serde_json::from_value::<OrderKind>(serde_json::json!("one_time")).unwrap(),
+            OrderKind::OneTime
+        ));
+        assert!(matches!(
+            serde_json::from_value::<OrderKind>(serde_json::json!("recurring")).unwrap(),
+            OrderKind::Recurring
+        ));
+        assert!(serde_json::from_value::<OrderKind>(serde_json::json!("one-time")).is_err());
+        assert_eq!(OrderKind::OneTime.as_str(), "one_time");
+        assert_eq!(OrderKind::OneTime.label(), "one-time");
+    }
+
+    #[test]
+    fn order_frequency_wire_and_cadence_contract() {
+        for (wire, freq) in [
+            ("weekly", OrderFrequency::Weekly),
+            ("biweekly", OrderFrequency::Biweekly),
+            ("monthly", OrderFrequency::Monthly),
+            ("quarterly", OrderFrequency::Quarterly),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<OrderFrequency>(serde_json::json!(wire)).unwrap(),
+                freq
+            );
+        }
+        assert_eq!(OrderFrequency::Biweekly.label(), "every 2 weeks");
+        // interval_days must stay positive and strictly increasing (the recurring
+        // scheduler advances next_run_at by these).
+        let days: Vec<i64> = [
+            OrderFrequency::Weekly,
+            OrderFrequency::Biweekly,
+            OrderFrequency::Monthly,
+            OrderFrequency::Quarterly,
+        ]
+        .iter()
+        .map(|f| f.interval_days())
+        .collect();
+        assert!(days.iter().all(|&d| d > 0));
+        assert!(
+            days.windows(2).all(|w| w[0] < w[1]),
+            "cadence not monotonic: {days:?}"
+        );
+    }
+
+    // Cents math: a single line can hold the extreme (i32::MAX price x i32::MAX
+    // qty) without overflowing i64, but orders_create/place_order SUM lines with
+    // plain `+`, so a cart of maxed lines can exceed i64 — the order total must
+    // be treated as attacker-influenced (qty is now clamped on both paths).
+    #[test]
+    fn line_total_never_overflows_one_line_but_a_cart_of_maxes_can() {
+        let line = CartLine {
+            item_id: 1,
+            product_id: 1,
+            name: "Wobble".to_string(),
+            subname: None,
+            format: ProductFormat::Cup,
+            calories: 0,
+            price_cents: i32::MAX,
+            qty: i32::MAX,
+        };
+        assert_eq!(
+            line.line_total_cents(),
+            i64::from(i32::MAX) * i64::from(i32::MAX)
+        );
+        let one = line.line_total_cents();
+        assert!(one
+            .checked_add(one)
+            .and_then(|s| s.checked_add(one))
+            .is_none());
     }
 }

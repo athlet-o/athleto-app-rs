@@ -309,6 +309,16 @@ pub async fn start_payment(
 
 const STRIPE_API: &str = "https://api.stripe.com";
 
+/// A Stripe Checkout Session id is `cs_` followed by URL-safe chars. Validate
+/// before interpolating a caller-supplied `session_id` into the API path so a
+/// malformed value can't reshape the outbound request.
+fn is_stripe_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.starts_with("cs_")
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 // These values map one-to-one to the hosted checkout payload, so retaining
 // named arguments keeps amount/owner/origin review straightforward.
 #[allow(clippy::too_many_arguments)]
@@ -1653,6 +1663,9 @@ pub async fn pay_success(
                 let Some(session_id) = params.session_id.as_deref() else {
                     return Ok(PaymentStatus::Pending);
                 };
+                if !is_stripe_session_id(session_id) {
+                    return Ok(PaymentStatus::Pending);
+                }
                 let session: Value = state
                     .http
                     .get(format!("{STRIPE_API}/v1/checkout/sessions/{session_id}"))
@@ -1867,6 +1880,19 @@ pub async fn pay_cancel(Query(_params): Query<CancelParams>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The client-supplied session_id is interpolated into the Stripe API path;
+    // only well-formed `cs_...` ids may reach it (no path traversal/whitespace).
+    #[test]
+    fn stripe_session_id_only_accepts_well_formed_ids() {
+        assert!(is_stripe_session_id("cs_test_a1B2c3_XYZ"));
+        assert!(is_stripe_session_id("cs_live_0000"));
+        assert!(!is_stripe_session_id("")); // empty
+        assert!(!is_stripe_session_id("pi_123")); // wrong prefix
+        assert!(!is_stripe_session_id("cs_../../secret")); // path-traversal chars
+        assert!(!is_stripe_session_id("cs_ab cd")); // whitespace
+        assert!(!is_stripe_session_id(&format!("cs_{}", "a".repeat(200)))); // too long
+    }
 
     #[test]
     fn pay_method_parses_form_values() {
