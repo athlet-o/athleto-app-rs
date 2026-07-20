@@ -1,0 +1,45 @@
+# Prebuilt-image deployment for athleto-app-rs — the canonical pattern
+# (quaestor/daedalus deploy/k8s), replacing the legacy compile-on-boot manifest
+# in k8s-cluster/remote/argocd/dd-next-runtime. Build deploy/Dockerfile ->
+# ghcr.io/athlet-o/athleto-app-rs:main in CI, then ArgoCD syncs this dir.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: athleto-app-rs
+  namespace: athleto
+  labels: { app.kubernetes.io/name: athleto-app-rs, app.kubernetes.io/part-of: athleto }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app.kubernetes.io/name: athleto-app-rs } }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: athleto-app-rs, app.kubernetes.io/part-of: athleto }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: ghcr.io/athlet-o/athleto-app-rs:main
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8145, name: http }]
+          env:
+            - { name: ATHLETO_HOST, value: "0.0.0.0" }
+            - { name: ATHLETO_PORT, value: "8145" }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://dd-otel-collector.observability.svc.cluster.local:4317" }
+            - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.name=athleto-app-rs" }
+          envFrom:
+            - secretRef: { name: athleto-app-rs-secrets }   # ESO ExternalSecret
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          livenessProbe:  { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 5, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 3, periodSeconds: 5 }
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits:   { cpu: "1", memory: 512Mi }

@@ -45,7 +45,9 @@ and a powder packet (just add water).
 | `PORT` | `8080` | Bind port |
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
-| `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
+| `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string). TLS is enforced for public hosts automatically — see below. |
+| `ATHLETO_DB_SSLMODE` | *(unset)* | Override the auto-selected libpq `sslmode` (`disable`/`require`/`verify-ca`/`verify-full`). Leave unset to get `verify-full` against the pinned Supabase CA on public hosts. |
+| `ATHLETO_DB_SSLROOTCERT` | *(bundled Supabase CA)* | Path to a CA file for `verify-full`. Defaults to the embedded `certs/supabase-prod-ca-2021.crt`. Set this when connecting to a non-Supabase public Postgres. |
 | `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical B2C/B2B browser origins for auth and provider returns |
 | `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
 | `ATHLETO_TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated ingress/LB CIDRs allowed to supply `X-Forwarded-For` for abuse throttles. Unset means the app ignores that header and uses the direct peer address. |
@@ -93,6 +95,23 @@ The numbered files under `migrations/` are a frozen audit trail. The process
 does not run DDL at startup. The current schema authority is the dedicated
 `athleto` database contract at
 `~/codes/ores/k8s-cluster/remote/libs/pg-defs/schema/databases/athleto/schema.sql`.
+
+### Database connection TLS
+
+`sqlx`'s default `sslmode=prefer` silently falls back to **plaintext** if the
+TLS handshake fails and never verifies the server certificate. So on boot,
+`db::build_pool` upgrades the connection unless the URL already sets `sslmode`:
+
+- **Local / private / cluster-internal hosts** (CI's `localhost:5432`, dev):
+  left as plaintext — that network is the trust boundary.
+- **Public hosts** (the Supabase pooler): `sslmode=verify-full` against the
+  pinned **Supabase Root 2021 CA** (`certs/supabase-prod-ca-2021.crt`), which
+  is a private CA absent from the default rustls root store. If the CA cannot
+  be materialized it degrades to `sslmode=require` (encrypted, unverified)
+  rather than failing the connection.
+
+Override with `ATHLETO_DB_SSLMODE` / `ATHLETO_DB_SSLROOTCERT` (see the env
+table). An explicit `?sslmode=` in `DATABASE_URL` disables all of this.
 
 ### Supabase database role and RLS
 

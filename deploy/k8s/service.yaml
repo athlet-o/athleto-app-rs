@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: athleto-app-rs
+  namespace: athleto
+  labels: { app.kubernetes.io/name: athleto-app-rs, app.kubernetes.io/part-of: athleto }
+spec:
+  selector: { app.kubernetes.io/name: athleto-app-rs }
+  ports: [{ name: http, port: 8145, targetPort: http }]
