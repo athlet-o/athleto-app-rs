@@ -480,6 +480,11 @@ pub async fn orders_create(
             })),
         )
             .into_response(),
+        Err(db::OrderError::AlreadyPlaced) => {
+            // Not reachable on the API path (no cart_id), but keep the match
+            // total and fail safe if that ever changes.
+            error_response(StatusCode::CONFLICT, "order already placed")
+        }
         Err(db::OrderError::Db(err)) => {
             tracing::error!(error = %err, "order placement failed");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "order placement failed")
