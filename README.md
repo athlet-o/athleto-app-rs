@@ -45,7 +45,9 @@ and a powder packet (just add water).
 | `PORT` | `8080` | Bind port |
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
-| `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string) |
+| `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string). TLS is enforced for public hosts automatically — see below. |
+| `ATHLETO_DB_SSLMODE` | *(unset)* | Override the auto-selected libpq `sslmode` (`disable`/`require`/`verify-ca`/`verify-full`). Leave unset to get `verify-full` against the pinned Supabase CA on public hosts. |
+| `ATHLETO_DB_SSLROOTCERT` | *(bundled Supabase CA)* | Path to a CA file for `verify-full`. Defaults to the embedded `certs/supabase-prod-ca-2021.crt`. Set this when connecting to a non-Supabase public Postgres. |
 | `ATHLETO_PUBLIC_BASE_URL` / `ATHLETO_BIZ_PUBLIC_BASE_URL` | `https://app.athleto.store` / `https://biz.athleto.store` | Canonical B2C/B2B browser origins for auth and provider returns |
 | `ALLOWED_HOSTS` | *(unset)* | Comma-separated Host-header allowlist (e.g. `app.athleto.store,biz.athleto.store`); unset = permissive with a startup warning |
 | `ATHLETO_TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated ingress/LB CIDRs allowed to supply `X-Forwarded-For` for abuse throttles. Unset means the app ignores that header and uses the direct peer address. |
