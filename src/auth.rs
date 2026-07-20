@@ -105,6 +105,14 @@ impl MaybeUser {
 struct GotrueUser {
     id: String,
     email: Option<String>,
+    // GoTrue's user object carries the enrolled MFA factors directly. This is
+    // the AUTHORITATIVE factor list and it is parsed here so AAL2 enforcement
+    // does not depend on the shape of the separate /auth/v1/factors response.
+    // A user with no factors yields an empty array, never a missing key, so
+    // defaulting here cannot hide an enrolled factor — it only tolerates the
+    // legitimate no-MFA case.
+    #[serde(default)]
+    factors: Vec<Factor>,
 }
 
 #[derive(Debug, Default, Deserialize)]
