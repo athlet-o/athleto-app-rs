@@ -1150,6 +1150,10 @@ pub struct InsufficientLine {
 #[derive(Debug)]
 pub enum OrderError {
     Insufficient(Vec<InsufficientLine>),
+    /// The cart was already checked out by a concurrent or earlier request (its
+    /// items were consumed under the cart lock). Idempotent no-op — no new order
+    /// was created, so callers should treat it like a benign "already placed".
+    AlreadyPlaced,
     Db(DbErr),
 }
 
