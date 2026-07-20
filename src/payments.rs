@@ -1663,6 +1663,9 @@ pub async fn pay_success(
                 let Some(session_id) = params.session_id.as_deref() else {
                     return Ok(PaymentStatus::Pending);
                 };
+                if !is_stripe_session_id(session_id) {
+                    return Ok(PaymentStatus::Pending);
+                }
                 let session: Value = state
                     .http
                     .get(format!("{STRIPE_API}/v1/checkout/sessions/{session_id}"))
