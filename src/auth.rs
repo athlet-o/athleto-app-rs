@@ -1294,6 +1294,62 @@ mod tests {
         }
     }
 
+    fn factor_id(id: &str, status: &str) -> Factor {
+        Factor {
+            id: id.into(),
+            factor_type: "totp".into(),
+            status: status.into(),
+            friendly_name: None,
+        }
+    }
+
+    #[test]
+    fn merge_factors_catches_a_verified_factor_present_in_only_one_source() {
+        // The fail-open this closes: /auth/v1/factors returned a 200 whose
+        // `factors` was empty/renamed, so the enrolled factor was invisible.
+        // The user object still carries it, and that must be enough to enforce
+        // AAL2.
+        let from_user = vec![factor_id("f-a", "verified")];
+        let from_factors_endpoint = vec![]; // the endpoint dropped it
+
+        let merged = merge_factors(from_user, from_factors_endpoint);
+        assert!(
+            merged.iter().any(Factor::is_verified),
+            "a verified factor seen by either source must survive the merge"
+        );
+
+        // ...and symmetrically when only the factors endpoint has it.
+        let merged = merge_factors(vec![], vec![factor_id("f-a", "verified")]);
+        assert!(merged.iter().any(Factor::is_verified));
+    }
+
+    #[test]
+    fn merge_factors_does_not_invent_factors_for_a_no_mfa_user() {
+        // Both sources empty (a genuine non-MFA user) -> no factors, no
+        // step-up, no lockout.
+        assert!(merge_factors(vec![], vec![]).is_empty());
+    }
+
+    #[test]
+    fn merge_factors_dedupes_by_id_and_prefers_verified() {
+        // Same factor id reported unverified by one source and verified by the
+        // other must resolve to verified, never masked by the stale copy.
+        let merged = merge_factors(
+            vec![factor_id("f-a", "unverified")],
+            vec![factor_id("f-a", "verified")],
+        );
+        assert_eq!(merged.len(), 1, "same id must not duplicate");
+        assert!(merged[0].is_verified());
+
+        // Order-independent: verified first, unverified second.
+        let merged = merge_factors(
+            vec![factor_id("f-a", "verified")],
+            vec![factor_id("f-a", "unverified")],
+        );
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].is_verified());
+    }
+
     #[test]
     fn needs_aal2_only_when_enrolled_and_not_yet_upgraded() {
         // Enrolled + AAL1 -> must step up.
