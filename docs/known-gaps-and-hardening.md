@@ -132,7 +132,7 @@ re-grep the named function/symbol.
 Ranked; all still open. The storefront cart path is guarded by the cart-row
 `FOR UPDATE` in `place_order` (`db.rs`) — these are the paths it does not cover.
 
-- **The ERP API order path has no idempotency at all.** `POST /api/v1/orders`
+- **The ERP API order path has no idempotency at all.** ([#2](https://github.com/athlet-o/athleto-app-rs/issues/2)) `POST /api/v1/orders`
   calls `place_order` with `cart_id = None`, so it takes no cart lock, and
   `OrderRequest` (`athleto-interfaces/schema/athleto.schema.json`) carries no
   idempotency key. An ERP client that retries on timeout gets a second order and
