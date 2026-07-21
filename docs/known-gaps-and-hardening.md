@@ -26,6 +26,11 @@ re-grep the named function/symbol.
   `db::run_due_recurring_orders` to skip any order with a `payment_subscriptions`
   row. Covered by `tests/recurring_runner_db.rs`.
 - **Migration 0006 checksum drift** — see [Migration discipline](#migration-discipline).
+- **CI lint was non-blocking.** `fmt` and `clippy` ran with
+  `continue-on-error: true`, so style/lint regressions could merge. They are now
+  standalone blocking jobs in `.github/workflows/ci.yml` (`cargo fmt --check`, and
+  `cargo clippy --locked --all-targets -- -D warnings`), with `actionlint`
+  validating both workflow files and every action pinned to a commit SHA.
 - **Fiducia leases could not outlive their own TTL.** `run_singleton` acquired a
   120 s lease and ran the job with no renewal, so a tick that took longer than
   its TTL kept working while fiducia reaped the grant and promoted another
@@ -194,10 +199,7 @@ Ranked; all still open. The storefront cart path is guarded by the cart-row
   that the bespoke `/ws` is the intended path and the SDK is out of scope here. Don't
   leave it ambiguous.
 
-### 9. CI lint is non-blocking; one transitive advisory
-- `.github/workflows/ci.yml` runs `fmt` + `clippy` as `continue-on-error: true` — drop
-  that once the tree is clean so lint regressions block merge (athleto-sync already
-  gates on clippy).
+### 9. One transitive advisory
 - `cargo audit`: `RUSTSEC-2023-0071` (rsa 0.9 "Marvin Attack" timing sidechannel,
   medium) via the SQLx/SeaORM MySQL stack — no upstream fix. If the MySQL driver is
   unused, disabling that SeaORM feature removes the `rsa` dependency; otherwise track.
