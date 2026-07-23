@@ -28,8 +28,8 @@ spec:
           imagePullPolicy: IfNotPresent
           ports: [{ containerPort: 8145, name: http }]
           env:
-            - { name: ATHLETO_HOST, value: "0.0.0.0" }
-            - { name: ATHLETO_PORT, value: "8145" }
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: PORT, value: "8145" }
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://dd-otel-collector.observability.svc.cluster.local:4317" }
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.name=athleto-app-rs" }
           envFrom:

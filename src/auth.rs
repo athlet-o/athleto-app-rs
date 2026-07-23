@@ -31,11 +31,13 @@ use crate::db::{self, CustomerProfile};
 use crate::{
     anti_abuse, mfa_state, pages,
     request_trust::{self, PeerAddress},
-    security, Config, SharedState,
+    security, shared_auth, Config, SharedState,
 };
 
 pub const ACCESS_COOKIE: &str = "sb_access_token";
 pub const REFRESH_COOKIE: &str = "sb_refresh_token";
+const SHARED_ACCESS_COOKIE: &str = "__Host-ore_access_token";
+const SHARED_REFRESH_COOKIE: &str = "__Host-ore_refresh_token";
 /// Short-lived browser binding for a magic-link request. The high-entropy
 /// nonce is HttpOnly and must accompany the callback before session cookies
 /// are minted, preventing a link initiated in another browser from logging a
@@ -89,9 +91,10 @@ impl AuthUser {
     }
 }
 
-/// Current-user extractor. Resolves to `MaybeUser(None)` (never rejects) when
-/// there is no session cookie, Supabase is not configured, or the token is
-/// invalid/expired.
+/// Current-user extractor. A browser session is accepted only when the
+/// shared-auth authority and Supabase agree on the provider identity. It
+/// resolves to `MaybeUser(None)` (never rejects) when either session is absent,
+/// invalid, expired, or unavailable.
 #[derive(Clone, Default)]
 pub struct MaybeUser(pub Option<AuthUser>);
 
@@ -213,6 +216,56 @@ async fn fetch_user(state: &SharedState, token: &str) -> Option<AuthUser> {
     }
 }
 
+fn shared_identity_matches(identity: &shared_auth::Identity, user: &AuthUser) -> bool {
+    identity.provider == "supabase"
+        && Uuid::parse_str(&identity.provider_subject).is_ok_and(|subject| subject == user.id)
+}
+
+async fn exchange_shared_session(
+    state: &SharedState,
+    provider_token: &str,
+    user: &AuthUser,
+) -> Result<shared_auth::Session, shared_auth::AuthError> {
+    let client = state
+        .shared_auth
+        .as_ref()
+        .ok_or(shared_auth::AuthError::Unavailable)?;
+    let session = client.exchange(provider_token).await?;
+    if !shared_identity_matches(&session.identity, user) {
+        tracing::warn!(
+            auth.system = "shared-auth",
+            auth.outcome = "identity_mismatch",
+            "provider and shared-auth identities did not match"
+        );
+        return Err(shared_auth::AuthError::Invalid);
+    }
+    Ok(session)
+}
+
+async fn fetch_authenticated_user(
+    state: &SharedState,
+    provider_token: &str,
+    shared_token: &str,
+) -> Option<AuthUser> {
+    let identity = state
+        .shared_auth
+        .as_ref()?
+        .introspect(shared_token)
+        .await
+        .ok()?;
+    let user = fetch_user(state, provider_token).await?;
+    if shared_identity_matches(&identity, &user) {
+        Some(user)
+    } else {
+        tracing::warn!(
+            auth.system = "shared-auth",
+            auth.outcome = "identity_mismatch",
+            "provider and shared-auth identities did not match"
+        );
+        None
+    }
+}
+
 impl FromRequestParts<SharedState> for MaybeUser {
     type Rejection = std::convert::Infallible;
 
@@ -221,13 +274,21 @@ impl FromRequestParts<SharedState> for MaybeUser {
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
         let Ok(jar) = CookieJar::from_request_parts(parts, state).await;
-        let Some(token) = jar
+        let Some(provider_token) = jar
             .get(ACCESS_COOKIE)
             .map(|cookie| cookie.value().to_string())
         else {
             return Ok(Self(None));
         };
-        Ok(Self(fetch_user(state, &token).await))
+        let Some(shared_token) = jar
+            .get(SHARED_ACCESS_COOKIE)
+            .map(|cookie| cookie.value().to_string())
+        else {
+            return Ok(Self(None));
+        };
+        Ok(Self(
+            fetch_authenticated_user(state, &provider_token, &shared_token).await,
+        ))
     }
 }
 
@@ -261,6 +322,22 @@ fn session_cookie(name: &'static str, value: String) -> Cookie<'static> {
         .build()
 }
 
+fn add_session_cookies(
+    jar: CookieJar,
+    provider_access: String,
+    provider_refresh: String,
+    shared: shared_auth::Session,
+) -> CookieJar {
+    let jar = jar
+        .add(session_cookie(ACCESS_COOKIE, provider_access))
+        .add(session_cookie(REFRESH_COOKIE, provider_refresh))
+        .add(session_cookie(SHARED_ACCESS_COOKIE, shared.access_token));
+    match shared.refresh_token {
+        Some(refresh_token) => jar.add(session_cookie(SHARED_REFRESH_COOKIE, refresh_token)),
+        None => jar.remove(Cookie::build(SHARED_REFRESH_COOKIE).path("/").secure(true)),
+    }
+}
+
 fn login_flow_cookie(value: String) -> Cookie<'static> {
     Cookie::build((LOGIN_FLOW_COOKIE, value))
         .path("/")
@@ -281,8 +358,28 @@ pub fn refresh_session_cookie(value: String) -> Cookie<'static> {
 fn clear_session(jar: CookieJar) -> CookieJar {
     jar.remove(Cookie::build(ACCESS_COOKIE).path("/"))
         .remove(Cookie::build(REFRESH_COOKIE).path("/"))
+        .remove(Cookie::build(SHARED_ACCESS_COOKIE).path("/").secure(true))
+        .remove(Cookie::build(SHARED_REFRESH_COOKIE).path("/").secure(true))
         .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
         .remove(Cookie::build(MFA_CHALLENGE_COOKIE).path("/"))
+}
+
+fn shared_auth_failure(biz: Biz, error: shared_auth::AuthError) -> Response {
+    match error {
+        shared_auth::AuthError::Invalid => login_form(
+            biz,
+            Some(html! { div .notice .error { "That sign-in session was invalid. Request a fresh link." } }),
+        )
+        .into_response(),
+        shared_auth::AuthError::Unavailable => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            login_form(
+                biz,
+                Some(html! { div .notice .error { "Sign-in is temporarily unavailable. Try again shortly." } }),
+            ),
+        )
+            .into_response(),
+    }
 }
 
 async fn gotrue_error_message(response: reqwest::Response) -> String {
@@ -335,7 +432,7 @@ pub async fn login_page(State(state): State<SharedState>, user: MaybeUser, biz: 
     if user.as_ref().is_some() {
         return Redirect::to("/").into_response();
     }
-    if state.config.supabase().is_none() {
+    if !state.config.auth_ready() || state.shared_auth.is_none() {
         return not_configured_page(&user, "Sign in | AthletO", "Sign in").into_response();
     }
     login_form_for(&state.config, biz, None).into_response()
@@ -447,7 +544,11 @@ pub async fn login_submit(
             .into_response();
     }
 
-    let Some((base, key)) = state.config.supabase() else {
+    let Some((base, key)) = state
+        .config
+        .supabase()
+        .filter(|_| state.shared_auth.is_some())
+    else {
         return not_configured_page(&MaybeUser(None), "Sign in | AthletO", "Sign in")
             .into_response();
     };
@@ -627,11 +728,17 @@ pub async fn auth_session(
         )
         .into_response();
     };
+    let shared = match exchange_shared_session(&state, &tokens.access_token, &user).await {
+        Ok(shared) => shared,
+        Err(error) => return shared_auth_failure(biz, error),
+    };
 
-    let jar = jar
-        .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
-        .add(session_cookie(ACCESS_COOKIE, tokens.access_token.clone()))
-        .add(session_cookie(REFRESH_COOKIE, tokens.refresh_token.clone()));
+    let jar = add_session_cookies(
+        jar.remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/")),
+        tokens.access_token,
+        tokens.refresh_token,
+        shared,
+    );
 
     if user.needs_aal2() {
         return (jar, Redirect::to("/login/2fa")).into_response();
@@ -665,7 +772,11 @@ pub async fn auth_confirm(
     jar: CookieJar,
     Query(params): Query<ConfirmParams>,
 ) -> Response {
-    let Some((base, key)) = state.config.supabase() else {
+    let Some((base, key)) = state
+        .config
+        .supabase()
+        .filter(|_| state.shared_auth.is_some())
+    else {
         return not_configured_page(&MaybeUser(None), "Sign in | AthletO", "Sign in")
             .into_response();
     };
@@ -724,11 +835,17 @@ pub async fn auth_confirm(
         )
         .into_response();
     };
+    let shared = match exchange_shared_session(&state, &access, &user).await {
+        Ok(shared) => shared,
+        Err(error) => return shared_auth_failure(biz, error),
+    };
 
-    let jar = jar
-        .remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/"))
-        .add(session_cookie(ACCESS_COOKIE, access))
-        .add(session_cookie(REFRESH_COOKIE, refresh));
+    let jar = add_session_cookies(
+        jar.remove(Cookie::build(LOGIN_FLOW_COOKIE).path("/")),
+        access,
+        refresh,
+        shared,
+    );
 
     if user.needs_aal2() {
         return (jar, Redirect::to("/login/2fa")).into_response();
@@ -1250,8 +1367,18 @@ pub fn require_b2b_ready(
     Ok(())
 }
 
-/// POST /logout -- best-effort GoTrue logout, then clear session cookies.
+/// POST /logout -- best-effort shared-auth and GoTrue logout, then clear all
+/// provider and shared session cookies.
 pub async fn logout(State(state): State<SharedState>, jar: CookieJar) -> Response {
+    if let (Some(client), Some(refresh_token)) = (
+        state.shared_auth.as_ref(),
+        jar.get(SHARED_REFRESH_COOKIE)
+            .map(|cookie| cookie.value().to_string()),
+    ) {
+        if let Err(error) = client.logout(&refresh_token).await {
+            tracing::warn!(?error, "shared-auth logout failed; clearing cookies anyway");
+        }
+    }
     if let (Some((base, key)), Some(token)) = (
         state.config.supabase(),
         jar.get(ACCESS_COOKIE)
@@ -1360,6 +1487,71 @@ mod tests {
         assert!(!user("aal1", vec![factor("unverified", "totp")]).needs_aal2());
         // No factors at all -> nothing to step up to.
         assert!(!user("aal1", vec![]).needs_aal2());
+    }
+
+    #[test]
+    fn shared_identity_must_be_the_same_supabase_subject() {
+        let user = user("aal1", vec![]);
+        let matching = shared_auth::Identity {
+            shared_user_id: "shared-user".into(),
+            provider: "supabase".into(),
+            provider_subject: user.id.to_string(),
+            roles: vec!["authenticated".into()],
+        };
+        assert!(shared_identity_matches(&matching, &user));
+
+        let wrong_subject = shared_auth::Identity {
+            provider_subject: Uuid::new_v4().to_string(),
+            ..matching.clone()
+        };
+        assert!(!shared_identity_matches(&wrong_subject, &user));
+
+        let wrong_provider = shared_auth::Identity {
+            provider: "github".into(),
+            ..matching
+        };
+        assert!(!shared_identity_matches(&wrong_provider, &user));
+    }
+
+    #[test]
+    fn session_cookie_helpers_keep_provider_and_shared_auth_state_together() {
+        let session = shared_auth::Session {
+            access_token: "shared-access".into(),
+            refresh_token: Some("shared-refresh".into()),
+            identity: shared_auth::Identity {
+                shared_user_id: "shared-user".into(),
+                provider: "supabase".into(),
+                provider_subject: Uuid::nil().to_string(),
+                roles: vec![],
+            },
+        };
+        let jar = add_session_cookies(
+            CookieJar::new(),
+            "provider-access".into(),
+            "provider-refresh".into(),
+            session,
+        );
+        for name in [
+            ACCESS_COOKIE,
+            REFRESH_COOKIE,
+            SHARED_ACCESS_COOKIE,
+            SHARED_REFRESH_COOKIE,
+        ] {
+            assert!(jar.get(name).is_some(), "missing session cookie {name}");
+        }
+
+        let cleared = clear_session(jar);
+        for name in [
+            ACCESS_COOKIE,
+            REFRESH_COOKIE,
+            SHARED_ACCESS_COOKIE,
+            SHARED_REFRESH_COOKIE,
+        ] {
+            assert!(
+                cleared.get(name).is_none(),
+                "session cookie survived: {name}"
+            );
+        }
     }
 
     #[test]

@@ -13,7 +13,9 @@ A self-contained Rust web app on the "MASH" stack:
 - **A**xum — HTTP server and routing (plus a websocket endpoint pushing HTML fragments)
 - **S**eaORM — entities, pool configuration, transactions, and raw
   `sea_orm::Statement` queries for the locking-heavy hold/checkout paths
-- Supabase — GoTrue passwordless (magic link + MFA) auth via its REST API
+- Supabase — GoTrue passwordless provider and authoritative MFA state
+- `github.com/shared-auth` — shared session issuance, identity linking, and
+  revocation authority
 - **H**TMX — add-to-cart / remove-from-cart fragment swaps (vendored, served same-origin)
 
 Products: **Athlet-O Starter** (20g gelatin protein, inulin fiber, vitamin C, electrolytes),
@@ -26,7 +28,7 @@ and a powder packet (just add water).
 | --- | --- |
 | `GET /` | Storefront product grid (both formats, prices, calories) |
 | `GET /product/{slug}` | Product detail |
-| `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase GoTrue auth; browser-bound magic links and session tokens in HttpOnly Secure SameSite=Lax cookies |
+| `GET|POST /signup`, `GET|POST /login`, `POST /logout` | Supabase magic-link/MFA provider plus shared-auth sessions; browser-bound provider and shared tokens use HttpOnly Secure SameSite=Lax cookies |
 | `GET /cart`, `POST /cart/items`, `POST /cart/items/{id}/delete` | Cart pages + htmx fragments; keyed by Supabase user id or anonymous cart cookie |
 | `POST /checkout`, `GET /orders`, `GET /orders/{id}`, `POST /orders/{id}/reorder`, `POST /orders/{id}/pay` | Hosted payment checkout/retry (Stripe, PayPal, Square; approved B2B Net-30 invoices), order history with status/ETA/tracking + B2B filters, printable receipt, reorder |
 | `GET /pay/{success,cancel}`, `POST /webhooks/{stripe,paypal,square}` | Verified provider returns and signed, replay-safe payment webhooks |
@@ -45,6 +47,7 @@ and a powder packet (just add water).
 | `PORT` | `8080` | Bind port |
 | `SUPABASE_URL` | *(unset)* | Supabase project URL, e.g. `https://xyz.supabase.co` |
 | `SUPABASE_ANON_KEY` | *(unset)* | Supabase anon (publishable) key |
+| `SHARED_AUTH_BASE_URL` | *(unset)* | Canonical `github.com/shared-auth` authority base. Public URLs must use HTTPS; loopback and Kubernetes service DNS may use HTTP. Required with the two Supabase values for login. |
 | `DATABASE_URL` | *(unset)* | Supabase pooled Postgres URL (e.g. the Supavisor `...pooler.supabase.com:6543/postgres` string). TLS is enforced for public hosts automatically — see below. |
 | `ATHLETO_DB_SSLMODE` | *(unset)* | Override the auto-selected libpq `sslmode` (`disable`/`require`/`verify-ca`/`verify-full`). Leave unset to get `verify-full` against the pinned Supabase CA on public hosts. |
 | `ATHLETO_DB_SSLROOTCERT` | *(bundled Supabase CA)* | Path to a CA file for `verify-full`. Defaults to the embedded `certs/supabase-prod-ca-2021.crt`. Set this when connecting to a non-Supabase public Postgres. |
@@ -66,13 +69,15 @@ and a powder packet (just add water).
 
 The app starts and serves every page with **no** secrets set: `/healthz` passes, the
 storefront renders from a built-in catalog, and auth/cart routes show a
-"not configured" notice. Set all three variables to enable auth and cart persistence.
+"not configured" notice. Set the two Supabase variables plus
+`SHARED_AUTH_BASE_URL` to enable auth, and `DATABASE_URL` for cart persistence.
 
 ## Local run
 
 ```sh
 export SUPABASE_URL=https://<project-ref>.supabase.co
 export SUPABASE_ANON_KEY=<anon-key>
+export SHARED_AUTH_BASE_URL=http://127.0.0.1:8120/shared-auth
 export DATABASE_URL=postgres://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:6543/postgres
 cargo run
 # then open http://localhost:8080
@@ -152,6 +157,8 @@ collection by Promtail/Loki. Every HTTP route has a W3C-parented server span,
 bounded route/method/status metrics, and `trace_id`/`span_id` log fields. When
 `OTEL_EXPORTER_OTLP_ENDPOINT` is configured, traces and metrics are sent to the
 cluster OpenTelemetry Collector; Prometheus scrapes the collector's exporter.
+Shared-auth exchange, introspection, and logout calls propagate W3C trace
+headers and emit bounded auth outcome spans without recording session tokens.
 
 ## Deploy
 

@@ -20,6 +20,7 @@ pub mod rate_limit;
 pub mod request_trust;
 pub mod secrets;
 pub mod security;
+mod shared_auth;
 pub mod startup;
 pub mod telemetry;
 pub mod ws;
@@ -54,6 +55,8 @@ pub use auth::{auth_session_cookie, refresh_session_cookie};
 pub struct Config {
     pub supabase_url: Option<String>,
     pub supabase_anon_key: Option<String>,
+    /// Canonical `github.com/shared-auth` authority mounted URL.
+    pub shared_auth_base_url: Option<String>,
     /// Fallback origin for auth redirects when the Host header is absent.
     pub public_base_url: String,
     /// Canonical B2B origin. Never derive this from an arbitrary Host header.
@@ -100,6 +103,7 @@ impl Default for Config {
         Self {
             supabase_url: None,
             supabase_anon_key: None,
+            shared_auth_base_url: None,
             public_base_url: "https://app.athleto.store".to_string(),
             biz_public_base_url: "https://biz.athleto.store".to_string(),
             allowed_hosts: None,
@@ -131,6 +135,10 @@ impl Config {
             (Some(url), Some(key)) => Some((url, key)),
             _ => None,
         }
+    }
+
+    pub fn auth_ready(&self) -> bool {
+        self.supabase().is_some() && self.shared_auth_base_url.is_some()
     }
 
     pub fn self_signup_ready(&self) -> bool {
@@ -175,6 +183,7 @@ pub struct AppState {
     pub pool: Option<sea_orm::DatabaseConnection>,
     pub http: reqwest::Client,
     pub config: Config,
+    pub(crate) shared_auth: Option<shared_auth::Client>,
     /// Fiducia-backed throttles when configured; local-only for no-secret
     /// development. A broken configured backend fails closed.
     pub rate_limits: rate_limit::RateLimits,
@@ -190,11 +199,19 @@ impl AppState {
         config: Config,
     ) -> Self {
         let (cart_events, _) = tokio::sync::broadcast::channel(64);
+        let shared_auth = config.shared_auth_base_url.as_deref().and_then(|url| {
+            shared_auth::Client::new(url)
+                .map_err(
+                    |error| tracing::error!(%error, "invalid SHARED_AUTH_BASE_URL; auth disabled"),
+                )
+                .ok()
+        });
         Self {
             pool,
             http,
             rate_limits: rate_limit::RateLimits::from_config(&config),
             config,
+            shared_auth,
             cart_events,
         }
     }

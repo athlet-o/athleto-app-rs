@@ -148,16 +148,25 @@ fn enforce_db_tls(database_url: &str) -> String {
         return database_url.to_string();
     };
     let has_sslmode = parsed.query_pairs().any(|(k, _)| k == "sslmode");
-    let override_mode = std::env::var("ATHLETO_DB_SSLMODE").ok().filter(|s| !s.is_empty());
+    let override_mode = std::env::var("ATHLETO_DB_SSLMODE")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     // Resolve a CA path only when we might need the verify-full default: an
     // operator-mounted cert wins; otherwise fall back to the embedded one.
-    let needs_default_ca =
-        !has_sslmode && override_mode.is_none() && !crate::coordinate::cleartext_internal_host_allowed(&host);
+    let needs_default_ca = !has_sslmode
+        && override_mode.is_none()
+        && !crate::coordinate::cleartext_internal_host_allowed(&host);
     let ca_path = std::env::var("ATHLETO_DB_SSLROOTCERT")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| if needs_default_ca { supabase_ca_path() } else { None });
+        .or_else(|| {
+            if needs_default_ca {
+                supabase_ca_path()
+            } else {
+                None
+            }
+        });
 
     let Some((mode, ca)) = decide_db_tls(&host, has_sslmode, override_mode, ca_path) else {
         return database_url.to_string();
@@ -2096,7 +2105,12 @@ mod db_tls_tests {
     fn local_and_internal_hosts_stay_plaintext() {
         // CI connects to localhost:5432 with no TLS; dev likewise. These must
         // be left completely untouched or the whole test/dev flow breaks.
-        for host in ["localhost", "127.0.0.1", "10.1.2.3", "db.default.svc.cluster.local"] {
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "10.1.2.3",
+            "db.default.svc.cluster.local",
+        ] {
             assert_eq!(
                 decide_db_tls(host, false, None, Some("/tmp/ca.crt".to_string())),
                 None,
@@ -2125,7 +2139,10 @@ mod db_tls_tests {
     #[test]
     fn enforce_appends_sslmode_for_a_public_host_but_not_localhost() {
         let local = enforce_db_tls("postgres://postgres:postgres@localhost:5432/athleto_test");
-        assert!(!local.contains("sslmode"), "localhost must be untouched: {local}");
+        assert!(
+            !local.contains("sslmode"),
+            "localhost must be untouched: {local}"
+        );
 
         let public = enforce_db_tls(
             "postgres://postgres.ref:pw@aws-0-ca-central-1.pooler.supabase.com:5432/postgres",

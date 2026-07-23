@@ -80,6 +80,8 @@ async fn run_inner() -> anyhow::Result<()> {
             .get("SUPABASE_URL")
             .map(|url| url.trim_end_matches('/').to_string()),
         supabase_anon_key: secret.get("SUPABASE_ANON_KEY"),
+        shared_auth_base_url: env_opt("SHARED_AUTH_BASE_URL")
+            .map(|url| url.trim_end_matches('/').to_string()),
         public_base_url: env_opt("ATHLETO_PUBLIC_BASE_URL")
             .unwrap_or_else(|| "https://app.athleto.store".to_string()),
         biz_public_base_url: env_opt("ATHLETO_BIZ_PUBLIC_BASE_URL")
@@ -152,8 +154,12 @@ async fn run_inner() -> anyhow::Result<()> {
             _ => None,
         },
     };
-    if config.supabase().is_none() {
-        tracing::warn!("SUPABASE_URL / SUPABASE_ANON_KEY not set; auth routes will show a 'not configured' notice");
+    if !config.auth_ready() {
+        tracing::warn!(
+            supabase.configured = config.supabase().is_some(),
+            shared_auth.configured = config.shared_auth_base_url.is_some(),
+            "Supabase/shared-auth stack incomplete; auth routes will show a 'not configured' notice"
+        );
     }
     if config.allowed_hosts.is_none() {
         tracing::warn!(
