@@ -22,9 +22,9 @@
 keys:
   # Daily development/operator identity used across the existing fleet.
   - &alex age1qrnva7lnv2jzww6ah5au0cqm4wkvkm5shpzflekdcm4nlu6wnyfqgfaxft # alex@dancingdragons.cc
-  # Distinct protected-operator recipient for the prod profile. Verify custody
-  # and a decryptability witness before treating prod.env.enc as production.
-  - &prod_operator age1s8lcnaxn9g77s6j4g7p24w6sgvllpue0lzrsvp3xk02k2gwjj5ssnkp39q
+  # Operator key on the macbook — also the protected-operator recipient used
+  # for prod in shared-auth / benefactor-cc / file-tunnel.
+  - &op_alex_macbook age1s8lcnaxn9g77s6j4g7p24w6sgvllpue0lzrsvp3xk02k2gwjj5ssnkp39q
   # Offline recovery key. Exists so that losing a laptop key does not make
   # every environment in every repo permanently unreadable. The private half
   # lives OFF any workstation (password manager / printed) and is not used day
@@ -32,16 +32,21 @@ keys:
   - &recovery age1txv6jzlds2s03advmdtnm5l93qh4rkqs50nwvzk9yfvsartzue8se8t7jv # offline recovery
 
 creation_rules:
+  # dev and prod are separate exact rules so their recipient sets can diverge:
+  # widen dev first when onboarding; grant prod deliberately. Drop &alex from
+  # the prod rule (and `just env-rekey`) once a distinct prod custody exists.
   - path_regex: env/enc/dev\.env\.enc$
     key_groups:
       - age:
           - *alex
+          - *op_alex_macbook
           - *recovery
 
   - path_regex: env/enc/prod\.env\.enc$
     key_groups:
       - age:
-          - *prod_operator
+          - *op_alex_macbook
+          - *alex
           - *recovery
 
   # Any other profile (staging, test, …) is treated like dev.
@@ -49,4 +54,5 @@ creation_rules:
     key_groups:
       - age:
           - *alex
+          - *op_alex_macbook
           - *recovery

@@ -135,3 +135,22 @@ yields byte-identical values everywhere.
 
 [sops]: https://github.com/getsops/sops
 [age]: https://github.com/FiloSottile/age
+
+## Compatibility with the `ores-sops` recipe names
+
+The first rollout of this convention delegated to the `ores-sops` wrapper and
+used a few different recipe names. They still work as aliases:
+
+| old name | now |
+|---|---|
+| `just env-audit` | `just env-check` |
+| `just env-lock` | `just env-clean` |
+| `just env-key` | `just env-whoami` |
+| `just env-diff` | `just env-status` |
+| `just env-refresh` | `just env-decrypt` |
+
+Containers built from this repo's `Dockerfile` carry `scripts/sops-entrypoint.sh`
+and decrypt at `docker run` when `SOPS_AGE_KEY` / `SOPS_AGE_KEY_FILE` is
+supplied; without a key they run the command unchanged. `just env-docker-run`
+(host-side decryption, `--env-file` injection) works for any image, including
+distroless ones.

@@ -1,28 +1,18 @@
 # athleto-app-rs — task runner. Run `just` to see everything.
 #
 # Environment secrets live in env/enc/*.env.enc, encrypted with sops + age and
-# committed to this repo. See env/README.md for the workflow.
+# committed to this repo. `just env-use <name>` decrypts to env/dec/<name>.env
+# and points ./.env at it. See env/README.md for the workflow.
 
-set shell := ["bash", "-euo", "pipefail", "-c"]
-set dotenv-load := false
+import '.just/env.just'
 
 # Show available recipes.
 default:
     @just --list
 
-# ─── encrypted environment files (sops + age) ───────────────────────────────
-#
-# Secrets live in env/enc/{dev,prod}.env.enc, encrypted with sops + age and
-# committed to this repo; plaintext is decrypted to env/dec/*.env (gitignored,
-# mode 0600) and the active profile is symlinked to ./.env. See env/README.md.
-#
-#   just env-keygen            once per machine
-#   just env-decrypt dev       env/enc/dev.env.enc -> env/dec/dev.env
-#   just env-use dev           .env -> env/dec/dev.env (relative, managed)
-#   just env-run prod <cmd…>   no plaintext ever touches disk
-#   just env-check             fail-closed audit — runs in CI (secrets-audit)
-
-import '.just/env.just'
+alias use := env-use
+alias edit := env-edit
+alias audit := env-check
 
 # Activate <name>: decrypt it and point ./.env at env/dec/<name>.env.
 # The link is relative and is only ever replaced when it already points into
@@ -58,3 +48,10 @@ env-unuse:
     else
       echo "no .env to remove"
     fi
+
+# ─── compatibility: ores-sops recipe names ──────────────────────────────────
+# The first rollout of this convention named a few recipes differently (they
+# delegated to the `ores-sops` wrapper). The self-contained module above covers
+# the same operations; keep the old names working so docs, CI and muscle memory
+# do not break.
+alias env-audit := env-check

@@ -212,3 +212,11 @@ IDs or short-lived, single-use, audience-bound codes and explicit confirmation.
 
 See [`docs/CROSS_SURFACE_DELIVERY.md`](docs/CROSS_SURFACE_DELIVERY.md) and the
 [portfolio policy](https://github.com/ORESoftware/project-registry/blob/main/docs/cross-surface-delivery.md).
+
+## Environment secrets
+
+Secrets live in this repo **encrypted** with [sops](https://github.com/getsops/sops) + [age](https://github.com/FiloSottile/age):
+`env/enc/<dev|prod>.env.enc` is committed; `just env-use <name>` decrypts it to
+`env/dec/<name>.env` (gitignored, mode 0600) and symlinks `./.env` to it. The
+Nix dev shell provides the tooling, `just env-audit` runs keyless in CI, and
+containers decrypt at `docker run` — never at build. See [`env/README.md`](env/README.md).

@@ -1,10 +1,10 @@
 { pkgs }:
 let
   shellPackages = with pkgs; [
-    # encrypted env files — env/enc/*.env.enc, see env/README.md
+    python3
+    # encrypted env files — env/enc/*.env.enc (sops + age), see env/README.md
     sops
     age
-    python3
     just
     bacon
     cargo
