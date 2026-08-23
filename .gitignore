@@ -5,3 +5,17 @@ tmp
 temp
 tmp/worktrees
 temp/worktrees
+
+# --- environment / secrets (sops + age) -------------------------------------
+# Only env/enc/*.env.enc is tracked. Every plaintext form stays out of git;
+# `just env-check` enforces it. See env/README.md.
+*.env
+**/*.env
+env/dec/
+!.env.example
+
+# age private keys — never commit these.
+*.agekey
+*.age-key
+keys.txt
+sops-private*.txt
