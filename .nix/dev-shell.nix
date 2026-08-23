@@ -1,6 +1,10 @@
 { pkgs }:
 let
   shellPackages = with pkgs; [
+    # encrypted env files — env/enc/*.env.enc (sops + age), see env/README.md
+    sops
+    age
+    just
     bacon
     cargo
     clippy
