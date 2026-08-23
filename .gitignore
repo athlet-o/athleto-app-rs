@@ -5,3 +5,27 @@ tmp
 temp
 tmp/worktrees
 temp/worktrees
+
+# BEGIN ores-sops dotenv policy — see env/README.md
+# Plaintext dotenv is local-only at every depth, including suffix variants.
+# Only env/enc/*.env.enc (sops ciphertext) is ever tracked; `just env-audit`
+# enforces it.
+.env
+.env.*
+*.env
+**/*.env
+**/**/*.env
+*/*.env
+*/**/*.env
+*.env.*
+!.env.example
+
+# Decrypted material is never tracked.
+env/dec
+/env/dec/
+
+# Only the approved ciphertext files are trackable.
+/env/enc/*
+!/env/enc/dev.env.enc
+!/env/enc/prod.env.enc
+# END ores-sops dotenv policy

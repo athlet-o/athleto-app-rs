@@ -1,0 +1,45 @@
+# sops recipients for this repository.
+#
+# Everything in this file is PUBLIC key material and is safe to commit. Private
+# keys exist only on operator machines (`~/.config/sops/age/keys.txt`, created
+# with `age-keygen`) and never in git.
+#
+# Layout: env/enc/<name>.env.enc is committed ciphertext; `just env-use <name>`
+# decrypts it to env/dec/<name>.env (gitignored, 0600) and symlinks ./.env to
+# it. See env/README.md.
+#
+# To add someone:
+#   1. they run `just env-key` and send you the age1… line
+#   2. add an anchor below and reference it in every rule
+#   3. run `just env-rekey` and commit — only key metadata changes, so the
+#      encrypted values stay byte-identical and the diff stays reviewable
+#
+# To remove someone: delete their anchor, run `just env-rekey`, commit — and
+# then rotate the underlying credentials, because they still hold every secret
+# they had already decrypted.
+#
+# Every rule lists at least two recipients on purpose: sops has no backdoor, so
+# with one recipient a lost laptop key is permanent loss of every environment.
+
+keys:
+  - &op_alex_macbook age1s8lcnaxn9g77s6j4g7p24w6sgvllpue0lzrsvp3xk02k2gwjj5ssnkp39q # alex — macbook operator key
+  - &alex_dd age1qrnva7lnv2jzww6ah5au0cqm4wkvkm5shpzflekdcm4nlu6wnyfqgfaxft # alex@dancingdragons.cc
+  # Offline recovery key. The private half lives OFF any machine (password
+  # manager / printed) and is not used day to day.
+  - &recovery age1txv6jzlds2s03advmdtnm5l93qh4rkqs50nwvzk9yfvsartzue8se8t7jv # offline recovery
+
+creation_rules:
+  # dev and prod are separate exact rules so their recipient sets can diverge:
+  # widen dev first when onboarding; grant prod deliberately.
+  - path_regex: ^env/enc/dev\.env\.enc$
+    key_groups:
+      - age:
+          - *op_alex_macbook
+          - *alex_dd
+          - *recovery
+  - path_regex: ^env/enc/prod\.env\.enc$
+    key_groups:
+      - age:
+          - *op_alex_macbook
+          - *alex_dd
+          - *recovery
