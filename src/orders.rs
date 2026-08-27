@@ -58,27 +58,23 @@ fn payment_method_options(
     config: &crate::Config,
     is_b2b: bool,
 ) -> Vec<(&'static str, &'static str)> {
-    let mut options = Vec::new();
-    if config.stripe.is_some() {
-        options.push((
+    [
+        config.stripe.is_some().then_some((
             "stripe",
             if is_b2b {
                 "Card or ACH bank debit (Stripe)"
             } else {
                 "Card (Stripe)"
             },
-        ));
-    }
-    if config.paypal.is_some() {
-        options.push(("paypal", "PayPal"));
-    }
-    if config.square.is_some() {
-        options.push(("square", "Square"));
-    }
-    if is_b2b && config.stripe.is_some() {
-        options.push(("invoice", "Invoice my account — Net 30 (PO required)"));
-    }
-    options
+        )),
+        config.paypal.is_some().then_some(("paypal", "PayPal")),
+        config.square.is_some().then_some(("square", "Square")),
+        (is_b2b && config.stripe.is_some())
+            .then_some(("invoice", "Invoice my account — Net 30 (PO required)")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 async fn dispatch_payment(
