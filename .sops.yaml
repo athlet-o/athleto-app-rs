@@ -1,0 +1,58 @@
+# sops recipients for this repository (athlet-o/athleto-app-rs).
+#
+# Everything in this file is PUBLIC key material and is safe to commit. Private
+# keys exist only on developer machines (`just env-keygen`) and never in git.
+#
+# Follows the fleet-wide ORESoftware sops convention (fiducia-cloud,
+# shared-auth, benefactor-cc, 3FA-app, zed-pkg): exactly two tracked ciphertext
+# files, env/enc/dev.env.enc and env/enc/prod.env.enc, each with its own
+# recipient set. Keep at least two recipients per rule — sops has no backdoor,
+# so with a single recipient a lost key is permanent data loss.
+#
+# To add someone:
+#   1. they run `just env-whoami` and send you the age1… line
+#   2. add an anchor below and reference it in the relevant rule
+#   3. run `just env-rekey` and commit — this rewrites only key metadata, so
+#      the encrypted values stay byte-identical and the diff stays reviewable
+#
+# To remove someone: delete their anchor, run `just env-rekey`, commit — and
+# then rotate the underlying credentials, because they still hold every secret
+# they had already decrypted.
+
+keys:
+  # Daily development/operator identity used across the existing fleet.
+  - &alex age1qrnva7lnv2jzww6ah5au0cqm4wkvkm5shpzflekdcm4nlu6wnyfqgfaxft # alex@dancingdragons.cc
+  # Operator key on the macbook — also the protected-operator recipient used
+  # for prod in shared-auth / benefactor-cc / file-tunnel.
+  - &op_alex_macbook age1s8lcnaxn9g77s6j4g7p24w6sgvllpue0lzrsvp3xk02k2gwjj5ssnkp39q
+  # Offline recovery key. Exists so that losing a laptop key does not make
+  # every environment in every repo permanently unreadable. The private half
+  # lives OFF any workstation (password manager / printed) and is not used day
+  # to day. See env/README.md.
+  - &recovery age1txv6jzlds2s03advmdtnm5l93qh4rkqs50nwvzk9yfvsartzue8se8t7jv # offline recovery
+
+creation_rules:
+  # dev and prod are separate exact rules so their recipient sets can diverge:
+  # widen dev first when onboarding; grant prod deliberately. Drop &alex from
+  # the prod rule (and `just env-rekey`) once a distinct prod custody exists.
+  - path_regex: env/enc/dev\.env\.enc$
+    key_groups:
+      - age:
+          - *alex
+          - *op_alex_macbook
+          - *recovery
+
+  - path_regex: env/enc/prod\.env\.enc$
+    key_groups:
+      - age:
+          - *op_alex_macbook
+          - *alex
+          - *recovery
+
+  # Any other profile (staging, test, …) is treated like dev.
+  - path_regex: env/enc/.*\.env\.enc$
+    key_groups:
+      - age:
+          - *alex
+          - *op_alex_macbook
+          - *recovery

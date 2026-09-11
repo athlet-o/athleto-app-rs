@@ -1,0 +1,2 @@
+# sops ciphertext is line-oriented dotenv; keep it LF so the MAC stays valid.
+/env/enc/*.env.enc text eol=lf
