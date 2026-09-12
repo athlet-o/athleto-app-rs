@@ -1,0 +1,43 @@
+# GENERATED from Dockerfile (sha256:2b155df02e4815d3) by ores-gha-workflows/scripts/render-dkf.mjs — target linux/arm64. Do not edit; edit Dockerfile and re-render.
+# syntax=docker/dockerfile:1.7
+
+FROM --platform=linux/arm64 rust:1.90-bookworm AS build
+ARG TARGETARCH
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY migrations ./migrations
+COPY src ./src
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git,sharing=locked \
+    --mount=type=cache,target=/app/target,id=athleto-app-rs-target-${TARGETARCH},sharing=locked \
+    cargo build --release \
+ && cp target/release/athleto-app-rs /usr/local/bin/athleto-app-rs
+
+FROM --platform=linux/arm64 debian:bookworm-slim AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get clean
+
+COPY --from=build /usr/local/bin/athleto-app-rs /usr/local/bin/athleto-app-rs
+
+ENV HOST=0.0.0.0 \
+    PORT=8080
+
+EXPOSE 8080
+USER 10001:10001
+
+# --- sops: decrypt at `docker run`, never at `docker build` ------------------
+# The image carries only CIPHERTEXT (env/enc/<SOPS_ENV>.env.enc) and the sops
+# binary. The age key arrives at run time (SOPS_AGE_KEY / SOPS_AGE_KEY_FILE);
+# scripts/sops-entrypoint.sh decrypts into the process environment and execs
+# the real command, so no plaintext ever lands in a layer or on disk.
+# See env/README.md.
+ARG SOPS_ENV=prod
+COPY --chmod=0755 --from=ghcr.io/getsops/sops:v3.10.2-alpine /usr/local/bin/sops /usr/local/bin/sops
+COPY --chmod=0755 scripts/sops-entrypoint.sh /usr/local/bin/sops-entrypoint.sh
+COPY --chmod=0644 env/enc/${SOPS_ENV}.env.enc /app/secrets/app.env
+ENV SOPS_SECRETS_FILE=/app/secrets/app.env
+
+ENTRYPOINT ["/usr/local/bin/sops-entrypoint.sh"]
+CMD ["/usr/local/bin/athleto-app-rs"]
