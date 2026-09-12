@@ -36,3 +36,6 @@ env/dec/
 *.age-key
 keys.txt
 sops-private*.txt
+# Sanctioned scratch locations - AGENTS.md requires both, trailing-slash form
+tmp/
+temp/
