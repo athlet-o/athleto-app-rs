@@ -8,10 +8,20 @@
     "test:playwright": "E2E_ENGINE=playwright node --test *.test.mjs",
     "test:puppeteer": "E2E_ENGINE=puppeteer node --test *.test.mjs",
     "test": "npm run test:playwright && npm run test:puppeteer",
-    "cluster-smoke": "node cluster/run-cluster.mjs"
+    "cluster-smoke": "node cluster/run-cluster.mjs",
+    "lint:ores": "if [ -f ../.ores-lint/lint.sh ]; then sh ../.ores-lint/lint.sh; else echo 'ores-lint not installed'; fi",
+    "prepublishOnly": "npm run lint:ores"
   },
   "devDependencies": {
     "playwright": "1.56.0",
     "puppeteer": "^24.22.3"
+  },
+  "oresLint": {
+    "note": "Declared, not installed. ores-lint resolves these from a global install - see .ores-lint/README.md",
+    "requires": {
+      "eslint": ">=9",
+      "typescript-eslint": ">=8 (optional; without it .ts files are skipped)"
+    },
+    "install": "npm i -g eslint typescript-eslint"
   }
 }

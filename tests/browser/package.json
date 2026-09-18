@@ -7,10 +7,20 @@
   "scripts": {
     "test:pw": "node --test storefront.pw.test.mjs",
     "test:pptr": "node --test storefront.pptr.test.mjs",
-    "test": "node --test storefront.pw.test.mjs storefront.pptr.test.mjs"
+    "test": "node --test storefront.pw.test.mjs storefront.pptr.test.mjs",
+    "lint:ores": "if [ -f ../../.ores-lint/lint.sh ]; then sh ../../.ores-lint/lint.sh; else echo 'ores-lint not installed'; fi",
+    "prepublishOnly": "npm run lint:ores"
   },
   "devDependencies": {
     "playwright": "^1.48.0",
     "puppeteer": "^23.6.0"
+  },
+  "oresLint": {
+    "note": "Declared, not installed. ores-lint resolves these from a global install - see .ores-lint/README.md",
+    "requires": {
+      "eslint": ">=9",
+      "typescript-eslint": ">=8 (optional; without it .ts files are skipped)"
+    },
+    "install": "npm i -g eslint typescript-eslint"
   }
 }
