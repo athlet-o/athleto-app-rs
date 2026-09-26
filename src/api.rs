@@ -29,6 +29,10 @@ fn hash_key(key: &str) -> String {
 }
 
 /// Resolve `Authorization: Bearer athk_...` to a B2B customer.
+#[expect(
+    clippy::result_large_err,
+    reason = "API authentication failures are returned as fully formed JSON responses"
+)]
 async fn authenticate(
     state: &SharedState,
     headers: &HeaderMap,

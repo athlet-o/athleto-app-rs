@@ -1371,6 +1371,10 @@ pub async fn load_profile(state: &SharedState, user_id: Uuid) -> Option<Customer
 /// Gate for signed-in pages: bounce anonymous visitors to /login and
 /// MFA-enrolled users still at AAL1 to /login/2fa. Returns the user plus
 /// their profile (None until /account/setup has run).
+#[expect(
+    clippy::result_large_err,
+    reason = "route guard intentionally returns redirect responses for authentication failures"
+)]
 pub async fn require_full(
     state: &SharedState,
     user: &MaybeUser,
