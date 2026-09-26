@@ -22,6 +22,10 @@ fn hash_api_key(key: &str) -> String {
 /// Charge one attempt against the per-user second-factor code budget shared
 /// with `/login/2fa`. `Err` carries the fully-formed 429 to return; `render`
 /// is only invoked on rejection so the caller pays nothing on the happy path.
+#[expect(
+    clippy::result_large_err,
+    reason = "route guard intentionally returns a fully formed Axum response on rejection"
+)]
 async fn throttle_code_attempt(
     state: &SharedState,
     user: &AuthUser,

@@ -1,0 +1,26 @@
+name: Formal Wave 6
+on: {pull_request: {}, workflow_dispatch: {}}
+permissions: {contents: read}
+jobs:
+  formal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - name: Audit and execute proof
+        run: |
+          set -euo pipefail
+          python3 -m py_compile conformance/formal_wave6_model.py
+          python3 - <<'PY'
+          import ast,pathlib
+          t=ast.parse(pathlib.Path('conformance/formal_wave6_model.py').read_text()); assert any(isinstance(n,ast.Assert) for n in ast.walk(t))
+          banned={'eval','exec','compile','__import__','open'}; mods={'os','subprocess','socket','urllib','http','requests','shutil','tempfile'}
+          for n in ast.walk(t):
+            if isinstance(n,ast.Call) and isinstance(n.func,ast.Name): assert n.func.id not in banned,n.func.id
+            if isinstance(n,(ast.Import,ast.ImportFrom)):
+              x=[a.name.split('.')[0] for a in n.names] if isinstance(n,ast.Import) else [(n.module or '').split('.')[0]]; assert not set(x)&mods,x
+          PY
+          python3 -I conformance/formal_wave6_model.py >/tmp/a
+          python3 -I conformance/formal_wave6_model.py >/tmp/b
+          cmp /tmp/a /tmp/b && cat /tmp/a
