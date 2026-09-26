@@ -45,7 +45,7 @@ jobs:
               assert new not in text, f'lint expectation already present: {name}'
               path.write_text(text.replace(old, new, 1))
           PY
-          cargo fmt --all -- --check
+          cargo fmt --all
           cargo clippy --locked --all-targets -- -D warnings
       - name: Commit source-only repair
         run: |
