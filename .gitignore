@@ -39,3 +39,6 @@ sops-private*.txt
 # Sanctioned scratch locations - AGENTS.md requires both, trailing-slash form
 tmp/
 temp/
+
+# Machine-local agent instruction symlink (absolute path; never committed)
+.ores/
