@@ -1,0 +1,22 @@
+name: erp-db-idempotency source regression
+on:
+  pull_request:
+    paths:
+      - 'src/db.rs'
+      - 'src/api.rs'
+      - 'migrations/0009_erp_order_idempotency.sql'
+      - '.github/workflows/erp-db-idempotency-reference.yml'
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Execute exact checked-out regression
+        run: |
+          set -euo pipefail
+          cargo test --locked erp_key_is_one_bounded_header_not_an_arbitrary_string
