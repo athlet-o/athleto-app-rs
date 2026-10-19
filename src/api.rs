@@ -371,26 +371,17 @@ pub struct ApiOrderItem {
     pub qty: i32,
 }
 
-fn required_erp_idempotency_key(headers: &HeaderMap) -> Result<&str, Response> {
+fn required_erp_idempotency_key(headers: &HeaderMap) -> Result<&str, (StatusCode, &'static str)> {
     let all = headers.get_all("idempotency-key");
     let mut values = all.iter();
     let Some(first) = values.next() else {
-        return Err(error_response(
-            StatusCode::PRECONDITION_REQUIRED,
-            "Idempotency-Key is required",
-        ));
+        return Err((StatusCode::PRECONDITION_REQUIRED, "Idempotency-Key is required"));
     };
     if values.next().is_some() {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "duplicate Idempotency-Key",
-        ));
+        return Err((StatusCode::BAD_REQUEST, "duplicate Idempotency-Key"));
     }
     let Ok(key) = first.to_str() else {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid Idempotency-Key",
-        ));
+        return Err((StatusCode::BAD_REQUEST, "invalid Idempotency-Key"));
     };
     if key.is_empty()
         || key.len() > 128
@@ -398,10 +389,7 @@ fn required_erp_idempotency_key(headers: &HeaderMap) -> Result<&str, Response> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
     {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid Idempotency-Key",
-        ));
+        return Err((StatusCode::BAD_REQUEST, "invalid Idempotency-Key"));
     }
     Ok(key)
 }
@@ -424,7 +412,7 @@ pub async fn orders_create(
 
     let idempotency_key = match required_erp_idempotency_key(&headers) {
         Ok(key) => key,
-        Err(response) => return response,
+        Err((status, message)) => return error_response(status, message),
     };
     // Hash the client's *requested* logical mutation before mutable catalog
     // prices can change. The unique DB claim is the actual concurrency guard.
