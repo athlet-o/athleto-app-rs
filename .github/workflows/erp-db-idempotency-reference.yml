@@ -1,0 +1,56 @@
+name: erp-db-idempotency source regression
+on:
+  pull_request:
+    paths:
+      - 'src/db.rs'
+      - 'src/api.rs'
+      - 'tests/erp_idempotency_db.rs'
+      - 'migrations/0009_erp_order_idempotency.sql'
+      - '.github/workflows/erp-db-idempotency-reference.yml'
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Execute exact checked-out regression
+        run: |
+          set -euo pipefail
+          cargo test --locked erp_key_is_one_bounded_header_not_an_arbitrary_string
+  postgres-race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: athleto_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/athleto_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install reviewed CI database fixture
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS auth;" -c 'CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$;'
+          for sql in migrations/*.sql; do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql"
+          done
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM order_idempotency"
+      - name: Two independent PostgreSQL pools race same ERP key
+        run: |
+          set -euo pipefail
+          cargo test --locked --test erp_idempotency_db -- --ignored --nocapture

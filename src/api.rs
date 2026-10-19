@@ -371,6 +371,32 @@ pub struct ApiOrderItem {
     pub qty: i32,
 }
 
+fn required_erp_idempotency_key(headers: &HeaderMap) -> Result<&str, (StatusCode, &'static str)> {
+    let all = headers.get_all("idempotency-key");
+    let mut values = all.iter();
+    let Some(first) = values.next() else {
+        return Err((
+            StatusCode::PRECONDITION_REQUIRED,
+            "Idempotency-Key is required",
+        ));
+    };
+    if values.next().is_some() {
+        return Err((StatusCode::BAD_REQUEST, "duplicate Idempotency-Key"));
+    }
+    let Ok(key) = first.to_str() else {
+        return Err((StatusCode::BAD_REQUEST, "invalid Idempotency-Key"));
+    };
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err((StatusCode::BAD_REQUEST, "invalid Idempotency-Key"));
+    }
+    Ok(key)
+}
+
 /// POST /api/v1/orders -- place an order (the "850 in" path when an EDI
 /// provider webhook is mapped onto this endpoint).
 pub async fn orders_create(
@@ -386,6 +412,58 @@ pub async fn orders_create(
     let Some(pool) = state.pool.as_ref() else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "database not configured");
     };
+
+    let idempotency_key = match required_erp_idempotency_key(&headers) {
+        Ok(key) => key,
+        Err((status, message)) => return error_response(status, message),
+    };
+    // Hash the client's *requested* logical mutation before mutable catalog
+    // prices can change. The unique DB claim is the actual concurrency guard.
+    let request_digest = hash_key(
+        &serde_json::json!({
+            "version":1,
+            "kind":format!("{:?}",request.kind),
+            "frequency":format!("{:?}",request.frequency),
+            "po_number":request.po_number.as_deref(),
+            "items":request.items.iter().map(|item|json!({
+                "product_id":item.product_id,"slug":item.slug.as_deref(),"qty":item.qty
+            })).collect::<Vec<_>>()
+        })
+        .to_string(),
+    );
+
+    // A previously committed same-key/same-intent replay bypasses mutable
+    // catalog availability and returns the persisted order receipt verbatim.
+    // First-use races still serialize inside place_order_with_claim().
+    match db::erp_order_receipt(pool, user_id, idempotency_key, &request_digest).await {
+        Ok(Some(receipt)) => {
+            return (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": receipt.order_id,
+                    "status": "placed",
+                    "kind": request.kind.unwrap_or(db::OrderKind::OneTime).as_str(),
+                    "po_number": receipt.po_number,
+                    "total_cents": receipt.total_cents,
+                })),
+            )
+                .into_response()
+        }
+        Ok(None) => {}
+        Err(db::OrderError::IdempotencyConflict) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "Idempotency-Key reused with different order intent",
+            )
+        }
+        Err(err) => {
+            tracing::error!(error=?err,"ERP replay lookup failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ERP replay lookup failed",
+            );
+        }
+    }
 
     if request.items.is_empty() {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "items must not be empty");
@@ -442,7 +520,7 @@ pub async fn orders_create(
         });
     }
 
-    match db::place_order(
+    match db::place_order_with_claim(
         pool,
         user_id,
         kind,
@@ -456,22 +534,37 @@ pub async fn orders_create(
             .filter(|po| !po.is_empty()),
         &lines,
         None,
+        Some((idempotency_key, request_digest.as_str())),
     )
     .await
     {
         Ok(order_id) => {
-            let total: i64 = lines
-                .iter()
-                .map(|line| i64::from(line.unit_price_cents) * i64::from(line.qty))
-                .sum();
+            // Even a racing same-key loser returns the committed receipt,
+            // never pricing reconstructed from the current mutable catalog.
+            let receipt = match db::erp_order_receipt(
+                pool,
+                user_id,
+                idempotency_key,
+                &request_digest,
+            )
+            .await
+            {
+                Ok(Some(receipt)) if receipt.order_id == order_id => receipt,
+                Ok(_) | Err(_) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "missing committed ERP order receipt",
+                    )
+                }
+            };
             (
                 StatusCode::CREATED,
                 Json(json!({
-                    "id": order_id,
+                    "id": receipt.order_id,
                     "status": "placed",
                     "kind": kind.as_str(),
-                    "po_number": request.po_number,
-                    "total_cents": total,
+                    "po_number": receipt.po_number,
+                    "total_cents": receipt.total_cents,
                 })),
             )
                 .into_response()
@@ -491,6 +584,10 @@ pub async fn orders_create(
             })),
         )
             .into_response(),
+        Err(db::OrderError::IdempotencyConflict) => error_response(
+            StatusCode::CONFLICT,
+            "Idempotency-Key reused with different order intent",
+        ),
         Err(db::OrderError::AlreadyPlaced) => {
             // Not reachable on the API path (no cart_id), but keep the match
             // total and fail safe if that ever changes.
@@ -519,6 +616,22 @@ mod tests {
         assert_eq!(hash_key("abc"), hash_key("abc"));
         assert_ne!(hash_key("abc"), hash_key("abd"));
         assert_eq!(hash_key(VECTOR_INPUT).len(), 64);
+    }
+
+    #[test]
+    fn erp_key_is_one_bounded_header_not_an_arbitrary_string() {
+        let mut headers = HeaderMap::new();
+        assert!(required_erp_idempotency_key(&headers).is_err());
+        headers.append("idempotency-key", "order-123".parse().unwrap());
+        assert!(matches!(
+            required_erp_idempotency_key(&headers),
+            Ok("order-123")
+        ));
+        headers.append("idempotency-key", "order-123".parse().unwrap());
+        assert!(required_erp_idempotency_key(&headers).is_err());
+        let mut long = HeaderMap::new();
+        long.insert("idempotency-key", "A".repeat(129).parse().unwrap());
+        assert!(required_erp_idempotency_key(&long).is_err());
     }
 
     #[test]
