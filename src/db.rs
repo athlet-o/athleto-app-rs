@@ -1267,6 +1267,7 @@ pub enum OrderError {
     /// items were consumed under the cart lock). Idempotent no-op — no new order
     /// was created, so callers should treat it like a benign "already placed".
     AlreadyPlaced,
+    IdempotencyConflict,
     Db(DbErr),
 }
 
@@ -1292,10 +1293,49 @@ pub async fn place_order(
     lines: &[NewOrderLine],
     cart_id: Option<Uuid>,
 ) -> Result<Uuid, OrderError> {
+    place_order_with_claim(conn,user_id,kind,frequency,channel,ship_method,po_number,lines,cart_id,None).await
+}
+
+/// An ERP claim is claimed and completed in the *same transaction* as stock
+/// decrement and order creation. A concurrent loser waits on the unique row.
+#[allow(clippy::too_many_arguments)]
+pub async fn place_order_with_claim(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+    kind: OrderKind,
+    frequency: Option<OrderFrequency>,
+    channel: OrderChannel,
+    ship_method: ShipMethod,
+    po_number: Option<&str>,
+    lines: &[NewOrderLine],
+    cart_id: Option<Uuid>,
+    claim: Option<(&str,&str)>,
+) -> Result<Uuid, OrderError> {
     let mut sorted: Vec<NewOrderLine> = lines.to_vec();
     sorted.sort_by_key(|line| line.product_id);
 
     let tx = conn.begin().await.map_err(OrderError::Db)?;
+    if let Some((key,digest)) = claim {
+        let inserted=tx.execute(stmt(
+            "INSERT INTO order_idempotency (user_id, request_key, request_digest) VALUES ($1,$2,$3) ON CONFLICT (user_id,request_key) DO NOTHING",
+            [user_id.into(), key.to_owned().into(), digest.to_owned().into()]
+        )).await?;
+        if inserted.rows_affected()==0 {
+            let row=tx.query_one(stmt(
+                "SELECT request_digest,order_id FROM order_idempotency WHERE user_id=$1 AND request_key=$2 FOR UPDATE",
+                [user_id.into(),key.to_owned().into()]
+            )).await?.ok_or_else(||OrderError::Db(DbErr::RecordNotFound("missing ERP idempotency claim".to_owned())))?;
+            let existing_digest:String=row.try_get("","request_digest")?;
+            if existing_digest!=digest {
+                tx.rollback().await?;
+                return Err(OrderError::IdempotencyConflict);
+            }
+            let existing_order:Option<Uuid>=row.try_get("","order_id")?;
+            let order_id=existing_order.ok_or_else(||OrderError::Db(DbErr::RecordNotFound("incomplete ERP claim".to_owned())))?;
+            tx.commit().await?;
+            return Ok(order_id);
+        }
+    }
 
     // Idempotency for the cart path: serialize concurrent checkouts of the same
     // cart on the cart row, then confirm the cart still has items *inside* the
@@ -1428,6 +1468,12 @@ pub async fn place_order(
             [cart_id.into()],
         ))
         .await?;
+    }
+    if let Some((key,_))=claim {
+        tx.execute(stmt(
+            "UPDATE order_idempotency SET order_id=$3 WHERE user_id=$1 AND request_key=$2",
+            [user_id.into(),key.to_owned().into(),order_id.into()]
+        )).await?;
     }
     tx.commit().await.map_err(OrderError::Db)?;
     Ok(order_id)
