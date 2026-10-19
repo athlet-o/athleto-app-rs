@@ -375,7 +375,10 @@ fn required_erp_idempotency_key(headers: &HeaderMap) -> Result<&str, (StatusCode
     let all = headers.get_all("idempotency-key");
     let mut values = all.iter();
     let Some(first) = values.next() else {
-        return Err((StatusCode::PRECONDITION_REQUIRED, "Idempotency-Key is required"));
+        return Err((
+            StatusCode::PRECONDITION_REQUIRED,
+            "Idempotency-Key is required",
+        ));
     };
     if values.next().is_some() {
         return Err((StatusCode::BAD_REQUEST, "duplicate Idempotency-Key"));
