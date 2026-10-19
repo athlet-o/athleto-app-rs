@@ -1297,16 +1297,20 @@ pub async fn erp_order_receipt(
         "SELECT request_digest, order_id FROM order_idempotency WHERE user_id=$1 AND request_key=$2",
         [user_id.into(), key.to_owned().into()],
     )).await?;
-    let Some(row) = row else { return Ok(None); };
+    let Some(row) = row else {
+        return Ok(None);
+    };
     let committed_digest: String = row.try_get("", "request_digest")?;
     if committed_digest != digest {
         return Err(OrderError::IdempotencyConflict);
     }
     let order_id: Uuid = row.try_get("", "order_id")?;
-    let order = conn.query_one(stmt(
-        "SELECT total_cents,po_number FROM orders WHERE id=$1 AND user_id=$2",
-        [order_id.into(), user_id.into()],
-    )).await?
+    let order = conn
+        .query_one(stmt(
+            "SELECT total_cents,po_number FROM orders WHERE id=$1 AND user_id=$2",
+            [order_id.into(), user_id.into()],
+        ))
+        .await?
         .ok_or_else(|| OrderError::Db(DbErr::RecordNotFound("ERP replay order missing".into())))?;
     Ok(Some(ErpOrderReceipt {
         order_id,
