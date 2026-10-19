@@ -8,19 +8,26 @@ use uuid::Uuid;
 fn stmt(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
     Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
 }
-async fn stock(conn:&sea_orm::DatabaseConnection,pid:i64)->i32{
-    conn.query_one(stmt("SELECT on_hand FROM inventory WHERE product_id=$1",vec![pid.into()]))
-        .await.unwrap().unwrap().try_get("", "on_hand").unwrap()
+async fn stock(conn: &sea_orm::DatabaseConnection, pid: i64) -> i32 {
+    conn.query_one(stmt(
+        "SELECT on_hand FROM inventory WHERE product_id=$1",
+        vec![pid.into()],
+    ))
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "on_hand")
+    .unwrap()
 }
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL and migrated disposable PostgreSQL database"]
 async fn parallel_erp_retries_commit_one_order_and_one_stock_decrement() {
-    let url=std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    let a=db::build_pool(&url).await.expect("a");
-    let b=db::build_pool(&url).await.expect("b");
-    let user=Uuid::new_v4();
-    let slug=format!("erp-test-{}",Uuid::new_v4().simple());
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let a = db::build_pool(&url).await.expect("a");
+    let b = db::build_pool(&url).await.expect("b");
+    let user = Uuid::new_v4();
+    let slug = format!("erp-test-{}", Uuid::new_v4().simple());
     let pid:i64=a.query_one(stmt(
         "INSERT INTO products (slug,name,description,format,calories,protein_g,price_cents) VALUES ($1,'ERP race','test','cup',100,20,500) RETURNING id",
         vec![slug.into()])).await.unwrap().unwrap().try_get("","id").unwrap();
