@@ -1277,6 +1277,44 @@ impl From<DbErr> for OrderError {
     }
 }
 
+/// Only DB-committed results count as an ERP idempotency replay. The row is
+/// keyed by authenticated customer and request key, and the immutable request
+/// digest prevents the same key authorizing a different order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErpOrderReceipt {
+    pub order_id: Uuid,
+    pub total_cents: i64,
+    pub po_number: Option<String>,
+}
+
+pub async fn erp_order_receipt(
+    conn: &DatabaseConnection,
+    user_id: Uuid,
+    key: &str,
+    digest: &str,
+) -> Result<Option<ErpOrderReceipt>, OrderError> {
+    let row = conn.query_one(stmt(
+        "SELECT request_digest, order_id FROM order_idempotency WHERE user_id=$1 AND request_key=$2",
+        [user_id.into(), key.to_owned().into()],
+    )).await?;
+    let Some(row) = row else { return Ok(None); };
+    let committed_digest: String = row.try_get("", "request_digest")?;
+    if committed_digest != digest {
+        return Err(OrderError::IdempotencyConflict);
+    }
+    let order_id: Uuid = row.try_get("", "order_id")?;
+    let order = conn.query_one(stmt(
+        "SELECT total_cents,po_number FROM orders WHERE id=$1 AND user_id=$2",
+        [order_id.into(), user_id.into()],
+    )).await?
+        .ok_or_else(|| OrderError::Db(DbErr::RecordNotFound("ERP replay order missing".into())))?;
+    Ok(Some(ErpOrderReceipt {
+        order_id,
+        total_cents: order.try_get("", "total_cents")?,
+        po_number: order.try_get("", "po_number")?,
+    }))
+}
+
 /// Place an order, decrementing stock and consuming the cart's holds in the
 /// same transaction. Inventory rows are locked in product-id order so
 /// concurrent checkouts can't deadlock. Lines whose products are untracked
