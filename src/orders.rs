@@ -255,6 +255,11 @@ pub async fn checkout(
             let _ = state.cart_events.send(cart_id);
             Ok((jar, Redirect::to("/orders?placed=1")).into_response())
         }
+        Err(db::OrderError::IdempotencyConflict) => {
+            // The storefront never carries an ERP claim, but this branch
+            // remains exhaustive and fail-closed if a future caller changes.
+            Ok((axum::http::StatusCode::CONFLICT, "order idempotency conflict").into_response())
+        }
         Err(db::OrderError::Db(err)) => Err(AppError::Db(err)),
     }
 }
