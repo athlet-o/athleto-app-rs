@@ -432,6 +432,30 @@ pub async fn orders_create(
         .to_string(),
     );
 
+    // A previously committed same-key/same-intent replay bypasses mutable
+    // catalog availability and returns the persisted order receipt verbatim.
+    // First-use races still serialize inside place_order_with_claim().
+    match db::erp_order_receipt(pool, user_id, idempotency_key, &request_digest).await {
+        Ok(Some(receipt)) => return (
+            StatusCode::CREATED,
+            Json(json!({
+                "id": receipt.order_id,
+                "status": "placed",
+                "kind": request.kind.unwrap_or(db::OrderKind::OneTime).as_str(),
+                "po_number": receipt.po_number,
+                "total_cents": receipt.total_cents,
+            })),
+        ).into_response(),
+        Ok(None) => {}
+        Err(db::OrderError::IdempotencyConflict) => return error_response(
+            StatusCode::CONFLICT, "Idempotency-Key reused with different order intent"
+        ),
+        Err(err) => {
+            tracing::error!(error=?err,"ERP replay lookup failed");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR,"ERP replay lookup failed");
+        }
+    }
+
     if request.items.is_empty() {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "items must not be empty");
     }
@@ -506,21 +530,24 @@ pub async fn orders_create(
     .await
     {
         Ok(order_id) => {
-            let total: i64 = lines
-                .iter()
-                .map(|line| i64::from(line.unit_price_cents) * i64::from(line.qty))
-                .sum();
+            // Even a racing same-key loser returns the committed receipt,
+            // never pricing reconstructed from the current mutable catalog.
+            let receipt=match db::erp_order_receipt(pool,user_id,idempotency_key,&request_digest).await {
+                Ok(Some(receipt)) if receipt.order_id==order_id => receipt,
+                Ok(_) | Err(_) => return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,"missing committed ERP order receipt"
+                ),
+            };
             (
                 StatusCode::CREATED,
                 Json(json!({
-                    "id": order_id,
+                    "id": receipt.order_id,
                     "status": "placed",
                     "kind": kind.as_str(),
-                    "po_number": request.po_number,
-                    "total_cents": total,
+                    "po_number": receipt.po_number,
+                    "total_cents": receipt.total_cents,
                 })),
-            )
-                .into_response()
+            ).into_response()
         }
         Err(db::OrderError::Insufficient(shortages)) => (
             StatusCode::CONFLICT,
