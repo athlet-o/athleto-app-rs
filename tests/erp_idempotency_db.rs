@@ -30,10 +30,14 @@ async fn parallel_erp_retries_commit_one_order_and_one_stock_decrement() {
     let lines=[NewOrderLine{product_id:pid,qty:2,unit_price_cents:500}];
     let key=format!("erp-race-{}",Uuid::new_v4().simple());
     let digest="a".repeat(64);
-    let place=|conn:&sea_orm::DatabaseConnection| db::place_order_with_claim(
-        conn,user,OrderKind::OneTime,None,OrderChannel::B2bApi,ShipMethod::Freight,
-        Some("PO-ABC"),&lines,None,Some((&key,&digest)));
-    let (left,right)=tokio::join!(place(&a),place(&b));
+    let (left,right)=tokio::join!(
+        db::place_order_with_claim(&a,user,OrderKind::OneTime,None,
+            OrderChannel::B2bApi,ShipMethod::Freight,Some("PO-ABC"),&lines,None,
+            Some((&key,&digest))),
+        db::place_order_with_claim(&b,user,OrderKind::OneTime,None,
+            OrderChannel::B2bApi,ShipMethod::Freight,Some("PO-ABC"),&lines,None,
+            Some((&key,&digest)))
+    );
     let order=left.expect("first admitted");
     assert_eq!(right.expect("concurrent identical replay"),order);
     assert_eq!(stock(&a,pid).await,8,"exactly one stock decrement");
