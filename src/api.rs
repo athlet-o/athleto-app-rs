@@ -371,6 +371,24 @@ pub struct ApiOrderItem {
     pub qty: i32,
 }
 
+fn required_erp_idempotency_key(headers:&HeaderMap)->Result<&str,Response>{
+    let all=headers.get_all("idempotency-key");
+    let mut values=all.iter();
+    let Some(first)=values.next() else {
+        return Err(error_response(StatusCode::PRECONDITION_REQUIRED,"Idempotency-Key is required"));
+    };
+    if values.next().is_some(){
+        return Err(error_response(StatusCode::BAD_REQUEST,"duplicate Idempotency-Key"));
+    }
+    let Ok(key)=first.to_str() else{
+        return Err(error_response(StatusCode::BAD_REQUEST,"invalid Idempotency-Key"));
+    };
+    if key.is_empty()||key.len()>128||!key.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'|b'.'|b':')){
+        return Err(error_response(StatusCode::BAD_REQUEST,"invalid Idempotency-Key"));
+    }
+    Ok(key)
+}
+
 /// POST /api/v1/orders -- place an order (the "850 in" path when an EDI
 /// provider webhook is mapped onto this endpoint).
 pub async fn orders_create(
@@ -386,6 +404,21 @@ pub async fn orders_create(
     let Some(pool) = state.pool.as_ref() else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "database not configured");
     };
+
+    let idempotency_key=match required_erp_idempotency_key(&headers){
+        Ok(key)=>key,Err(response)=>return response,
+    };
+    // Hash the client's *requested* logical mutation before mutable catalog
+    // prices can change. The unique DB claim is the actual concurrency guard.
+    let request_digest=hash_key(&serde_json::json!({
+        "version":1,
+        "kind":format!("{:?}",request.kind),
+        "frequency":format!("{:?}",request.frequency),
+        "po_number":request.po_number.as_deref(),
+        "items":request.items.iter().map(|item|json!({
+            "product_id":item.product_id,"slug":item.slug.as_deref(),"qty":item.qty
+        })).collect::<Vec<_>>()
+    }).to_string());
 
     if request.items.is_empty() {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "items must not be empty");
@@ -442,7 +475,7 @@ pub async fn orders_create(
         });
     }
 
-    match db::place_order(
+    match db::place_order_with_claim(
         pool,
         user_id,
         kind,
@@ -456,6 +489,7 @@ pub async fn orders_create(
             .filter(|po| !po.is_empty()),
         &lines,
         None,
+        Some((idempotency_key,request_digest.as_str())),
     )
     .await
     {
@@ -491,6 +525,9 @@ pub async fn orders_create(
             })),
         )
             .into_response(),
+        Err(db::OrderError::IdempotencyConflict) => {
+            error_response(StatusCode::CONFLICT,"Idempotency-Key reused with different order intent")
+        }
         Err(db::OrderError::AlreadyPlaced) => {
             // Not reachable on the API path (no cart_id), but keep the match
             // total and fail safe if that ever changes.
@@ -519,6 +556,19 @@ mod tests {
         assert_eq!(hash_key("abc"), hash_key("abc"));
         assert_ne!(hash_key("abc"), hash_key("abd"));
         assert_eq!(hash_key(VECTOR_INPUT).len(), 64);
+    }
+
+    #[test]
+    fn erp_key_is_one_bounded_header_not_an_arbitrary_string() {
+        let mut headers=HeaderMap::new();
+        assert!(required_erp_idempotency_key(&headers).is_err());
+        headers.append("idempotency-key","order-123".parse().unwrap());
+        assert!(matches!(required_erp_idempotency_key(&headers),Ok("order-123")));
+        headers.append("idempotency-key","order-123".parse().unwrap());
+        assert!(required_erp_idempotency_key(&headers).is_err());
+        let mut long=HeaderMap::new();
+        long.insert("idempotency-key","A".repeat(129).parse().unwrap());
+        assert!(required_erp_idempotency_key(&long).is_err());
     }
 
     #[test]
