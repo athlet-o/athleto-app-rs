@@ -436,23 +436,32 @@ pub async fn orders_create(
     // catalog availability and returns the persisted order receipt verbatim.
     // First-use races still serialize inside place_order_with_claim().
     match db::erp_order_receipt(pool, user_id, idempotency_key, &request_digest).await {
-        Ok(Some(receipt)) => return (
-            StatusCode::CREATED,
-            Json(json!({
-                "id": receipt.order_id,
-                "status": "placed",
-                "kind": request.kind.unwrap_or(db::OrderKind::OneTime).as_str(),
-                "po_number": receipt.po_number,
-                "total_cents": receipt.total_cents,
-            })),
-        ).into_response(),
+        Ok(Some(receipt)) => {
+            return (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": receipt.order_id,
+                    "status": "placed",
+                    "kind": request.kind.unwrap_or(db::OrderKind::OneTime).as_str(),
+                    "po_number": receipt.po_number,
+                    "total_cents": receipt.total_cents,
+                })),
+            )
+                .into_response()
+        }
         Ok(None) => {}
-        Err(db::OrderError::IdempotencyConflict) => return error_response(
-            StatusCode::CONFLICT, "Idempotency-Key reused with different order intent"
-        ),
+        Err(db::OrderError::IdempotencyConflict) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "Idempotency-Key reused with different order intent",
+            )
+        }
         Err(err) => {
             tracing::error!(error=?err,"ERP replay lookup failed");
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR,"ERP replay lookup failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ERP replay lookup failed",
+            );
         }
     }
 
@@ -532,11 +541,21 @@ pub async fn orders_create(
         Ok(order_id) => {
             // Even a racing same-key loser returns the committed receipt,
             // never pricing reconstructed from the current mutable catalog.
-            let receipt=match db::erp_order_receipt(pool,user_id,idempotency_key,&request_digest).await {
-                Ok(Some(receipt)) if receipt.order_id==order_id => receipt,
-                Ok(_) | Err(_) => return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,"missing committed ERP order receipt"
-                ),
+            let receipt = match db::erp_order_receipt(
+                pool,
+                user_id,
+                idempotency_key,
+                &request_digest,
+            )
+            .await
+            {
+                Ok(Some(receipt)) if receipt.order_id == order_id => receipt,
+                Ok(_) | Err(_) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "missing committed ERP order receipt",
+                    )
+                }
             };
             (
                 StatusCode::CREATED,
@@ -547,7 +566,8 @@ pub async fn orders_create(
                     "po_number": receipt.po_number,
                     "total_cents": receipt.total_cents,
                 })),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(db::OrderError::Insufficient(shortages)) => (
             StatusCode::CONFLICT,
