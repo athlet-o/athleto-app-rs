@@ -258,7 +258,11 @@ pub async fn checkout(
         Err(db::OrderError::IdempotencyConflict) => {
             // The storefront never carries an ERP claim, but this branch
             // remains exhaustive and fail-closed if a future caller changes.
-            Ok((axum::http::StatusCode::CONFLICT, "order idempotency conflict").into_response())
+            Ok((
+                axum::http::StatusCode::CONFLICT,
+                "order idempotency conflict",
+            )
+                .into_response())
         }
         Err(db::OrderError::Db(err)) => Err(AppError::Db(err)),
     }
